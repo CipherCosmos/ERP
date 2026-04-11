@@ -214,7 +214,6 @@ export default function Billing() {
           rate,
           discount: item.discount,
           total: rate * item.quantity,
-          batch_no: 'DEFAULT',
         };
       }),
     };

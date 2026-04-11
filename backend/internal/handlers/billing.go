@@ -25,7 +25,7 @@ func NewInvoiceHandler() *InvoiceHandler {
 // the batch and unit cost_price actually consumed for COGS snapshotting on invoice_lines.
 func deductStockFromSale(tx *sql.Tx, productID, storeID, batchHint string, qty float64) (actualBatch string, unitCost float64, err error) {
 	if qty <= 0 {
-		return "DEFAULT", 0, nil
+		return "", 0, nil
 	}
 	if batchHint != "" && batchHint != "DEFAULT" {
 		var cp float64

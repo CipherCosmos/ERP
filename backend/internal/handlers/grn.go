@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gbos/internal/db"
+	"gbos/internal/middleware"
 	"gbos/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,7 +21,6 @@ func NewGRNHandler() *GRNHandler {
 type CreateGRNRequest struct {
 	POID         string           `json:"po_id" binding:"required"`
 	ReceivedDate string           `json:"received_date" binding:"required"`
-	ReceivedBy   string           `json:"received_by" binding:"required"`
 	Notes        string           `json:"notes"`
 	Items        []GRNItemRequest `json:"items" binding:"required"`
 }
@@ -55,6 +55,16 @@ func (h *GRNHandler) Create(c *gin.Context) {
 		abortStoreMismatch(c)
 		return
 	}
+	uid := middleware.GetUserID(c)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
+		return
+	}
+	receivedBy := uid
+	var uname string
+	if err := db.DB.QueryRow(`SELECT username FROM users WHERE id = ?`, uid).Scan(&uname); err == nil && uname != "" {
+		receivedBy = uname
+	}
 
 	tx, err := db.DB.Begin()
 	if err != nil {
@@ -65,7 +75,7 @@ func (h *GRNHandler) Create(c *gin.Context) {
 	grnID := uuid.New().String()
 	_, err = tx.Exec(`INSERT INTO goods_receipts (id, po_id, received_date, received_by, notes)
 		VALUES (?, ?, ?, ?, ?)`,
-		grnID, req.POID, req.ReceivedDate, req.ReceivedBy, req.Notes)
+		grnID, req.POID, req.ReceivedDate, receivedBy, req.Notes)
 	if err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create GRN"})
@@ -94,7 +104,8 @@ func (h *GRNHandler) Create(c *gin.Context) {
 		}
 
 		var costPrice float64
-		tx.QueryRow(`SELECT cost_price FROM product_prices WHERE product_id = ? LIMIT 1`, item.ProductID).Scan(&costPrice)
+		_ = tx.QueryRow(`SELECT COALESCE(cost_price, 0) FROM product_prices WHERE product_id = ? AND store_id = ?`,
+			item.ProductID, poStore).Scan(&costPrice)
 
 		_, err = tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, expiry_date, cost_price)
 			VALUES (?, ?, (SELECT store_id FROM purchase_orders WHERE id = ?), ?, ?, NULL, ?)`,
@@ -118,9 +129,9 @@ func (h *GRNHandler) Create(c *gin.Context) {
 	var pendingCount int
 	tx.QueryRow(`SELECT COUNT(*) FROM purchase_items WHERE po_id = ? AND received_qty < quantity`, req.POID).Scan(&pendingCount)
 	if pendingCount == 0 {
-		tx.Exec(`UPDATE purchase_orders SET status = 'completed' WHERE id = ?`, req.POID)
+		_, _ = tx.Exec(`UPDATE purchase_orders SET status = 'received' WHERE id = ?`, req.POID)
 	} else {
-		tx.Exec(`UPDATE purchase_orders SET status = 'partial' WHERE id = ?`, req.POID)
+		_, _ = tx.Exec(`UPDATE purchase_orders SET status = 'partial' WHERE id = ?`, req.POID)
 	}
 
 	tx.Commit()

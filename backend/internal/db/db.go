@@ -522,17 +522,17 @@ func seedDefaults() error {
 		return err
 	}
 
-	demo := []struct {
+	seedProducts := []struct {
 		name    string
 		barcode string
 		gst     float64
 		sell    float64
 	}{
-		{"Demo Atta 1kg", "8901001100001", 5, 55},
-		{"Demo Sugar 1kg", "8901001100002", 5, 45},
-		{"Demo Sunflower Oil 1L", "8901001100003", 5, 180},
+		{"Wheat Flour 1kg", "8901001100001", 5, 55},
+		{"Sugar 1kg", "8901001100002", 5, 45},
+		{"Sunflower Oil 1L", "8901001100003", 5, 180},
 	}
-	for _, dp := range demo {
+	for _, dp := range seedProducts {
 		pid := uuid.New().String()
 		_, err = DB.Exec(`INSERT INTO products (id, name, category_id, barcode, uom_id, base_unit_qty, gst_rate, allow_decimal, min_stock) VALUES (?,?,?,?,?,?,?,?,?)`,
 			pid, dp.name, catID, dp.barcode, uomNos, 1, dp.gst, 1, 2)
@@ -547,7 +547,7 @@ func seedDefaults() error {
 		}
 		stockID := uuid.New().String()
 		_, err = DB.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price) VALUES (?,?,?,?,?,?)`,
-			stockID, pid, storeID, "DEMO-BATCH-1", 500, dp.sell*0.75)
+			stockID, pid, storeID, "OPENING-1", 500, dp.sell*0.75)
 		if err != nil {
 			return err
 		}
@@ -570,20 +570,20 @@ func seedDefaults() error {
 	}
 
 	custID := uuid.New().String()
-	_, err = DB.Exec(`INSERT INTO customers (id, name, phone, credit_limit, is_wholesale, store_id) VALUES (?, 'Demo Wholesale Mart', '9990001111', 50000, 1, ?)`,
+	_, err = DB.Exec(`INSERT INTO customers (id, name, phone, credit_limit, is_wholesale, store_id) VALUES (?, 'Wholesale Account', '9990001111', 50000, 1, ?)`,
 		custID, storeID)
 	if err != nil {
 		return err
 	}
 
 	vendID := uuid.New().String()
-	_, err = DB.Exec(`INSERT INTO vendors (id, name, phone, gstin, state, credit_days, credit_limit) VALUES (?, 'Demo Supplier Co', '9888877776', '27AAAAA0000A1Z5', 'KA', 15, 100000)`,
+	_, err = DB.Exec(`INSERT INTO vendors (id, name, phone, gstin, state, credit_days, credit_limit) VALUES (?, 'Default Supplier', '9888877776', '27AAAAA0000A1Z5', 'KA', 15, 100000)`,
 		vendID)
 	if err != nil {
 		return err
 	}
 
-	log.Println("gbos: seeded demo data — admin/admin123, cashier/cashier123, helper/helper123; barcodes 8901001100001–003; Demo Wholesale Mart (credit/wholesale)")
+	log.Println("gbos: first-run seed — store + catalog + 3 products (barcodes 8901001100001–003), Wholesale Account, Default Supplier; logins admin/admin123, cashier/cashier123, helper/helper123")
 	return nil
 }
 

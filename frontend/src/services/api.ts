@@ -161,6 +161,34 @@ export const analyticsApi = {
 
 export const purchaseApi = {
   list: (params: { store_id: string; status?: string }) => api.get('/purchases', { params }),
+  get: (id: string) => api.get(`/purchases/${id}`),
+  create: (data: {
+    store_id: string;
+    vendor_id: string;
+    order_date: string;
+    expected_date?: string;
+    items: { product_id: string; quantity: number; uom_id?: string; rate: number; discount?: number; total?: number }[];
+  }) => api.post('/purchases', data),
+  receive: (data: {
+    po_id: string;
+    store_id: string;
+    items: { product_id: string; quantity: number; batch_no?: string; cost_price?: number }[];
+  }) => api.post('/purchases/receive', data),
+  cancel: (id: string) => api.post(`/purchases/cancel/${id}`),
+};
+
+export const syncApi = {
+  pending: (storeId: string) => api.get('/sync/pending', { params: { store_id: storeId } }),
+  markSynced: (record_ids: string[]) => api.post('/sync/mark', { record_ids }),
+  push: (data: {
+    table_name: string;
+    record_id: string;
+    operation: string;
+    store_id: string;
+    data?: unknown;
+  }) => api.post('/sync/push', data),
+  resolveConflict: (data: { table_name: string; record_id: string; resolution: 'local_wins' | 'remote_wins' }) =>
+    api.post('/sync/conflict', data),
 };
 
 export const expiryApi = {
@@ -172,8 +200,19 @@ export const expiryApi = {
 export const grnApi = {
   list: (params: { store_id: string; po_id?: string }) => api.get('/grn', { params }),
   get: (id: string) => api.get(`/grn/${id}`),
-  create: (data: { po_id: string; received_date: string; received_by: string; notes?: string; items: { product_id: string; ordered_qty?: number; received_qty: number; accepted_qty?: number; rejected_qty?: number; reason?: string }[] }) =>
-    api.post('/grn', data),
+  create: (data: {
+    po_id: string;
+    received_date: string;
+    notes?: string;
+    items: {
+      product_id: string;
+      ordered_qty?: number;
+      received_qty: number;
+      accepted_qty?: number;
+      rejected_qty?: number;
+      reason?: string;
+    }[];
+  }) => api.post('/grn', data),
 };
 
 export const reportApi = {

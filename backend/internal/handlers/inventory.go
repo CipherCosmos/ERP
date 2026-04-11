@@ -352,7 +352,24 @@ func (h *SyncHandler) MarkSynced(c *gin.Context) {
 
 	now := time.Now().Format("2006-01-02 15:04:05")
 	for _, id := range req.RecordIDs {
-		db.DB.Exec(`UPDATE sync_records SET status = 'synced', synced_at = ? WHERE id = ?`, now, id)
+		var sid string
+		err := db.DB.QueryRow(`SELECT store_id FROM sync_records WHERE id = ?`, id).Scan(&sid)
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown sync record: " + id})
+			return
+		}
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !sessionMayAccessStore(c, sid) {
+			abortStoreMismatch(c)
+			return
+		}
+		if _, err := db.DB.Exec(`UPDATE sync_records SET status = 'synced', synced_at = ? WHERE id = ?`, now, id); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
@@ -368,6 +385,10 @@ func (h *SyncHandler) Push(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -394,11 +415,29 @@ func (h *SyncHandler) ConflictResolution(c *gin.Context) {
 		return
 	}
 
+	var sid string
+	err := db.DB.QueryRow(`
+		SELECT store_id FROM sync_records
+		WHERE table_name = ? AND record_id = ?
+		ORDER BY created_at DESC LIMIT 1`, req.TableName, req.RecordID).Scan(&sid)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "sync record not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, sid) {
+		abortStoreMismatch(c)
+		return
+	}
+
 	if req.Resolution == "local_wins" {
-		db.DB.Exec(`UPDATE sync_records SET status = 'pending' 
+		_, _ = db.DB.Exec(`UPDATE sync_records SET status = 'pending' 
 			WHERE table_name = ? AND record_id = ?`, req.TableName, req.RecordID)
 	} else {
-		db.DB.Exec(`DELETE FROM sync_records 
+		_, _ = db.DB.Exec(`DELETE FROM sync_records 
 			WHERE table_name = ? AND record_id = ?`, req.TableName, req.RecordID)
 	}
 

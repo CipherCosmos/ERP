@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"math"
 	"net/http"
 	"time"
 
@@ -236,7 +237,8 @@ type PurchaseItemReq struct {
 	UOMID     string  `json:"uom_id"`
 	Rate      float64 `json:"rate" binding:"required"`
 	Discount  float64 `json:"discount"`
-	Total     float64 `json:"total" binding:"required"`
+	// Total optional: when sent, must match server-computed line total (taxable + GST) within tolerance.
+	Total float64 `json:"total"`
 }
 
 func (h *PurchaseHandler) Create(c *gin.Context) {
@@ -259,33 +261,66 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	poID := uuid.New().String()
 	poNo := "PO-" + time.Now().Format("20060102150405")
 
-	var subtotal, totalGST, total float64
-	for _, item := range req.Items {
-		subtotal += item.Total - item.Discount
-		totalGST += item.Total * 0.05
-		total += item.Total - item.Discount
+	type lineCalc struct {
+		item              PurchaseItemReq
+		taxable, cgst, sgst, lineTotal float64
 	}
-	cgst := totalGST / 2
-	sgst := totalGST / 2
+	lines := make([]lineCalc, 0, len(req.Items))
+	var subtotal, sumCgst, sumSgst, grandTotal float64
+
+	for _, item := range req.Items {
+		var gstRate float64
+		qerr := tx.QueryRow(`SELECT COALESCE(gst_rate, 0) FROM products WHERE id = ? AND is_active = 1`, item.ProductID).Scan(&gstRate)
+		if qerr == sql.ErrNoRows {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or inactive product: " + item.ProductID})
+			return
+		}
+		if qerr != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": qerr.Error()})
+			return
+		}
+		taxable := item.Rate*item.Quantity - item.Discount
+		if taxable < 0 {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "negative line amount after discount"})
+			return
+		}
+		gst := taxable * gstRate / 100.0
+		lc := gst / 2
+		lineTotal := taxable + gst
+		if item.Total > 0 && math.Abs(item.Total-lineTotal) > 0.05 {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "line total does not match rate, quantity, discount, and product GST"})
+			return
+		}
+		subtotal += taxable
+		sumCgst += lc
+		sumSgst += lc
+		grandTotal += lineTotal
+		lines = append(lines, lineCalc{item, taxable, lc, lc, lineTotal})
+	}
 
 	_, err = tx.Exec(`INSERT INTO purchase_orders 
 		(id, po_no, store_id, vendor_id, order_date, expected_date, sub_total, cgst, sgst, igst, total, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'pending')`,
 		poID, poNo, req.StoreID, req.VendorID, req.OrderDate, req.ExpectedDate,
-		subtotal, cgst, sgst, total)
+		subtotal, sumCgst, sumSgst, grandTotal)
 	if err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	for _, item := range req.Items {
+	for _, ln := range lines {
+		item := ln.item
 		itemID := uuid.New().String()
 		_, err = tx.Exec(`INSERT INTO purchase_items 
 			(id, po_id, product_id, quantity, uom_id, rate, discount, cgst, sgst, igst, total)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
 			itemID, poID, item.ProductID, item.Quantity, item.UOMID,
-			item.Rate, item.Discount, cgst/float64(len(req.Items)), sgst/float64(len(req.Items)), item.Total-item.Discount)
+			item.Rate, item.Discount, ln.cgst, ln.sgst, ln.lineTotal)
 		if err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -295,7 +330,7 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 
 	tx.Commit()
 
-	c.JSON(http.StatusCreated, gin.H{"id": poID, "po_no": poNo, "total": total})
+	c.JSON(http.StatusCreated, gin.H{"id": poID, "po_no": poNo, "total": grandTotal})
 }
 
 func (h *PurchaseHandler) Receive(c *gin.Context) {
@@ -349,11 +384,17 @@ func (h *PurchaseHandler) Receive(c *gin.Context) {
 			batchNo = "RCV-" + uuid.New().String()[:12]
 		}
 
+		costPrice := item.CostPrice
+		if costPrice <= 0 {
+			_ = tx.QueryRow(`SELECT COALESCE(cost_price, 0) FROM product_prices WHERE product_id = ? AND store_id = ?`,
+				item.ProductID, req.StoreID).Scan(&costPrice)
+		}
+
 		_, err = tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price)
 			VALUES (?, ?, ?, ?, ?, ?)
 			ON CONFLICT(product_id, store_id, batch_no) DO UPDATE SET quantity = quantity + excluded.quantity`,
 			uuid.New().String(), item.ProductID, req.StoreID, batchNo,
-			item.Quantity, item.CostPrice)
+			item.Quantity, costPrice)
 		if err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
