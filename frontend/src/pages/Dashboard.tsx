@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { analyticsApi } from '../services/api';
 
 interface DashboardData {
   revenue: number;
@@ -34,7 +35,7 @@ export default function Dashboard() {
     if (!store) return;
     setLoading(true);
     try {
-      const { data: dashboardData } = await fetch(`/api/v1/analytics/dashboard?store_id=${store.id}&range=${range}`).then(r => r.json());
+      const { data: dashboardData } = await analyticsApi.dashboard({ store_id: store.id, range });
       setData(dashboardData);
     } catch (err) {
       console.error('Failed to load dashboard:', err);

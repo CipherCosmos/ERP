@@ -195,7 +195,6 @@ export default function Billing() {
 
     const invoiceBody = {
       store_id: store.id,
-      user_id: user.id,
       customer_id: !useSplitPayment && paymentMode === 'credit' ? selectedCustomerId : undefined,
       invoice_date: new Date().toISOString(),
       sub_total: subtotal,

@@ -57,7 +57,6 @@ export default function Losses() {
         quantity: parseFloat(form.quantity),
         loss_type: form.loss_type,
         reason: form.reason,
-        user_id: user.id,
       });
       setShowForm(false);
       setForm({ product_id: '', quantity: '', loss_type: 'damaged', reason: '' });

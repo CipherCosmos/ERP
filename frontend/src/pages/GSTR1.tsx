@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { reportApi } from '../services/api';
+import { invoiceApi, reportApi } from '../services/api';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 
@@ -43,7 +43,7 @@ export default function GSTR1Reports() {
     if (!store) return;
     setLoading(true);
     try {
-      const { data } = await fetch(`/api/v1/invoices/gstr1?store_id=${store.id}&month=${month}`).then(r => r.json());
+      const { data } = await invoiceApi.exportGSTR1(store.id, month);
       setGstr1Data(data);
     } catch (err) {
       console.error('Failed to load GSTR1:', err);

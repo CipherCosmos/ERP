@@ -68,7 +68,6 @@ export default function Expenses() {
         amount: parseFloat(form.amount),
         description: form.description,
         expense_date: form.expense_date,
-        user_id: user.id,
       });
       setShowForm(false);
       setForm({ category_id: '', amount: '', description: '', expense_date: new Date().toISOString().split('T')[0] });

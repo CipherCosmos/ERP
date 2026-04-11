@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { expiryApi } from '../services/api';
 
 interface ExpiryItem {
   id: string;
@@ -37,7 +38,7 @@ export default function Expiry() {
     if (!store) return;
     setLoading(true);
     try {
-      const { data } = await fetch(`/api/v1/expiry/expiring?store_id=${store.id}&days=${days}`).then(r => r.json());
+      const { data } = await expiryApi.expiring({ store_id: store.id, days: String(days) });
       setExpiring(data || []);
     } catch (err) {
       console.error('Failed to load expiring:', err);
@@ -49,7 +50,7 @@ export default function Expiry() {
   const loadExpired = async () => {
     if (!store) return;
     try {
-      const { data } = await fetch(`/api/v1/expiry/expired?store_id=${store.id}`).then(r => r.json());
+      const { data } = await expiryApi.expired({ store_id: store.id });
       setExpired(data || []);
     } catch (err) {
       console.error('Failed to load expired:', err);

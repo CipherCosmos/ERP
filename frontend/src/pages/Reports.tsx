@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { analyticsApi } from '../services/api';
 
 interface SalesReport {
   category: string;
@@ -37,23 +38,25 @@ export default function Reports() {
     if (!store) return;
     setLoading(true);
     try {
-      let endpoint = '';
+      const params = { store_id: store.id, start_date: startDate, end_date: endDate };
+      let res;
       switch (activeTab) {
         case 'category':
-          endpoint = `/api/v1/analytics/sales/category?store_id=${store.id}&start_date=${startDate}&end_date=${endDate}`;
+          res = await analyticsApi.salesByCategory(params);
           break;
         case 'products':
-          endpoint = `/api/v1/analytics/sales/top?store_id=${store.id}&start_date=${startDate}&end_date=${endDate}`;
+          res = await analyticsApi.topProducts(params);
           break;
         case 'hourly':
-          endpoint = `/api/v1/analytics/sales/hourly?store_id=${store.id}&date=${startDate}`;
+          res = await analyticsApi.hourlySales({ store_id: store.id, date: startDate });
           break;
         case 'payment':
-          endpoint = `/api/v1/analytics/sales/payment?store_id=${store.id}&start_date=${startDate}&end_date=${endDate}`;
+          res = await analyticsApi.paymentBreakup(params);
           break;
+        default:
+          res = { data: null };
       }
-      const { data } = await fetch(endpoint).then(r => r.json());
-      setReportData(data);
+      setReportData(res.data);
     } catch (err) {
       console.error('Failed to load report:', err);
     } finally {

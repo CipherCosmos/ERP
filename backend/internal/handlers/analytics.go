@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gbos/internal/db"
+	"gbos/internal/middleware"
 	"github.com/gin-gonic/gin"
 )
 
@@ -21,6 +22,10 @@ func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 	storeID := c.Query("store_id")
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 	dateRange := c.DefaultQuery("range", "today")
@@ -94,6 +99,10 @@ func (h *AnalyticsHandler) SalesByCategory(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
@@ -141,6 +150,10 @@ func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 	storeID := c.Query("store_id")
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 	limitStr := c.DefaultQuery("limit", "20")
@@ -198,6 +211,10 @@ func (h *AnalyticsHandler) HourlySales(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
 
 	rows, err := db.DB.Query(`
@@ -230,6 +247,10 @@ func (h *AnalyticsHandler) PaymentModeBreakup(c *gin.Context) {
 	storeID := c.Query("store_id")
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 	startDate := c.Query("start_date")
@@ -277,6 +298,14 @@ func NewAuditHandler() *AuditHandler {
 
 func (h *AuditHandler) List(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	userID := c.Query("user_id")
 	tableName := c.Query("table")
 	limit := c.DefaultQuery("limit", "100")
@@ -285,13 +314,8 @@ func (h *AuditHandler) List(c *gin.Context) {
 		al.table_name, al.record_id, al.old_value, al.new_value, al.created_at
 		FROM audit_logs al
 		JOIN users u ON al.user_id = u.id
-		WHERE 1=1`
-	args := []interface{}{}
-
-	if storeID != "" {
-		query += " AND al.store_id = ?"
-		args = append(args, storeID)
-	}
+		WHERE al.store_id = ?`
+	args := []interface{}{storeID}
 	if userID != "" {
 		query += " AND al.user_id = ?"
 		args = append(args, userID)
@@ -329,8 +353,6 @@ func (h *AuditHandler) List(c *gin.Context) {
 
 func (h *AuditHandler) Log(c *gin.Context) {
 	var req struct {
-		UserID    string `json:"user_id" binding:"required"`
-		StoreID   string `json:"store_id" binding:"required"`
 		Action    string `json:"action" binding:"required"`
 		TableName string `json:"table_name"`
 		RecordID  string `json:"record_id"`
@@ -341,10 +363,16 @@ func (h *AuditHandler) Log(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	uid := middleware.GetUserID(c)
+	storeID := middleware.GetStoreID(c)
+	if uid == "" || storeID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
+		return
+	}
 
 	_, err := db.DB.Exec(`INSERT INTO audit_logs (id, user_id, store_id, action, table_name, record_id, old_value, new_value)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		fmt.Sprintf("AUD-%d", time.Now().UnixNano()), req.UserID, req.StoreID,
+		fmt.Sprintf("AUD-%d", time.Now().UnixNano()), uid, storeID,
 		req.Action, req.TableName, req.RecordID, req.OldValue, req.NewValue)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -381,6 +409,10 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -461,6 +493,10 @@ func (h *ReportHandler) GetCreditAging(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	rows, err := db.DB.Query(`
 		SELECT c.id, c.name,
@@ -502,6 +538,10 @@ func (h *ReportHandler) GetGSTR3B(c *gin.Context) {
 	month := c.Query("month")
 	if storeID == "" || month == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id and month required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 

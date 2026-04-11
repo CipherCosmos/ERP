@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { productApi, categoryApi, barcodeApi } from '../services/api';
+import { productApi, categoryApi, barcodeApi, uomApi } from '../services/api';
 
 interface Product {
   id: string;
@@ -104,7 +104,7 @@ export default function Products() {
 
   const loadUoms = async () => {
     try {
-      const { data } = await fetch('/api/v1/uoms').then(r => r.json());
+      const { data } = await uomApi.list();
       setUoms(data || []);
     } catch (err) {
       console.error('Failed to load UOMs:', err);

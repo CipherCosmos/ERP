@@ -57,7 +57,6 @@ export default function Returns() {
         reason: form.reason,
         refund_mode: form.refund_mode,
         store_id: store.id,
-        user_id: user.id,
       });
       setShowForm(false);
       setForm({ product_id: '', quantity: '', amount: '', reason: '', refund_mode: 'cash' });

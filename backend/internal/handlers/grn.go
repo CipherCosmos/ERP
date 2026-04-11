@@ -41,6 +41,21 @@ func (h *GRNHandler) Create(c *gin.Context) {
 		return
 	}
 
+	var poStore string
+	err := db.DB.QueryRow(`SELECT store_id FROM purchase_orders WHERE id = ?`, req.POID).Scan(&poStore)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "purchase order not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, poStore) {
+		abortStoreMismatch(c)
+		return
+	}
+
 	tx, err := db.DB.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -117,8 +132,10 @@ func (h *GRNHandler) Get(c *gin.Context) {
 	id := c.Param("id")
 
 	var grn models.GoodsReceipt
-	err := db.DB.QueryRow(`SELECT id, po_id, received_date, received_by, notes, created_at 
-		FROM goods_receipts WHERE id = ?`, id).Scan(
+	err := db.DB.QueryRow(`SELECT gr.id, gr.po_id, gr.received_date, gr.received_by, gr.notes, gr.created_at 
+		FROM goods_receipts gr
+		JOIN purchase_orders po ON gr.po_id = po.id
+		WHERE gr.id = ? AND po.store_id = ?`, id, sessionStoreID(c)).Scan(
 		&grn.ID, &grn.POID, &grn.ReceivedDate, &grn.ReceivedBy,
 		&grn.Notes, &grn.CreatedAt,
 	)
@@ -150,17 +167,29 @@ func (h *GRNHandler) Get(c *gin.Context) {
 }
 
 func (h *GRNHandler) List(c *gin.Context) {
+	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	poID := c.Query("po_id")
 	limit := c.DefaultQuery("limit", "50")
 
-	query := `SELECT id, po_id, received_date, received_by, notes, created_at FROM goods_receipts`
-	args := []interface{}{}
+	query := `SELECT gr.id, gr.po_id, gr.received_date, gr.received_by, gr.notes, gr.created_at 
+		FROM goods_receipts gr
+		JOIN purchase_orders po ON gr.po_id = po.id
+		WHERE po.store_id = ?`
+	args := []interface{}{storeID}
 
 	if poID != "" {
-		query += " WHERE po_id = ?"
+		query += " AND gr.po_id = ?"
 		args = append(args, poID)
 	}
-	query += " ORDER BY created_at DESC LIMIT " + limit
+	query += " ORDER BY gr.created_at DESC LIMIT " + limit
 
 	rows, err := db.DB.Query(query, args...)
 	if err != nil {
@@ -171,13 +200,13 @@ func (h *GRNHandler) List(c *gin.Context) {
 
 	var grns []map[string]interface{}
 	for rows.Next() {
-		var id, poID, receivedBy, notes string
+		var id, rowPOID, receivedBy, notes string
 		var receivedDate, createdAt time.Time
 
-		rows.Scan(&id, &poID, &receivedDate, &receivedBy, &notes, &createdAt)
+		rows.Scan(&id, &rowPOID, &receivedDate, &receivedBy, &notes, &createdAt)
 
 		grns = append(grns, map[string]interface{}{
-			"id": id, "po_id": poID, "received_date": receivedDate,
+			"id": id, "po_id": rowPOID, "received_date": receivedDate,
 			"received_by": receivedBy, "notes": notes, "created_at": createdAt,
 		})
 	}

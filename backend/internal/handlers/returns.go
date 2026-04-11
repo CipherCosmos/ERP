@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gbos/internal/db"
+	"gbos/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -24,13 +25,16 @@ type CreateReturnRequest struct {
 	Reason     string  `json:"reason" binding:"required"`
 	RefundMode string  `json:"refund_mode"`
 	StoreID    string  `json:"store_id" binding:"required"`
-	UserID     string  `json:"user_id" binding:"required"`
 }
 
 func (h *ReturnHandler) Create(c *gin.Context) {
 	var req CreateReturnRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -61,16 +65,19 @@ func (h *ReturnHandler) Create(c *gin.Context) {
 
 func (h *ReturnHandler) List(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	limit := c.DefaultQuery("limit", "50")
 
 	query := `SELECT id, invoice_id, product_id, store_id, quantity, amount, reason, refund_mode, status, created_at 
-		FROM returns`
-	args := []interface{}{}
-
-	if storeID != "" {
-		query += " WHERE store_id = ?"
-		args = append(args, storeID)
-	}
+		FROM returns WHERE store_id = ?`
+	args := []interface{}{storeID}
 	query += " ORDER BY created_at DESC LIMIT " + limit
 
 	rows, err := db.DB.Query(query, args...)
@@ -104,6 +111,10 @@ func (h *ReturnHandler) Approve(c *gin.Context) {
 
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -170,13 +181,21 @@ type CreateLossRequest struct {
 	Quantity  float64 `json:"quantity" binding:"required"`
 	LossType  string  `json:"loss_type" binding:"required"`
 	Reason    string  `json:"reason"`
-	UserID    string  `json:"user_id" binding:"required"`
 }
 
 func (h *LossHandler) Create(c *gin.Context) {
 	var req CreateLossRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
+		return
+	}
+	uid := middleware.GetUserID(c)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
 		return
 	}
 
@@ -194,7 +213,7 @@ func (h *LossHandler) Create(c *gin.Context) {
 	lossID := uuid.New().String()
 	_, err = tx.Exec(`INSERT INTO inventory_losses (id, product_id, store_id, batch_no, quantity, loss_type, reason, user_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		lossID, req.ProductID, req.StoreID, batchNo, req.Quantity, req.LossType, req.Reason, req.UserID)
+		lossID, req.ProductID, req.StoreID, batchNo, req.Quantity, req.LossType, req.Reason, uid)
 	if err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record loss"})
@@ -219,17 +238,20 @@ func (h *LossHandler) Create(c *gin.Context) {
 
 func (h *LossHandler) List(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	lossType := c.Query("loss_type")
 	limit := c.DefaultQuery("limit", "50")
 
 	query := `SELECT l.id, l.product_id, l.store_id, l.batch_no, l.quantity, l.loss_type, l.reason, l.user_id, l.created_at
-		FROM inventory_losses l WHERE 1=1`
-	args := []interface{}{}
-
-	if storeID != "" {
-		query += " AND l.store_id = ?"
-		args = append(args, storeID)
-	}
+		FROM inventory_losses l WHERE l.store_id = ?`
+	args := []interface{}{storeID}
 	if lossType != "" {
 		query += " AND l.loss_type = ?"
 		args = append(args, lossType)

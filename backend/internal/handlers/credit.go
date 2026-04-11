@@ -22,13 +22,17 @@ func NewCustomerHandler() *CustomerHandler {
 func (h *CustomerHandler) List(c *gin.Context) {
 	search := c.Query("search")
 	storeID := c.Query("store_id")
-
-	query := `SELECT id, name, name_hi, phone, address, gstin, credit_limit, is_wholesale, store_id, is_active FROM customers WHERE is_active = 1`
-	args := []interface{}{}
-	if storeID != "" {
-		query += " AND store_id = ?"
-		args = append(args, storeID)
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
+
+	query := `SELECT id, name, name_hi, phone, address, gstin, credit_limit, is_wholesale, store_id, is_active FROM customers WHERE is_active = 1 AND store_id = ?`
+	args := []interface{}{storeID}
 	if search != "" {
 		query += " AND (name LIKE ? OR phone LIKE ?)"
 		args = append(args, "%"+search+"%", "%"+search+"%")
@@ -83,6 +87,10 @@ func (h *CustomerHandler) Get(c *gin.Context) {
 		if sid, perr := uuid.Parse(storeID.String); perr == nil {
 			customer.StoreID = sid
 		}
+	}
+	if !storeID.Valid || storeID.String == "" || !sessionMayAccessStore(c, storeID.String) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
 	}
 
 	var outstanding float64

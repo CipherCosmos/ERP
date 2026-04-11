@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gbos/internal/db"
+	"gbos/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -20,6 +21,10 @@ func (h *StockHandler) List(c *gin.Context) {
 	storeID := c.Query("store_id")
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -60,6 +65,14 @@ func (h *StockHandler) List(c *gin.Context) {
 func (h *StockHandler) GetProductStock(c *gin.Context) {
 	productID := c.Param("id")
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	rows, err := db.DB.Query(`
 		SELECT id, batch_no, quantity, reserved_qty, expiry_date, cost_price
@@ -96,10 +109,18 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 		Quantity  float64 `json:"quantity" binding:"required"`
 		Type      string  `json:"type" binding:"required"` // add, remove, reserve, release
 		Reason    string  `json:"reason"`                  // damage, expiry, error, count_variance, received, returned
-		UserID    string  `json:"user_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	uid := middleware.GetUserID(c)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -168,7 +189,7 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 		if err == nil {
 			_, err = tx.Exec(`INSERT INTO stock_adjustments (id, product_id, store_id, batch_no, quantity, adjustment_type, reason, user_id)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				uuid.New().String(), req.ProductID, req.StoreID, batchNo, req.Quantity, req.Type, req.Reason, req.UserID)
+				uuid.New().String(), req.ProductID, req.StoreID, batchNo, req.Quantity, req.Type, req.Reason, uid)
 		}
 	}
 
@@ -193,6 +214,10 @@ func (h *StockHandler) Transfer(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !transferStoresAllowed(c, req.FromStoreID, req.ToStoreID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -240,6 +265,10 @@ func (h *StockHandler) LowStock(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	rows, err := db.DB.Query(`
 		SELECT p.id, p.name, p.min_stock, COALESCE(SUM(s.quantity), 0) as current_stock
@@ -279,6 +308,10 @@ func (h *SyncHandler) GetPending(c *gin.Context) {
 	storeID := c.Query("store_id")
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -374,6 +407,14 @@ func (h *SyncHandler) ConflictResolution(c *gin.Context) {
 
 func (h *StockHandler) GetAdjustments(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	productID := c.Query("product_id")
 	limit := c.DefaultQuery("limit", "100")
 
@@ -381,13 +422,8 @@ func (h *StockHandler) GetAdjustments(c *gin.Context) {
 		sa.adjustment_type, sa.reason, sa.user_id, sa.created_at
 		FROM stock_adjustments sa
 		JOIN products p ON sa.product_id = p.id
-		WHERE 1=1`
-	args := []interface{}{}
-
-	if storeID != "" {
-		query += " AND sa.store_id = ?"
-		args = append(args, storeID)
-	}
+		WHERE sa.store_id = ?`
+	args := []interface{}{storeID}
 	if productID != "" {
 		query += " AND sa.product_id = ?"
 		args = append(args, productID)

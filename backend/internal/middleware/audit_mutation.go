@@ -13,7 +13,7 @@ import (
 
 const maxAuditBodyBytes = 1 << 16 // 64 KiB
 
-// AuditMutationRequests logs successful mutating API calls with a bounded JSON body snapshot (Phase A).
+// AuditMutationRequests logs successful mutating API calls with a bounded JSON body snapshot.
 func AuditMutationRequests() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		method := c.Request.Method

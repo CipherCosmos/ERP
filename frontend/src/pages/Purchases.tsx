@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { purchaseApi } from '../services/api';
 
 interface PurchaseOrder {
   id: string;
@@ -34,9 +35,10 @@ export default function Purchases() {
     if (!store) return;
     setLoading(true);
     try {
-      let url = `/api/v1/purchases?store_id=${store.id}`;
-      if (statusFilter) url += `&status=${statusFilter}`;
-      const { data } = await fetch(url).then(r => r.json());
+      const { data } = await purchaseApi.list({
+        store_id: store.id,
+        ...(statusFilter ? { status: statusFilter } : {}),
+      });
       setOrders(data || []);
     } catch (err) {
       console.error('Failed to load purchases:', err);

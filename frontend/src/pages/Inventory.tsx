@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { productApi } from '../services/api';
+import { productApi, stockApi } from '../services/api';
 
 interface StockItem {
   id: string;
@@ -56,7 +56,7 @@ export default function Inventory() {
     if (!store) return;
     setLoading(true);
     try {
-      const { data } = await fetch(`/api/v1/stock?store_id=${store.id}`).then(r => r.json());
+      const { data } = await stockApi.list(store.id);
       setStock(data || []);
     } catch (err) {
       console.error('Failed to load stock:', err);
@@ -68,7 +68,7 @@ export default function Inventory() {
   const loadLowStock = async () => {
     if (!store) return;
     try {
-      const { data } = await fetch(`/api/v1/stock/low?store_id=${store.id}`).then(r => r.json());
+      const { data } = await stockApi.low(store.id);
       setLowStock(data || []);
     } catch (err) {
       console.error('Failed to load low stock:', err);
@@ -78,7 +78,7 @@ export default function Inventory() {
   const loadAdjustments = async () => {
     if (!store) return;
     try {
-      const { data } = await fetch(`/api/v1/stock/adjustments?store_id=${store.id}`).then(r => r.json());
+      const { data } = await stockApi.adjustments(store.id);
       setAdjustments(data || []);
     } catch (err) {
       console.error('Failed to load adjustments:', err);
@@ -106,17 +106,12 @@ export default function Inventory() {
       : (adjustForm.type === 'add' ? 'received' : 'count_variance');
 
     try {
-      await fetch('/api/v1/stock/adjust', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          product_id: adjustForm.product_id,
-          store_id: store.id,
-          quantity: parseFloat(adjustForm.quantity),
-          type: adjustForm.type,
-          reason: reason,
-          user_id: user.id,
-        }),
+      await stockApi.adjust({
+        product_id: adjustForm.product_id,
+        store_id: store.id,
+        quantity: parseFloat(adjustForm.quantity),
+        type: adjustForm.type,
+        reason,
       });
       setShowAdjustForm(false);
       setAdjustForm({ product_id: '', quantity: '', type: 'add', reason: '' });

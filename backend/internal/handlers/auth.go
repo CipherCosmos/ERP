@@ -79,6 +79,18 @@ func Register(c *gin.Context) {
 		return
 	}
 
+	allowedRoles := map[string]bool{
+		"manager": true, "cashier": true, "warehouse": true, "helper": true,
+	}
+	if !allowedRoles[req.Role] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid role"})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
+		return
+	}
+
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})

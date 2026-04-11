@@ -113,6 +113,14 @@ func NewPurchaseHandler() *PurchaseHandler {
 
 func (h *PurchaseHandler) List(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	vendorID := c.Query("vendor_id")
 	status := c.Query("status")
 
@@ -120,13 +128,8 @@ func (h *PurchaseHandler) List(c *gin.Context) {
 		po.order_date, po.expected_date, po.total, po.status, po.created_at
 		FROM purchase_orders po
 		JOIN vendors v ON po.vendor_id = v.id
-		WHERE 1=1`
-	args := []interface{}{}
-
-	if storeID != "" {
-		query += " AND po.store_id = ?"
-		args = append(args, storeID)
-	}
+		WHERE po.store_id = ?`
+	args := []interface{}{storeID}
 	if vendorID != "" {
 		query += " AND po.vendor_id = ?"
 		args = append(args, vendorID)
@@ -144,7 +147,7 @@ func (h *PurchaseHandler) List(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var orders []map[string]interface{}
+	orders := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var id, poNo, storeID, vendorID, vendorName, status string
 		var orderDate, expectedDate, createdAt sql.NullString
@@ -172,12 +175,16 @@ func (h *PurchaseHandler) Get(c *gin.Context) {
 		       po.discount, po.total, po.status
 		FROM purchase_orders po
 		JOIN vendors v ON po.vendor_id = v.id
-		WHERE po.id = ?`, id).Scan(
+		WHERE po.id = ? AND po.store_id = ?`, id, sessionStoreID(c)).Scan(
 		&po.ID, &po.PO_NO, &po.StoreID, &po.VendorID, &vendorName,
 		&po.OrderDate, &po.ExpectedDate, &po.SubTotal, &po.CGST, &po.SGST,
 		&po.IGST, &po.Discount, &po.Total, &po.Status)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "purchase order not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -236,6 +243,10 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	var req PurchaseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -303,6 +314,29 @@ func (h *PurchaseHandler) Receive(c *gin.Context) {
 		return
 	}
 
+	var poStore, poStatus string
+	err := db.DB.QueryRow(`SELECT store_id, status FROM purchase_orders WHERE id = ?`, req.POID).Scan(&poStore, &poStatus)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "purchase order not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if poStatus == "cancelled" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "purchase order is cancelled"})
+		return
+	}
+	if req.StoreID != poStore {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id does not match purchase order"})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
+		return
+	}
+
 	tx, err := db.DB.Begin()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -350,7 +384,22 @@ func (h *PurchaseHandler) Receive(c *gin.Context) {
 func (h *PurchaseHandler) Cancel(c *gin.Context) {
 	id := c.Param("id")
 
-	result, err := db.DB.Exec(`UPDATE purchase_orders SET status = 'cancelled' WHERE id = ? AND status = 'pending'`, id)
+	var poStore string
+	err := db.DB.QueryRow(`SELECT store_id FROM purchase_orders WHERE id = ?`, id).Scan(&poStore)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "purchase order not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, poStore) {
+		abortStoreMismatch(c)
+		return
+	}
+
+	result, err := db.DB.Exec(`UPDATE purchase_orders SET status = 'cancelled' WHERE id = ? AND status = 'pending' AND store_id = ?`, id, poStore)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

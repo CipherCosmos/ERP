@@ -206,6 +206,10 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	stockSub := `(SELECT COALESCE(SUM(quantity), 0) FROM stock s WHERE s.product_id = p.id AND s.store_id = ?)`
 	sel := `
@@ -262,6 +266,14 @@ func NewExpiryHandler() *ExpiryHandler {
 
 func (h *ExpiryHandler) GetExpiring(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	days := c.DefaultQuery("days", "30")
 
 	rows, err := db.DB.Query(`
@@ -297,6 +309,14 @@ func (h *ExpiryHandler) GetExpiring(c *gin.Context) {
 
 func (h *ExpiryHandler) GetExpired(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	rows, err := db.DB.Query(`
 		SELECT s.id, p.name, s.batch_no, s.quantity, s.expiry_date

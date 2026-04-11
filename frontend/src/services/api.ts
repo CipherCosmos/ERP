@@ -117,19 +117,60 @@ export const paymentApi = {
 
 export const returnApi = {
   list: (storeId: string) => api.get(`/returns?store_id=${storeId}`),
-  create: (data: { product_id: string; quantity: number; amount: number; reason: string; refund_mode?: string; store_id: string; user_id: string; invoice_id?: string }) =>
+  create: (data: { product_id: string; quantity: number; amount: number; reason: string; refund_mode?: string; store_id: string; invoice_id?: string }) =>
     api.post('/returns', data),
   approve: (id: string, storeId: string) => api.post(`/returns/${id}/approve?store_id=${storeId}`),
 };
 
 export const lossApi = {
   list: (params: { store_id: string; loss_type?: string }) => api.get('/losses', { params }),
-  create: (data: { product_id: string; store_id: string; batch_no?: string; quantity: number; loss_type: string; reason?: string; user_id: string }) =>
+  create: (data: { product_id: string; store_id: string; batch_no?: string; quantity: number; loss_type: string; reason?: string }) =>
     api.post('/losses', data),
 };
 
+export const stockApi = {
+  list: (storeId: string) => api.get('/stock', { params: { store_id: storeId } }),
+  low: (storeId: string) => api.get('/stock/low', { params: { store_id: storeId } }),
+  adjustments: (storeId: string) => api.get('/stock/adjustments', { params: { store_id: storeId } }),
+  adjust: (data: {
+    product_id: string;
+    store_id: string;
+    batch_no?: string;
+    quantity: number;
+    type: string;
+    reason: string;
+  }) => api.post('/stock/adjust', data),
+};
+
+export const uomApi = {
+  list: () => api.get('/uoms'),
+};
+
+export const analyticsApi = {
+  dashboard: (params: { store_id: string; range?: string }) =>
+    api.get('/analytics/dashboard', { params }),
+  salesByCategory: (params: { store_id: string; start_date: string; end_date: string }) =>
+    api.get('/analytics/sales/category', { params }),
+  topProducts: (params: { store_id: string; start_date: string; end_date: string; limit?: number }) =>
+    api.get('/analytics/sales/top', { params }),
+  hourlySales: (params: { store_id: string; date: string }) =>
+    api.get('/analytics/sales/hourly', { params }),
+  paymentBreakup: (params: { store_id: string; start_date: string; end_date: string }) =>
+    api.get('/analytics/sales/payment', { params }),
+};
+
+export const purchaseApi = {
+  list: (params: { store_id: string; status?: string }) => api.get('/purchases', { params }),
+};
+
+export const expiryApi = {
+  expiring: (params: { store_id: string; days?: string }) =>
+    api.get('/expiry/expiring', { params }),
+  expired: (params: { store_id: string }) => api.get('/expiry/expired', { params }),
+};
+
 export const grnApi = {
-  list: (poId?: string) => api.get(`/grn?po_id=${poId || ''}`),
+  list: (params: { store_id: string; po_id?: string }) => api.get('/grn', { params }),
   get: (id: string) => api.get(`/grn/${id}`),
   create: (data: { po_id: string; received_date: string; received_by: string; notes?: string; items: { product_id: string; ordered_qty?: number; received_qty: number; accepted_qty?: number; rejected_qty?: number; reason?: string }[] }) =>
     api.post('/grn', data),
@@ -153,7 +194,7 @@ export const creditApi = {
 export const expenseApi = {
   list: (params: { store_id: string; start_date?: string; end_date?: string; category_id?: string }) =>
     api.get('/expenses', { params }),
-  create: (data: { store_id: string; category_id: string; amount: number; description?: string; expense_date: string; user_id: string }) =>
+  create: (data: { store_id: string; category_id: string; amount: number; description?: string; expense_date: string }) =>
     api.post('/expenses', data),
   getCategories: () => api.get('/expenses/categories'),
   getSummary: (params: { store_id: string; start_date?: string; end_date?: string }) =>

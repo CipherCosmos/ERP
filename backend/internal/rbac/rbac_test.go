@@ -12,6 +12,9 @@ func TestRoleHas(t *testing.T) {
 	if RoleHas("helper", PermInvoiceCreate) {
 		t.Fatal("helper must not create invoices")
 	}
+	if !RoleHas("helper", PermReportView) {
+		t.Fatal("helper reads reports")
+	}
 	if RoleHas("helper", PermStockMove) {
 		t.Fatal("helper must not move stock")
 	}
@@ -19,12 +22,18 @@ func TestRoleHas(t *testing.T) {
 		t.Fatal("cashier POS")
 	}
 	if RoleHas("cashier", PermCreditPay) {
-		t.Fatal("cashier must not post credit payments in RBAC matrix")
+		t.Fatal("cashier must not post credit payments")
 	}
 	if !RoleHas("warehouse", PermPurchaseWrite) {
 		t.Fatal("warehouse PO")
 	}
 	if RoleHas("warehouse", PermInvoiceCreate) {
 		t.Fatal("warehouse must not bill")
+	}
+	if !RoleHas("owner", PermUserRegister) {
+		t.Fatal("owner registers users")
+	}
+	if RoleHas("manager", PermUserRegister) {
+		t.Fatal("manager must not register users")
 	}
 }

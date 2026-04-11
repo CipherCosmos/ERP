@@ -43,7 +43,8 @@ func (h *PaymentHandler) AddSplitPayments(c *gin.Context) {
 	}
 
 	var invTotal float64
-	err = tx.QueryRow(`SELECT total FROM invoices WHERE id = ?`, req.InvoiceID).Scan(&invTotal)
+	var invStore string
+	err = tx.QueryRow(`SELECT total, store_id FROM invoices WHERE id = ?`, req.InvoiceID).Scan(&invTotal, &invStore)
 	if err == sql.ErrNoRows {
 		tx.Rollback()
 		c.JSON(http.StatusNotFound, gin.H{"error": "invoice not found"})
@@ -52,6 +53,11 @@ func (h *PaymentHandler) AddSplitPayments(c *gin.Context) {
 	if err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, invStore) {
+		tx.Rollback()
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -85,6 +91,21 @@ func (h *PaymentHandler) AddSplitPayments(c *gin.Context) {
 
 func (h *PaymentHandler) GetInvoicePayments(c *gin.Context) {
 	invoiceID := c.Param("id")
+
+	var invStore string
+	err := db.DB.QueryRow(`SELECT store_id FROM invoices WHERE id = ?`, invoiceID).Scan(&invStore)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "invoice not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, invStore) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "invoice not found"})
+		return
+	}
 
 	rows, err := db.DB.Query(`SELECT id, payment_mode, amount, reference, created_at 
 		FROM invoice_payments WHERE invoice_id = ?`, invoiceID)
@@ -159,6 +180,10 @@ func (h *PaymentHandler) GetSettlementReport(c *gin.Context) {
 
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 

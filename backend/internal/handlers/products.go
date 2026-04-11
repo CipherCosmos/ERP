@@ -23,6 +23,10 @@ func (h *CategoryHandler) List(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	rows, err := db.DB.Query(`
 		SELECT id, name, name_hi, name_kn, parent_id, hsn_code, is_active, created_at, updated_at
@@ -78,6 +82,14 @@ func NewProductHandler() *ProductHandler {
 
 func (h *ProductHandler) List(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 	categoryID := c.Query("category_id")
 	barcode := c.Query("barcode")
 	search := c.Query("search")
@@ -145,6 +157,10 @@ func (h *ProductHandler) Get(c *gin.Context) {
 	storeID := c.Query("store_id")
 	if storeID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 
@@ -240,6 +256,10 @@ func (h *ProductHandler) SetPrice(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
 		return
 	}
 

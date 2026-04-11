@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"gbos/internal/db"
+	"gbos/internal/middleware"
 	"gbos/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -88,6 +89,10 @@ func (h *InvoiceHandler) List(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
@@ -162,6 +167,11 @@ func (h *InvoiceHandler) Get(c *gin.Context) {
 		return
 	}
 
+	if !sessionMayAccessStore(c, invoice.StoreID.String()) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "invoice not found"})
+		return
+	}
+
 	rows, _ := db.DB.Query(`
 		SELECT id, invoice_id, product_id, batch_no, quantity, rate, discount, cgst, sgst, igst, total, unit_cost_at_sale
 		FROM invoice_items WHERE invoice_id = ?`, id)
@@ -182,7 +192,6 @@ func (h *InvoiceHandler) Get(c *gin.Context) {
 
 type InvoiceRequest struct {
 	StoreID     string           `json:"store_id" binding:"required"`
-	UserID      string           `json:"user_id" binding:"required"`
 	CustomerID  *string          `json:"customer_id"`
 	InvoiceDate string           `json:"invoice_date" binding:"required"`
 	SubTotal    float64          `json:"sub_total" binding:"required"`
@@ -210,6 +219,15 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 	var req InvoiceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
+		return
+	}
+	uid := middleware.GetUserID(c)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
 		return
 	}
 
@@ -315,7 +333,7 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 		(id, invoice_no, store_id, user_id, customer_id, invoice_date, sub_total, 
 		 cgst, sgst, igst, discount, round_off, total, status, payment_mode)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		invoiceID, invoiceNo, req.StoreID, req.UserID, req.CustomerID,
+		invoiceID, invoiceNo, req.StoreID, uid, req.CustomerID,
 		req.InvoiceDate, req.SubTotal, req.CGST, req.SGST, req.IGST,
 		req.Discount, req.RoundOff, req.Total, req.Status, req.PaymentMode)
 	if err != nil {
@@ -368,6 +386,10 @@ func (h *InvoiceHandler) GSTR1Export(c *gin.Context) {
 	month := c.Query("month")
 	if storeID == "" || month == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id and month required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
 		return
 	}
 

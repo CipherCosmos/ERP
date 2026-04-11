@@ -39,134 +39,6 @@ func Initialize(dbPath string) error {
 		return fmt.Errorf("failed to seed defaults: %w", err)
 	}
 
-	if err = migrateSchema(); err != nil {
-		return fmt.Errorf("failed to migrate schema: %w", err)
-	}
-
-	return nil
-}
-
-func columnExists(table, col string) (bool, error) {
-	rows, err := DB.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false, err
-		}
-		if name == col {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
-func migrateSchema() error {
-	ok, err := columnExists("customers", "store_id")
-	if err != nil {
-		return err
-	}
-	if !ok {
-		if _, err := DB.Exec(`ALTER TABLE customers ADD COLUMN store_id TEXT REFERENCES stores(id)`); err != nil {
-			return fmt.Errorf("customers.store_id: %w", err)
-		}
-	}
-	if _, err := DB.Exec(`UPDATE customers SET store_id = (SELECT id FROM stores ORDER BY datetime(created_at) LIMIT 1) WHERE store_id IS NULL OR store_id = ''`); err != nil {
-		return err
-	}
-
-	ok, err = columnExists("product_prices", "wholesale_sell_price")
-	if err != nil {
-		return err
-	}
-	if !ok {
-		if _, err := DB.Exec(`ALTER TABLE product_prices ADD COLUMN wholesale_sell_price REAL DEFAULT 0`); err != nil {
-			return fmt.Errorf("product_prices.wholesale_sell_price: %w", err)
-		}
-	}
-
-	if _, err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_product_store_batch ON stock(product_id, store_id, batch_no)`); err != nil {
-		log.Printf("gbos migrate: could not create unique stock index (remove duplicate batches if needed): %v", err)
-	}
-	if _, err := DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_product_prices_product_store ON product_prices(product_id, store_id)`); err != nil {
-		log.Printf("gbos migrate: could not create unique product_prices index: %v", err)
-	}
-
-	if _, err := DB.Exec(`
-		CREATE TABLE IF NOT EXISTS product_units (
-			id TEXT PRIMARY KEY,
-			product_id TEXT NOT NULL,
-			parent_unit_id TEXT,
-			label TEXT NOT NULL,
-			qty_in_parent REAL NOT NULL DEFAULT 1,
-			barcode TEXT,
-			sort_order INTEGER DEFAULT 0,
-			created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-			FOREIGN KEY (parent_unit_id) REFERENCES product_units(id)
-		)`); err != nil {
-		return fmt.Errorf("product_units table: %w", err)
-	}
-	if _, err := DB.Exec(`CREATE INDEX IF NOT EXISTS idx_product_units_product ON product_units(product_id)`); err != nil {
-		log.Printf("gbos migrate: product_units index: %v", err)
-	}
-
-	if ok, err := columnExists("stores", "location_type"); err != nil {
-		return err
-	} else if !ok {
-		if _, err := DB.Exec(`ALTER TABLE stores ADD COLUMN location_type TEXT DEFAULT 'store'`); err != nil {
-			return fmt.Errorf("stores.location_type: %w", err)
-		}
-	}
-
-	if ok, err := columnExists("customers", "is_wholesale"); err != nil {
-		return err
-	} else if !ok {
-		if _, err := DB.Exec(`ALTER TABLE customers ADD COLUMN is_wholesale INTEGER DEFAULT 0`); err != nil {
-			return fmt.Errorf("customers.is_wholesale: %w", err)
-		}
-	}
-
-	if ok, err := columnExists("vendors", "credit_days"); err != nil {
-		return err
-	} else if !ok {
-		if _, err := DB.Exec(`ALTER TABLE vendors ADD COLUMN credit_days INTEGER DEFAULT 0`); err != nil {
-			return fmt.Errorf("vendors.credit_days: %w", err)
-		}
-	}
-	if ok, err := columnExists("vendors", "credit_limit"); err != nil {
-		return err
-	} else if !ok {
-		if _, err := DB.Exec(`ALTER TABLE vendors ADD COLUMN credit_limit REAL DEFAULT 0`); err != nil {
-			return fmt.Errorf("vendors.credit_limit: %w", err)
-		}
-	}
-
-	if ok, err := columnExists("invoice_items", "unit_cost_at_sale"); err != nil {
-		return err
-	} else if !ok {
-		if _, err := DB.Exec(`ALTER TABLE invoice_items ADD COLUMN unit_cost_at_sale REAL NOT NULL DEFAULT 0`); err != nil {
-			return fmt.Errorf("invoice_items.unit_cost_at_sale: %w", err)
-		}
-		// Best-effort backfill for legacy rows (ambiguous batch; uses any matching stock row).
-		if _, err := DB.Exec(`
-			UPDATE invoice_items SET unit_cost_at_sale = COALESCE((
-				SELECT s.cost_price FROM invoices i
-				JOIN stock s ON s.product_id = invoice_items.product_id AND s.store_id = i.store_id
-				WHERE i.id = invoice_items.invoice_id
-				LIMIT 1
-			), 0)
-			WHERE unit_cost_at_sale = 0`); err != nil {
-			log.Printf("gbos migrate: invoice_items cost backfill: %v", err)
-		}
-	}
-
 	return nil
 }
 
@@ -443,6 +315,8 @@ func createTables() error {
 	CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 	CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
 	CREATE INDEX IF NOT EXISTS idx_stock_product ON stock(product_id, store_id);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_stock_product_store_batch ON stock(product_id, store_id, batch_no);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_product_prices_product_store ON product_prices(product_id, store_id);
 	CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(invoice_date);
 	CREATE INDEX IF NOT EXISTS idx_credit_customer ON credit_entries(customer_id);
 	CREATE INDEX IF NOT EXISTS idx_sync_pending ON sync_records(status, created_at);
