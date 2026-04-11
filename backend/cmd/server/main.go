@@ -3,13 +3,14 @@ package main
 import (
 	"log"
 
-	"github.com/gin-gonic/gin"
 	"gbos/internal/auth"
 	"gbos/internal/config"
 	"gbos/internal/db"
 	"gbos/internal/handlers"
 	"gbos/internal/middleware"
 	"gbos/internal/models"
+	"gbos/internal/rbac"
+	"github.com/gin-gonic/gin"
 )
 
 func main() {
@@ -39,6 +40,7 @@ func main() {
 	})
 
 	api := r.Group("/api/v1")
+	api.Use(middleware.AuditMutationRequests())
 	{
 		api.GET("/health", handlers.Health)
 
@@ -49,7 +51,7 @@ func main() {
 		{
 			cats := handlers.NewCategoryHandler()
 			categories.GET("", cats.List)
-			categories.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), cats.Create)
+			categories.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCategoryWrite), cats.Create)
 		}
 
 		products := api.Group("/products")
@@ -57,10 +59,10 @@ func main() {
 			prods := handlers.NewProductHandler()
 			products.GET("", prods.List)
 			products.GET("/:id/packing-units", prods.ListPackingUnits)
-			products.POST("/:id/packing-units", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), prods.CreatePackingUnit)
+			products.POST("/:id/packing-units", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductCatalogWrite), prods.CreatePackingUnit)
 			products.GET("/:id", prods.Get)
-			products.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), prods.Create)
-			products.POST("/price", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), prods.SetPrice)
+			products.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductCatalogWrite), prods.Create)
+			products.POST("/price", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductPrice), prods.SetPrice)
 		}
 
 		stock := api.Group("/stock")
@@ -68,8 +70,8 @@ func main() {
 			s := handlers.NewStockHandler()
 			stock.GET("", s.List)
 			stock.GET("/product/:id", s.GetProductStock)
-			stock.POST("/adjust", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), s.Adjust)
-			stock.POST("/transfer", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), s.Transfer)
+			stock.POST("/adjust", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStockMove), s.Adjust)
+			stock.POST("/transfer", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStockMove), s.Transfer)
 			stock.GET("/low", s.LowStock)
 			stock.GET("/adjustments", s.GetAdjustments)
 		}
@@ -78,9 +80,9 @@ func main() {
 		{
 			s := handlers.NewSyncHandler()
 			sync.GET("/pending", s.GetPending)
-			sync.POST("/mark", authMw.RequireAuth(), s.MarkSynced)
-			sync.POST("/push", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), s.Push)
-			sync.POST("/conflict", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), s.ConflictResolution)
+			sync.POST("/mark", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermSyncMark), s.MarkSynced)
+			sync.POST("/push", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermSyncPush), s.Push)
+			sync.POST("/conflict", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermSyncConflict), s.ConflictResolution)
 		}
 
 		invoices := api.Group("/invoices")
@@ -88,7 +90,7 @@ func main() {
 			inv := handlers.NewInvoiceHandler()
 			invoices.GET("", inv.List)
 			invoices.GET("/:id", inv.Get)
-			invoices.POST("", authMw.RequireAuth(), inv.Create)
+			invoices.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceCreate), inv.Create)
 			invoices.GET("/gstr1", inv.GSTR1Export)
 		}
 
@@ -97,17 +99,17 @@ func main() {
 			cust := handlers.NewCustomerHandler()
 			customers.GET("", cust.List)
 			customers.GET("/:id", cust.Get)
-			customers.POST("", authMw.RequireAuth(), cust.Create)
-			customers.PUT("/:id", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), cust.Update)
+			customers.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCustomerCreate), cust.Create)
+			customers.PUT("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCustomerAdmin), cust.Update)
 		}
 
 		credit := api.Group("/credit")
 		{
 			cre := handlers.NewCreditHandler()
-			credit.GET("", cre.List)
-			credit.GET("/:id", cre.Get)
-			credit.POST("/payment", authMw.RequireAuth(), cre.Payment)
-			credit.GET("/overdue", cre.Overdue)
+			credit.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCreditView), cre.List)
+			credit.GET("/overdue", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCreditView), cre.Overdue)
+			credit.POST("/payment", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCreditPay), cre.Payment)
+			credit.GET("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCreditView), cre.Get)
 		}
 
 		vendors := api.Group("/vendors")
@@ -115,7 +117,7 @@ func main() {
 			v := handlers.NewVendorHandler()
 			vendors.GET("", v.List)
 			vendors.GET("/:id", v.Get)
-			vendors.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), v.Create)
+			vendors.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermVendorWrite), v.Create)
 		}
 
 		purchases := api.Group("/purchases")
@@ -123,9 +125,9 @@ func main() {
 			p := handlers.NewPurchaseHandler()
 			purchases.GET("", p.List)
 			purchases.GET("/:id", p.Get)
-			purchases.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), p.Create)
-			purchases.POST("/receive", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), p.Receive)
-			purchases.POST("/cancel/:id", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), p.Cancel)
+			purchases.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPurchaseWrite), p.Create)
+			purchases.POST("/receive", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPurchaseWrite), p.Receive)
+			purchases.POST("/cancel/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPurchaseWrite), p.Cancel)
 		}
 
 		analytics := api.Group("/analytics")
@@ -141,7 +143,7 @@ func main() {
 		audit := api.Group("/audit")
 		{
 			audit.GET("", handlers.NewAuditHandler().List)
-			audit.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), handlers.NewAuditHandler().Log)
+			audit.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermAuditPost), handlers.NewAuditHandler().Log)
 		}
 
 		stores := api.Group("/stores")
@@ -149,21 +151,21 @@ func main() {
 			s := handlers.NewStoreHandler()
 			stores.GET("", s.List)
 			stores.GET("/:id", s.Get)
-			stores.POST("", authMw.RequireAuth(), authMw.RequireRole("owner"), s.Create)
-			stores.PUT("/:id", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), s.Update)
+			stores.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStoreCreate), s.Create)
+			stores.PUT("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStoreUpdate), s.Update)
 		}
 
 		uoms := api.Group("/uoms")
 		{
 			u := handlers.NewUOMHandler()
 			uoms.GET("", u.List)
-			uoms.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), u.Create)
+			uoms.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUOMWrite), u.Create)
 		}
 
 		barcodes := api.Group("/barcodes")
 		{
 			b := handlers.NewBarcodeHandler()
-			barcodes.POST("/generate", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), b.Generate)
+			barcodes.POST("/generate", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermBarcodeGenerate), b.Generate)
 			barcodes.GET("/lookup/:barcode", b.Lookup)
 		}
 
@@ -177,7 +179,7 @@ func main() {
 		payments := api.Group("/payments")
 		{
 			p := handlers.NewPaymentHandler()
-			payments.POST("/split", authMw.RequireAuth(), p.AddSplitPayments)
+			payments.POST("/split", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPaymentSplit), p.AddSplitPayments)
 			payments.GET("/invoice/:id", p.GetInvoicePayments)
 			payments.GET("/settlement", p.GetSettlementReport)
 		}
@@ -186,15 +188,15 @@ func main() {
 		{
 			r := handlers.NewReturnHandler()
 			returns.GET("", r.List)
-			returns.POST("", authMw.RequireAuth(), r.Create)
-			returns.POST("/:id/approve", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), r.Approve)
+			returns.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnCreate), r.Create)
+			returns.POST("/:id/approve", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnApprove), r.Approve)
 		}
 
 		losses := api.Group("/losses")
 		{
 			l := handlers.NewLossHandler()
 			losses.GET("", l.List)
-			losses.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), l.Create)
+			losses.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermLossWrite), l.Create)
 		}
 
 		grn := api.Group("/grn")
@@ -202,7 +204,7 @@ func main() {
 			g := handlers.NewGRNHandler()
 			grn.GET("", g.List)
 			grn.GET("/:id", g.Get)
-			grn.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager", "warehouse"), g.Create)
+			grn.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermGRNWrite), g.Create)
 		}
 
 		reports := api.Group("/reports")
@@ -219,7 +221,7 @@ func main() {
 			expenses.GET("", e.List)
 			expenses.GET("/categories", e.GetCategories)
 			expenses.GET("/summary", e.GetSummary)
-			expenses.POST("", authMw.RequireAuth(), authMw.RequireRole("owner", "manager"), e.Create)
+			expenses.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermExpenseWrite), e.Create)
 		}
 	}
 

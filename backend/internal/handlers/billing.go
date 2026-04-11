@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gbos/internal/db"
 	"gbos/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type InvoiceHandler struct{}
@@ -20,45 +20,66 @@ func NewInvoiceHandler() *InvoiceHandler {
 	return &InvoiceHandler{}
 }
 
-func deductStockFromSale(tx *sql.Tx, productID, storeID, batchHint string, qty float64) error {
+// deductStockFromSale removes qty from stock (FIFO when batch hint missing or invalid) and returns
+// the batch and unit cost_price actually consumed for COGS snapshotting on invoice_lines.
+func deductStockFromSale(tx *sql.Tx, productID, storeID, batchHint string, qty float64) (actualBatch string, unitCost float64, err error) {
 	if qty <= 0 {
-		return nil
+		return "DEFAULT", 0, nil
 	}
 	if batchHint != "" && batchHint != "DEFAULT" {
-		res, err := tx.Exec(`UPDATE stock SET quantity = quantity - ? WHERE product_id = ? AND store_id = ? AND batch_no = ? AND quantity >= ?`,
-			qty, productID, storeID, batchHint, qty)
-		if err != nil {
-			return err
-		}
-		n, _ := res.RowsAffected()
-		if n == 1 {
-			return nil
+		var cp float64
+		var b sql.NullString
+		qerr := tx.QueryRow(`SELECT cost_price, batch_no FROM stock
+			WHERE product_id = ? AND store_id = ? AND batch_no = ? AND quantity >= ?`,
+			productID, storeID, batchHint, qty).Scan(&cp, &b)
+		if qerr == nil {
+			res, e2 := tx.Exec(`UPDATE stock SET quantity = quantity - ? WHERE product_id = ? AND store_id = ? AND batch_no = ? AND quantity >= ?`,
+				qty, productID, storeID, batchHint, qty)
+			if e2 != nil {
+				return "", 0, e2
+			}
+			n, _ := res.RowsAffected()
+			if n == 1 {
+				ab := batchHint
+				if b.Valid && b.String != "" {
+					ab = b.String
+				}
+				return ab, cp, nil
+			}
+		} else if qerr != sql.ErrNoRows {
+			return "", 0, qerr
 		}
 	}
 	var rowID string
-	err := tx.QueryRow(`
-		SELECT id FROM stock
+	var cp float64
+	var b sql.NullString
+	err = tx.QueryRow(`
+		SELECT id, cost_price, batch_no FROM stock
 		WHERE product_id = ? AND store_id = ? AND quantity >= ?
 		ORDER BY
 			CASE WHEN expiry_date IS NULL OR TRIM(expiry_date) = '' THEN 1 ELSE 0 END ASC,
 			expiry_date ASC,
 			datetime(created_at) ASC
-		LIMIT 1`, productID, storeID, qty).Scan(&rowID)
+		LIMIT 1`, productID, storeID, qty).Scan(&rowID, &cp, &b)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("insufficient stock for product %s", productID)
+		return "", 0, fmt.Errorf("insufficient stock for product %s", productID)
 	}
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	res, err := tx.Exec(`UPDATE stock SET quantity = quantity - ? WHERE id = ? AND quantity >= ?`, qty, rowID, qty)
 	if err != nil {
-		return err
+		return "", 0, err
 	}
 	n, _ := res.RowsAffected()
 	if n != 1 {
-		return fmt.Errorf("insufficient stock for product %s", productID)
+		return "", 0, fmt.Errorf("insufficient stock for product %s", productID)
 	}
-	return nil
+	actualBatch = "DEFAULT"
+	if b.Valid && b.String != "" {
+		actualBatch = b.String
+	}
+	return actualBatch, cp, nil
 }
 
 func (h *InvoiceHandler) List(c *gin.Context) {
@@ -142,7 +163,7 @@ func (h *InvoiceHandler) Get(c *gin.Context) {
 	}
 
 	rows, _ := db.DB.Query(`
-		SELECT id, invoice_id, product_id, batch_no, quantity, rate, discount, cgst, sgst, igst, total
+		SELECT id, invoice_id, product_id, batch_no, quantity, rate, discount, cgst, sgst, igst, total, unit_cost_at_sale
 		FROM invoice_items WHERE invoice_id = ?`, id)
 	defer rows.Close()
 
@@ -150,7 +171,7 @@ func (h *InvoiceHandler) Get(c *gin.Context) {
 	for rows.Next() {
 		var item models.InvoiceItem
 		rows.Scan(&item.ID, &item.InvoiceID, &item.ProductID, &item.BatchNo, &item.Quantity, &item.Rate,
-			&item.Discount, &item.CGST, &item.SGST, &item.IGST, &item.Total)
+			&item.Discount, &item.CGST, &item.SGST, &item.IGST, &item.Total, &item.UnitCostAtSale)
 		items = append(items, item)
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -160,20 +181,20 @@ func (h *InvoiceHandler) Get(c *gin.Context) {
 }
 
 type InvoiceRequest struct {
-	StoreID      string           `json:"store_id" binding:"required"`
-	UserID       string           `json:"user_id" binding:"required"`
-	CustomerID   *string          `json:"customer_id"`
+	StoreID     string           `json:"store_id" binding:"required"`
+	UserID      string           `json:"user_id" binding:"required"`
+	CustomerID  *string          `json:"customer_id"`
 	InvoiceDate string           `json:"invoice_date" binding:"required"`
-	SubTotal     float64          `json:"sub_total" binding:"required"`
-	CGST         float64          `json:"cgst"`
-	SGST         float64          `json:"sgst"`
-	IGST         float64          `json:"igst"`
-	Discount     float64          `json:"discount"`
-	RoundOff     float64          `json:"round_off"`
-	Total        float64          `json:"total" binding:"required"`
-	Status       string           `json:"status" binding:"required"`
-	PaymentMode  string           `json:"payment_mode" binding:"required"`
-	Items        []InvoiceItemReq `json:"items" binding:"required"`
+	SubTotal    float64          `json:"sub_total" binding:"required"`
+	CGST        float64          `json:"cgst"`
+	SGST        float64          `json:"sgst"`
+	IGST        float64          `json:"igst"`
+	Discount    float64          `json:"discount"`
+	RoundOff    float64          `json:"round_off"`
+	Total       float64          `json:"total" binding:"required"`
+	Status      string           `json:"status" binding:"required"`
+	PaymentMode string           `json:"payment_mode" binding:"required"`
+	Items       []InvoiceItemReq `json:"items" binding:"required"`
 }
 
 type InvoiceItemReq struct {
@@ -215,6 +236,26 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 		return
 	}
 
+	if req.CustomerID != nil && *req.CustomerID != "" {
+		var custStore sql.NullString
+		err = tx.QueryRow(`SELECT store_id FROM customers WHERE id = ?`, *req.CustomerID).Scan(&custStore)
+		if err == sql.ErrNoRows {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "customer not found"})
+			return
+		}
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !custStore.Valid || custStore.String == "" || custStore.String != req.StoreID {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "customer does not belong to this store"})
+			return
+		}
+	}
+
 	if req.CustomerID != nil && req.PaymentMode == "credit" {
 		var creditLimit float64
 		err = tx.QueryRow(`SELECT credit_limit FROM customers WHERE id = ?`, *req.CustomerID).Scan(&creditLimit)
@@ -234,10 +275,10 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 	}
 
 	type taxedLine struct {
-		item   InvoiceItemReq
-		cgst   float64
-		sgst   float64
-		batch  string
+		item  InvoiceItemReq
+		cgst  float64
+		sgst  float64
+		batch string
 	}
 	lines := make([]taxedLine, 0, len(req.Items))
 	var sumCGST, sumSGST float64
@@ -258,9 +299,6 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 		sumCGST += cgst
 		sumSGST += sgst
 		batchNo := item.BatchNo
-		if batchNo == "" {
-			batchNo = "DEFAULT"
-		}
 		lines = append(lines, taxedLine{item, cgst, sgst, batchNo})
 	}
 
@@ -287,22 +325,22 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 	}
 
 	for _, tl := range lines {
-		itemID := uuid.New().String()
-		_, err = tx.Exec(`INSERT INTO invoice_items 
-			(id, invoice_id, product_id, batch_no, quantity, rate, discount, cgst, sgst, igst, total)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-			itemID, invoiceID, tl.item.ProductID, tl.batch, tl.item.Quantity,
-			tl.item.Rate, tl.item.Discount, tl.cgst, tl.sgst, tl.item.Total)
-		if err != nil {
+		actualBatch, unitCost, derr := deductStockFromSale(tx, tl.item.ProductID, req.StoreID, tl.batch, tl.item.Quantity)
+		if derr != nil {
 			tx.Rollback()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert item: " + err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": derr.Error()})
 			return
 		}
 
-		err = deductStockFromSale(tx, tl.item.ProductID, req.StoreID, tl.batch, tl.item.Quantity)
+		itemID := uuid.New().String()
+		_, err = tx.Exec(`INSERT INTO invoice_items 
+			(id, invoice_id, product_id, batch_no, quantity, rate, discount, cgst, sgst, igst, total, unit_cost_at_sale)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+			itemID, invoiceID, tl.item.ProductID, actualBatch, tl.item.Quantity,
+			tl.item.Rate, tl.item.Discount, tl.cgst, tl.sgst, tl.item.Total, unitCost)
 		if err != nil {
 			tx.Rollback()
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to insert item: " + err.Error()})
 			return
 		}
 	}
@@ -368,14 +406,14 @@ func (h *InvoiceHandler) GSTR1Export(c *gin.Context) {
 		rows.Scan(&invoiceNo, &invoiceDate, &total, &cgst, &sgst, &igst, &gstin, &customerName)
 
 		gstr1Data = append(gstr1Data, map[string]interface{}{
-			"invoice_no": invoiceNo,
-			"date": invoiceDate.Format("02-01-2006"),
+			"invoice_no":    invoiceNo,
+			"date":          invoiceDate.Format("02-01-2006"),
 			"customer_name": customerName,
-			"gstin": gstin,
+			"gstin":         gstin,
 			"taxable_value": total - cgst - sgst - igst,
-			"cgst": cgst, "sgst": sgst, "igst": igst,
+			"cgst":          cgst, "sgst": sgst, "igst": igst,
 			"total_tax": cgst + sgst + igst,
-			"total": total,
+			"total":     total,
 		})
 		totalTax += cgst + sgst + igst
 		totalInvoice += total
@@ -385,8 +423,8 @@ func (h *InvoiceHandler) GSTR1Export(c *gin.Context) {
 		"month": month,
 		"summary": map[string]interface{}{
 			"total_invoices": len(gstr1Data),
-			"total_tax": totalTax,
-			"total_value": totalInvoice,
+			"total_tax":      totalTax,
+			"total_value":    totalInvoice,
 		},
 		"invoices": gstr1Data,
 	})

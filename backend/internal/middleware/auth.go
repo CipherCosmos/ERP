@@ -4,9 +4,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"gbos/internal/auth"
 	"gbos/internal/db"
+	"gbos/internal/rbac"
+	"github.com/gin-gonic/gin"
 )
 
 type AuthMiddleware struct{}
@@ -77,6 +78,19 @@ func (m *AuthMiddleware) RequireRole(allowedRoles ...string) gin.HandlerFunc {
 		}
 		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		c.Abort()
+	}
+}
+
+// RequirePermission enforces table-driven RBAC (use after RequireAuth).
+func (m *AuthMiddleware) RequirePermission(permission string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role := GetRole(c)
+		if !rbac.RoleHas(role, permission) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }
 

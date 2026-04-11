@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gbos/internal/db"
 	"gbos/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type GRNHandler struct{}
@@ -18,20 +18,20 @@ func NewGRNHandler() *GRNHandler {
 }
 
 type CreateGRNRequest struct {
-	POID         string              `json:"po_id" binding:"required"`
-	ReceivedDate string              `json:"received_date" binding:"required"`
-	ReceivedBy   string              `json:"received_by" binding:"required"`
-	Notes        string              `json:"notes"`
-	Items        []GRNItemRequest    `json:"items" binding:"required"`
+	POID         string           `json:"po_id" binding:"required"`
+	ReceivedDate string           `json:"received_date" binding:"required"`
+	ReceivedBy   string           `json:"received_by" binding:"required"`
+	Notes        string           `json:"notes"`
+	Items        []GRNItemRequest `json:"items" binding:"required"`
 }
 
 type GRNItemRequest struct {
-	ProductID    string   `json:"product_id" binding:"required"`
-	OrderedQty   float64  `json:"ordered_qty"`
-	ReceivedQty  float64  `json:"received_qty" binding:"required"`
-	AcceptedQty  float64  `json:"accepted_qty"`
-	RejectedQty  float64  `json:"rejected_qty"`
-	Reason       string   `json:"reason"`
+	ProductID   string  `json:"product_id" binding:"required"`
+	OrderedQty  float64 `json:"ordered_qty"`
+	ReceivedQty float64 `json:"received_qty" binding:"required"`
+	AcceptedQty float64 `json:"accepted_qty"`
+	RejectedQty float64 `json:"rejected_qty"`
+	Reason      string  `json:"reason"`
 }
 
 func (h *GRNHandler) Create(c *gin.Context) {

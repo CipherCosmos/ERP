@@ -5,12 +5,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"golang.org/x/crypto/bcrypt"
 	"gbos/internal/auth"
 	"gbos/internal/db"
 	"gbos/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type LoginRequest struct {
@@ -71,8 +71,8 @@ func Register(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`
 		Password string `json:"password" binding:"required"`
-		Role    string `json:"role" binding:"required"`
-		StoreID string `json:"store_id" binding:"required"`
+		Role     string `json:"role" binding:"required"`
+		StoreID  string `json:"store_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

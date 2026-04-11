@@ -4,10 +4,10 @@ import (
 	"database/sql"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gbos/internal/db"
 	"gbos/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type StoreHandler struct{}
@@ -218,9 +218,9 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 	`
 
 	var (
-		id, name, nameHi, nameKn, pbarcode, hsn, uomID, categoryID string
+		id, name, nameHi, nameKn, pbarcode, hsn, uomID, categoryID   string
 		baseQty, gstRate, minStock, sellPrice, mrp, wholesale, stock float64
-		allowDec, isFree, isActive                                    int
+		allowDec, isFree, isActive                                   int
 	)
 
 	err := db.DB.QueryRow(sel+` WHERE p.barcode = ? AND p.is_active = 1`, storeID, storeID, barcode).Scan(

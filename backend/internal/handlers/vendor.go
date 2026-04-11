@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gbos/internal/db"
 	"gbos/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type VendorHandler struct{}
@@ -80,13 +80,13 @@ func (h *VendorHandler) Get(c *gin.Context) {
 
 func (h *VendorHandler) Create(c *gin.Context) {
 	var req struct {
-		Name         string  `json:"name" binding:"required"`
-		Phone        string  `json:"phone"`
-		Address      string  `json:"address"`
-		GSTIN        string  `json:"gstin"`
-		State        string  `json:"state"`
-		CreditDays   int     `json:"credit_days"`
-		CreditLimit  float64 `json:"credit_limit"`
+		Name        string  `json:"name" binding:"required"`
+		Phone       string  `json:"phone"`
+		Address     string  `json:"address"`
+		GSTIN       string  `json:"gstin"`
+		State       string  `json:"state"`
+		CreditDays  int     `json:"credit_days"`
+		CreditLimit float64 `json:"credit_limit"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -191,14 +191,14 @@ func (h *PurchaseHandler) Get(c *gin.Context) {
 
 	type POItem struct {
 		ID          string  `json:"id"`
-		ProductID  string  `json:"product_id"`
-		Name       string  `json:"name"`
-		Quantity   float64 `json:"quantity"`
-		UOMID      string  `json:"uom_id"`
+		ProductID   string  `json:"product_id"`
+		Name        string  `json:"name"`
+		Quantity    float64 `json:"quantity"`
+		UOMID       string  `json:"uom_id"`
 		ReceivedQty float64 `json:"received_qty"`
-		Rate       float64 `json:"rate"`
-		Discount   float64 `json:"discount"`
-		Total      float64 `json:"total"`
+		Rate        float64 `json:"rate"`
+		Discount    float64 `json:"discount"`
+		Total       float64 `json:"total"`
 	}
 	var items []POItem
 	for rows.Next() {
@@ -289,9 +289,9 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 
 func (h *PurchaseHandler) Receive(c *gin.Context) {
 	var req struct {
-		POID     string `json:"po_id" binding:"required"`
-		StoreID  string `json:"store_id" binding:"required"`
-		Items    []struct {
+		POID    string `json:"po_id" binding:"required"`
+		StoreID string `json:"store_id" binding:"required"`
+		Items   []struct {
 			ProductID string  `json:"product_id" binding:"required"`
 			Quantity  float64 `json:"quantity" binding:"required"`
 			BatchNo   string  `json:"batch_no"`

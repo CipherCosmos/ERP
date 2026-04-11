@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/google/uuid"
+	_ "github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -145,6 +145,25 @@ func migrateSchema() error {
 	} else if !ok {
 		if _, err := DB.Exec(`ALTER TABLE vendors ADD COLUMN credit_limit REAL DEFAULT 0`); err != nil {
 			return fmt.Errorf("vendors.credit_limit: %w", err)
+		}
+	}
+
+	if ok, err := columnExists("invoice_items", "unit_cost_at_sale"); err != nil {
+		return err
+	} else if !ok {
+		if _, err := DB.Exec(`ALTER TABLE invoice_items ADD COLUMN unit_cost_at_sale REAL NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("invoice_items.unit_cost_at_sale: %w", err)
+		}
+		// Best-effort backfill for legacy rows (ambiguous batch; uses any matching stock row).
+		if _, err := DB.Exec(`
+			UPDATE invoice_items SET unit_cost_at_sale = COALESCE((
+				SELECT s.cost_price FROM invoices i
+				JOIN stock s ON s.product_id = invoice_items.product_id AND s.store_id = i.store_id
+				WHERE i.id = invoice_items.invoice_id
+				LIMIT 1
+			), 0)
+			WHERE unit_cost_at_sale = 0`); err != nil {
+			log.Printf("gbos migrate: invoice_items cost backfill: %v", err)
 		}
 	}
 
@@ -335,6 +354,7 @@ func createTables() error {
 		sgst REAL DEFAULT 0,
 		igst REAL DEFAULT 0,
 		total REAL DEFAULT 0,
+		unit_cost_at_sale REAL NOT NULL DEFAULT 0,
 		created_at TEXT DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (invoice_id) REFERENCES invoices(id),
 		FOREIGN KEY (product_id) REFERENCES products(id)
@@ -667,6 +687,14 @@ func seedDefaults() error {
 		return err
 	}
 
+	helperHash, _ := bcrypt.GenerateFromPassword([]byte("helper123"), bcrypt.DefaultCost)
+	helperID := uuid.New().String()
+	_, err = DB.Exec(`INSERT INTO users (id, username, password_hash, role, store_id) VALUES (?, 'helper', ?, 'helper', ?)`,
+		helperID, string(helperHash), storeID)
+	if err != nil {
+		return err
+	}
+
 	custID := uuid.New().String()
 	_, err = DB.Exec(`INSERT INTO customers (id, name, phone, credit_limit, is_wholesale, store_id) VALUES (?, 'Demo Wholesale Mart', '9990001111', 50000, 1, ?)`,
 		custID, storeID)
@@ -681,7 +709,7 @@ func seedDefaults() error {
 		return err
 	}
 
-	log.Println("gbos: seeded demo data — admin/admin123, cashier/cashier123; barcodes 8901001100001–003; Demo Wholesale Mart (credit/wholesale)")
+	log.Println("gbos: seeded demo data — admin/admin123, cashier/cashier123, helper/helper123; barcodes 8901001100001–003; Demo Wholesale Mart (credit/wholesale)")
 	return nil
 }
 

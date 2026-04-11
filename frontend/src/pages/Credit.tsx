@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { creditApi } from '../services/api';
 
 interface CreditEntry {
   id: string;
@@ -32,17 +33,39 @@ export default function Credit() {
 
   useEffect(() => {
     if (store) loadCreditEntries();
-  }, [store, activeTab]);
+  }, [store]);
+
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const displayEntries = useMemo(() => {
+    if (activeTab === 'all') return entries;
+    if (activeTab === 'pending') {
+      return entries.filter(
+        (e) => (e.status === 'pending' || e.status === 'partial') && e.type === 'issue'
+      );
+    }
+    return entries.filter(
+      (e) =>
+        e.type === 'issue' &&
+        e.status !== 'paid' &&
+        !!e.due_date &&
+        e.due_date.slice(0, 10) < todayISO
+    );
+  }, [entries, activeTab, todayISO]);
+
+  const totalOutstanding = useMemo(
+    () =>
+      entries
+        .filter((e) => e.status !== 'paid' && e.type === 'issue')
+        .reduce((sum, e) => sum + (e.amount - e.paid_amount), 0),
+    [entries]
+  );
 
   const loadCreditEntries = async () => {
     if (!store) return;
     setLoading(true);
     try {
-      let url = `/api/v1/credit?store_id=${store.id}`;
-      if (activeTab === 'overdue') url += '&status=overdue';
-      
-      const { data } = await fetch(url).then(r => r.json());
-      setEntries(data || []);
+      const { data } = await creditApi.list({ store_id: store.id });
+      setEntries(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to load credit entries:', err);
     } finally {
@@ -53,10 +76,10 @@ export default function Credit() {
   const handlePayment = async () => {
     if (!selectedCustomer || !paymentAmount) return;
     try {
-      await fetch('/api/v1/credit/payment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ customer_id: selectedCustomer, amount: parseFloat(paymentAmount), method: 'cash' }),
+      await creditApi.payment({
+        customer_id: selectedCustomer,
+        amount: parseFloat(paymentAmount),
+        method: 'cash',
       });
       setShowPaymentModal(false);
       setPaymentAmount('');
@@ -67,8 +90,6 @@ export default function Credit() {
   };
 
   if (!user || user.role === 'cashier') return null;
-
-  const totalOutstanding = entries.filter(e => e.status !== 'paid').reduce((sum, e) => sum + (e.amount - e.paid_amount), 0);
 
   return (
     <div style={styles.container}>
@@ -84,7 +105,9 @@ export default function Credit() {
         </div>
         <div style={styles.summaryCard}>
           <div style={styles.summaryLabel}>Pending Entries</div>
-          <div style={styles.summaryValue}>{entries.filter(e => e.status === 'pending' || e.status === 'partial').length}</div>
+          <div style={styles.summaryValue}>
+            {entries.filter((e) => (e.status === 'pending' || e.status === 'partial') && e.type === 'issue').length}
+          </div>
         </div>
       </div>
 
@@ -111,7 +134,7 @@ export default function Credit() {
             </tr>
           </thead>
           <tbody>
-            {entries.map((e) => (
+            {displayEntries.map((e) => (
               <tr key={e.id} style={styles.tr}>
                 <td style={styles.td}>{e.customer_name}</td>
                 <td style={styles.td}>

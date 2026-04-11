@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"gbos/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gbos/internal/db"
 )
 
 type PaymentHandler struct{}
@@ -19,7 +19,7 @@ func NewPaymentHandler() *PaymentHandler {
 }
 
 type SplitPaymentRequest struct {
-	InvoiceID string             `json:"invoice_id" binding:"required"`
+	InvoiceID string            `json:"invoice_id" binding:"required"`
 	Payments  []PaymentEntryReq `json:"payments" binding:"required"`
 }
 
@@ -117,22 +117,22 @@ type SettlementReportRequest struct {
 }
 
 type SettlementReport struct {
-	Date                 string  `json:"date"`
-	TotalSales           float64 `json:"total_sales"`
-	TotalInvoices        int     `json:"total_invoices"`
-	CashTotal            float64 `json:"cash_total"`
-	UPITotal             float64 `json:"upi_total"`
-	CardTotal            float64 `json:"card_total"`
-	CreditTotal          float64 `json:"credit_total"`
-	BankTotal            float64 `json:"bank_total"`
-	CashCount            int     `json:"cash_count"`
-	UPICount             int     `json:"upi_count"`
-	CardCount            int     `json:"card_count"`
-	CreditCount          int     `json:"credit_count"`
-	BankCount            int     `json:"bank_count"`
-	ReturnsTotal         float64 `json:"returns_total"`
-	NetCollections       float64 `json:"net_collections"`
-	SplitBreakdownUsed   bool    `json:"split_breakdown_used"`
+	Date               string  `json:"date"`
+	TotalSales         float64 `json:"total_sales"`
+	TotalInvoices      int     `json:"total_invoices"`
+	CashTotal          float64 `json:"cash_total"`
+	UPITotal           float64 `json:"upi_total"`
+	CardTotal          float64 `json:"card_total"`
+	CreditTotal        float64 `json:"credit_total"`
+	BankTotal          float64 `json:"bank_total"`
+	CashCount          int     `json:"cash_count"`
+	UPICount           int     `json:"upi_count"`
+	CardCount          int     `json:"card_count"`
+	CreditCount        int     `json:"credit_count"`
+	BankCount          int     `json:"bank_count"`
+	ReturnsTotal       float64 `json:"returns_total"`
+	NetCollections     float64 `json:"net_collections"`
+	SplitBreakdownUsed bool    `json:"split_breakdown_used"`
 }
 
 func normalizePayMode(mode string) string {

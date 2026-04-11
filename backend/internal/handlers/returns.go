@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"gbos/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gbos/internal/db"
 )
 
 type ReturnHandler struct{}
@@ -18,13 +18,13 @@ func NewReturnHandler() *ReturnHandler {
 
 type CreateReturnRequest struct {
 	InvoiceID  *string `json:"invoice_id"`
-	ProductID  string   `json:"product_id" binding:"required"`
-	Quantity   float64  `json:"quantity" binding:"required"`
-	Amount     float64  `json:"amount" binding:"required"`
-	Reason     string   `json:"reason" binding:"required"`
-	RefundMode string   `json:"refund_mode"`
-	StoreID    string   `json:"store_id" binding:"required"`
-	UserID     string   `json:"user_id" binding:"required"`
+	ProductID  string  `json:"product_id" binding:"required"`
+	Quantity   float64 `json:"quantity" binding:"required"`
+	Amount     float64 `json:"amount" binding:"required"`
+	Reason     string  `json:"reason" binding:"required"`
+	RefundMode string  `json:"refund_mode"`
+	StoreID    string  `json:"store_id" binding:"required"`
+	UserID     string  `json:"user_id" binding:"required"`
 }
 
 func (h *ReturnHandler) Create(c *gin.Context) {

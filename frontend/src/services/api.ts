@@ -144,6 +144,12 @@ export const reportApi = {
     api.get('/reports/gstr-3b', { params }),
 };
 
+export const creditApi = {
+  list: (params: { store_id: string; customer_id?: string }) => api.get('/credit', { params }),
+  payment: (data: { customer_id: string; amount: number; method: string; notes?: string }) =>
+    api.post('/credit/payment', data),
+};
+
 export const expenseApi = {
   list: (params: { store_id: string; start_date?: string; end_date?: string; category_id?: string }) =>
     api.get('/expenses', { params }),

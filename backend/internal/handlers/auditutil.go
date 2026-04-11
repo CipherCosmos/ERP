@@ -1,10 +1,10 @@
 package handlers
 
 import (
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gbos/internal/db"
 	"gbos/internal/middleware"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func auditAction(c *gin.Context, action, tableName, recordID, oldVal, newVal string) {

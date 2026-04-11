@@ -6,10 +6,11 @@ import (
 	"math"
 	"net/http"
 
+	"gbos/internal/db"
+	"gbos/internal/middleware"
+	"gbos/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gbos/internal/db"
-	"gbos/internal/models"
 )
 
 type CustomerHandler struct{}
@@ -89,21 +90,21 @@ func (h *CustomerHandler) Get(c *gin.Context) {
 		WHERE customer_id = ? AND status != 'paid'`, id).Scan(&outstanding)
 
 	c.JSON(http.StatusOK, gin.H{
-		"customer":   customer,
+		"customer":    customer,
 		"outstanding": outstanding,
 	})
 }
 
 func (h *CustomerHandler) Create(c *gin.Context) {
 	var req struct {
-		Name         string  `json:"name" binding:"required"`
-		NameHi       string  `json:"name_hi"`
-		Phone        string  `json:"phone"`
-		Address      string  `json:"address"`
-		GSTIN        string  `json:"gstin"`
-		CreditLimit  float64 `json:"credit_limit"`
-		IsWholesale  bool    `json:"is_wholesale"`
-		StoreID      string  `json:"store_id"`
+		Name        string  `json:"name" binding:"required"`
+		NameHi      string  `json:"name_hi"`
+		Phone       string  `json:"phone"`
+		Address     string  `json:"address"`
+		GSTIN       string  `json:"gstin"`
+		CreditLimit float64 `json:"credit_limit"`
+		IsWholesale bool    `json:"is_wholesale"`
+		StoreID     string  `json:"store_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -133,13 +134,13 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 func (h *CustomerHandler) Update(c *gin.Context) {
 	id := c.Param("id")
 	var req struct {
-		Name         string   `json:"name"`
-		NameHi       string   `json:"name_hi"`
-		Phone        string   `json:"phone"`
-		Address      string   `json:"address"`
-		GSTIN        string   `json:"gstin"`
-		CreditLimit  *float64 `json:"credit_limit"`
-		IsWholesale  *bool    `json:"is_wholesale"`
+		Name        string   `json:"name"`
+		NameHi      string   `json:"name_hi"`
+		Phone       string   `json:"phone"`
+		Address     string   `json:"address"`
+		GSTIN       string   `json:"gstin"`
+		CreditLimit *float64 `json:"credit_limit"`
+		IsWholesale *bool    `json:"is_wholesale"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -191,6 +192,10 @@ func NewCreditHandler() *CreditHandler {
 func (h *CreditHandler) List(c *gin.Context) {
 	customerID := c.Query("customer_id")
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
 
 	query := `SELECT ce.id, ce.customer_id, c.name as customer_name, ce.invoice_id, 
 		ce.amount, ce.type, ce.due_date, ce.paid_amount, ce.status, ce.created_at
@@ -203,10 +208,8 @@ func (h *CreditHandler) List(c *gin.Context) {
 		query += " AND ce.customer_id = ?"
 		args = append(args, customerID)
 	}
-	if storeID != "" {
-		query += " AND c.store_id = ?"
-		args = append(args, storeID)
-	}
+	query += " AND c.store_id = ?"
+	args = append(args, storeID)
 	query += " ORDER BY ce.created_at DESC LIMIT 100"
 
 	rows, err := db.DB.Query(query, args...)
@@ -216,7 +219,7 @@ func (h *CreditHandler) List(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var entries []map[string]interface{}
+	entries := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var id, customerID, customerName, invoiceID, creditType, status string
 		var amount, paidAmount float64
@@ -268,6 +271,24 @@ func (h *CreditHandler) Payment(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	headerStore := middleware.GetStoreID(c)
+	if headerStore == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store context required"})
+		return
+	}
+	var custStore sql.NullString
+	if err := db.DB.QueryRow(`SELECT store_id FROM customers WHERE id = ?`, req.CustomerID).Scan(&custStore); err == sql.ErrNoRows {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "customer not found"})
+		return
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !custStore.Valid || custStore.String != headerStore {
+		c.JSON(http.StatusForbidden, gin.H{"error": "customer does not belong to current store"})
 		return
 	}
 
@@ -339,6 +360,10 @@ func (h *CreditHandler) Payment(c *gin.Context) {
 
 func (h *CreditHandler) Overdue(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
 
 	query := `
 		SELECT c.id, c.name, c.phone, c.credit_limit, 
@@ -348,12 +373,8 @@ func (h *CreditHandler) Overdue(c *gin.Context) {
 		FROM customers c
 		LEFT JOIN credit_entries ce ON c.id = ce.customer_id 
 			AND ce.status != 'paid' AND ce.due_date < date('now')
-		WHERE 1=1`
-	args := []interface{}{}
-	if storeID != "" {
-		query += " AND c.store_id = ?"
-		args = append(args, storeID)
-	}
+		WHERE c.store_id = ?`
+	args := []interface{}{storeID}
 	query += ` GROUP BY c.id, c.name, c.phone, c.credit_limit
 		HAVING outstanding > 0
 		ORDER BY outstanding DESC`
@@ -365,7 +386,7 @@ func (h *CreditHandler) Overdue(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var overdue []map[string]interface{}
+	overdue := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var id, name, phone string
 		var creditLimit, outstanding float64

@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"gbos/internal/db"
+	"github.com/gin-gonic/gin"
 )
 
 func Health(c *gin.Context) {

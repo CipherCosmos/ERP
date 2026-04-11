@@ -4,10 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"gbos/internal/db"
+	"github.com/gin-gonic/gin"
 )
 
 type AnalyticsHandler struct{}
@@ -18,6 +19,10 @@ func NewAnalyticsHandler() *AnalyticsHandler {
 
 func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
 	dateRange := c.DefaultQuery("range", "today")
 
 	var startDate, endDate string
@@ -60,23 +65,35 @@ func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 	)`, storeID).Scan(&lowStockCount)
 
 	var creditOutStanding float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(amount - paid_amount), 0) FROM credit_entries WHERE status != 'paid'`).Scan(&creditOutStanding)
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(ce.amount - ce.paid_amount), 0)
+		FROM credit_entries ce
+		JOIN customers c ON ce.customer_id = c.id
+		WHERE ce.status IN ('pending','partial') AND c.store_id = ?`, storeID).Scan(&creditOutStanding)
 
 	c.JSON(http.StatusOK, map[string]interface{}{
-		"revenue":         revenue,
-		"gst_collected":   gstCollected,
-		"discount_given":  discountGiven,
-		"invoice_count":  invoiceCount,
+		"revenue":           revenue,
+		"gst_collected":     gstCollected,
+		"discount_given":    discountGiven,
+		"invoice_count":     invoiceCount,
 		"transaction_count": transactionCount,
-		"avg_bill_value":  func() float64 { if invoiceCount > 0 { return revenue / float64(invoiceCount) }; return 0 }(),
-		"low_stock_count": lowStockCount,
+		"avg_bill_value": func() float64 {
+			if invoiceCount > 0 {
+				return revenue / float64(invoiceCount)
+			}
+			return 0
+		}(),
+		"low_stock_count":    lowStockCount,
 		"credit_outstanding": creditOutStanding,
-		"date_range":      map[string]string{"start": startDate, "end": endDate},
+		"date_range":         map[string]string{"start": startDate, "end": endDate},
 	})
 }
 
 func (h *AnalyticsHandler) SalesByCategory(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
@@ -106,7 +123,7 @@ func (h *AnalyticsHandler) SalesByCategory(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var categorySales []map[string]interface{}
+	categorySales := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var name string
 		var sales float64
@@ -122,7 +139,18 @@ func (h *AnalyticsHandler) SalesByCategory(c *gin.Context) {
 
 func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 	storeID := c.Query("store_id")
-	limit := c.DefaultQuery("limit", "20")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	limitStr := c.DefaultQuery("limit", "20")
+	limitN, err := strconv.Atoi(limitStr)
+	if err != nil || limitN < 1 {
+		limitN = 20
+	}
+	if limitN > 100 {
+		limitN = 100
+	}
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
@@ -142,7 +170,7 @@ func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 		query += " AND i.invoice_date <= ?"
 		args = append(args, endDate+" 23:59:59")
 	}
-	query += fmt.Sprintf(" GROUP BY p.id ORDER BY sales DESC LIMIT %s", limit)
+	query += fmt.Sprintf(" GROUP BY p.id ORDER BY sales DESC LIMIT %d", limitN)
 
 	rows, err := db.DB.Query(query, args...)
 	if err != nil {
@@ -151,7 +179,7 @@ func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var topProducts []map[string]interface{}
+	topProducts := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var name string
 		var qty, sales float64
@@ -166,6 +194,10 @@ func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 
 func (h *AnalyticsHandler) HourlySales(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
 	date := c.DefaultQuery("date", time.Now().Format("2006-01-02"))
 
 	rows, err := db.DB.Query(`
@@ -180,7 +212,7 @@ func (h *AnalyticsHandler) HourlySales(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var hourlySales []map[string]interface{}
+	hourlySales := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var hour string
 		var count int
@@ -196,6 +228,10 @@ func (h *AnalyticsHandler) HourlySales(c *gin.Context) {
 
 func (h *AnalyticsHandler) PaymentModeBreakup(c *gin.Context) {
 	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 
@@ -219,7 +255,7 @@ func (h *AnalyticsHandler) PaymentModeBreakup(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var paymentBreakup []map[string]interface{}
+	paymentBreakup := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var mode string
 		var count int
@@ -273,7 +309,7 @@ func (h *AuditHandler) List(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var logs []map[string]interface{}
+	logs := make([]map[string]interface{}, 0)
 	for rows.Next() {
 		var id, userID, username, storeID, action, tableName, recordID string
 		var oldValue, newValue sql.NullString
@@ -325,17 +361,17 @@ func NewReportHandler() *ReportHandler {
 }
 
 type ProfitLossReport struct {
-	StartDate      string  `json:"start_date"`
-	EndDate        string  `json:"end_date"`
-	TotalRevenue   float64 `json:"total_revenue"`
-	TotalCOGS      float64 `json:"total_cogs"`
-	GrossProfit    float64 `json:"gross_profit"`
-	GrossMargin    float64 `json:"gross_margin_percent"`
-	TotalReturns   float64 `json:"total_returns"`
-	NetRevenue     float64 `json:"net_revenue"`
-	TotalLosses    float64 `json:"total_losses"`
-	TotalExpenses  float64 `json:"total_expenses"`
-	NetProfit      float64 `json:"net_profit"`
+	StartDate     string  `json:"start_date"`
+	EndDate       string  `json:"end_date"`
+	TotalRevenue  float64 `json:"total_revenue"`
+	TotalCOGS     float64 `json:"total_cogs"`
+	GrossProfit   float64 `json:"gross_profit"`
+	GrossMargin   float64 `json:"gross_margin_percent"`
+	TotalReturns  float64 `json:"total_returns"`
+	NetRevenue    float64 `json:"net_revenue"`
+	TotalLosses   float64 `json:"total_losses"`
+	TotalExpenses float64 `json:"total_expenses"`
+	NetProfit     float64 `json:"net_profit"`
 }
 
 func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
@@ -358,11 +394,10 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 	}
 
 	var totalCOGS float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(s.cost_price * ii.quantity), 0)
+	db.DB.QueryRow(`SELECT COALESCE(SUM(ii.unit_cost_at_sale * ii.quantity), 0)
 		FROM invoice_items ii
 		JOIN invoices i ON ii.invoice_id = i.id
-		JOIN stock s ON ii.product_id = s.product_id AND i.store_id = s.store_id
-		WHERE i.store_id = ? AND i.invoice_date >= ? AND i.invoice_date <= ?`,
+		WHERE i.store_id = ? AND i.invoice_date >= ? AND i.invoice_date <= ? AND i.status = 'completed'`,
 		storeID, startDate, endDate+" 23:59:59").Scan(&totalCOGS)
 
 	var totalReturns float64
@@ -371,8 +406,12 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 		storeID, startDate, endDate+" 23:59:59").Scan(&totalReturns)
 
 	var totalLosses float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(quantity * (SELECT cost_price FROM stock WHERE product_id = inventory_losses.product_id LIMIT 1)), 0)
-		FROM inventory_losses WHERE store_id = ? AND created_at >= ? AND created_at <= ?`,
+	db.DB.QueryRow(`SELECT COALESCE(SUM(il.quantity * COALESCE((
+		SELECT s.cost_price FROM stock s
+		WHERE s.product_id = il.product_id AND s.store_id = il.store_id
+		ORDER BY s.quantity DESC LIMIT 1), 0)), 0)
+		FROM inventory_losses il
+		WHERE il.store_id = ? AND il.created_at >= ? AND il.created_at <= ?`,
 		storeID, startDate, endDate+" 23:59:59").Scan(&totalLosses)
 
 	var totalExpenses float64
@@ -389,17 +428,17 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 	netProfit := grossProfit - totalReturns - totalLosses - totalExpenses
 
 	report := ProfitLossReport{
-		StartDate:      startDate,
-		EndDate:        endDate,
-		TotalRevenue:   totalRevenue,
-		TotalCOGS:      totalCOGS,
-		GrossProfit:    grossProfit,
-		GrossMargin:    grossMargin,
-		TotalReturns:   totalReturns,
-		NetRevenue:     totalRevenue - totalReturns,
-		TotalLosses:    totalLosses,
-		TotalExpenses:  totalExpenses,
-		NetProfit:      netProfit,
+		StartDate:     startDate,
+		EndDate:       endDate,
+		TotalRevenue:  totalRevenue,
+		TotalCOGS:     totalCOGS,
+		GrossProfit:   grossProfit,
+		GrossMargin:   grossMargin,
+		TotalReturns:  totalReturns,
+		NetRevenue:    totalRevenue - totalReturns,
+		TotalLosses:   totalLosses,
+		TotalExpenses: totalExpenses,
+		NetProfit:     netProfit,
 	}
 
 	c.JSON(http.StatusOK, report)
@@ -452,7 +491,7 @@ func (h *ReportHandler) GetCreditAging(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, map[string]interface{}{
-		"report": aging,
+		"report":            aging,
 		"total_outstanding": totalDue,
 	})
 }

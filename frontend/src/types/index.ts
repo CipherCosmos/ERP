@@ -119,6 +119,8 @@ export interface InvoiceItem {
   sgst: number;
   igst: number;
   total: number;
+  /** Unit COGS captured at sale from stock row (Phase A). */
+  unit_cost_at_sale?: number;
 }
 
 export interface CartItem {

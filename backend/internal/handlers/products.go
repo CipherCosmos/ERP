@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"gbos/internal/db"
 	"gbos/internal/models"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type CategoryHandler struct{}
@@ -49,9 +49,9 @@ func (h *CategoryHandler) List(c *gin.Context) {
 
 func (h *CategoryHandler) Create(c *gin.Context) {
 	var req struct {
-		Name    string  `json:"name" binding:"required"`
-		NameHi string  `json:"name_hi"`
-		NameKn string  `json:"name_kn"`
+		Name    string `json:"name" binding:"required"`
+		NameHi  string `json:"name_hi"`
+		NameKn  string `json:"name_kn"`
 		HSNCode string `json:"hsn_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -177,7 +177,7 @@ func (h *ProductHandler) Get(c *gin.Context) {
 		"category_id": product.CategoryID, "hsn_code": product.HSNCode, "barcode": product.Barcode,
 		"uom_id": product.UOMID, "base_unit_qty": product.BaseUnitQty, "gst_rate": product.GSTRate,
 		"is_free": product.IsFree, "is_active": product.Is_active, "allow_decimal": product.AllowDecimal,
-		"min_stock": product.MinStock,
+		"min_stock":  product.MinStock,
 		"sell_price": sellPrice, "mrp": mrp, "cost_price": costPrice, "wholesale_sell_price": wholesale,
 	})
 }
@@ -185,17 +185,17 @@ func (h *ProductHandler) Get(c *gin.Context) {
 func (h *ProductHandler) Create(c *gin.Context) {
 	var req struct {
 		Name         string  `json:"name" binding:"required"`
-		NameHi      string  `json:"name_hi"`
-		NameKn      string  `json:"name_kn"`
-		CategoryID  string  `json:"category_id" binding:"required"`
-		HSNCode     string  `json:"hsn_code"`
-		Barcode     string  `json:"barcode"`
-		UOMID       string  `json:"uom_id" binding:"required"`
-		BaseUnitQty float64 `json:"base_unit_qty"`
-		GSTRate     float64 `json:"gst_rate"`
-		IsFree      bool    `json:"is_free"`
-		AllowDecimal bool  `json:"allow_decimal"`
-		MinStock    float64 `json:"min_stock"`
+		NameHi       string  `json:"name_hi"`
+		NameKn       string  `json:"name_kn"`
+		CategoryID   string  `json:"category_id" binding:"required"`
+		HSNCode      string  `json:"hsn_code"`
+		Barcode      string  `json:"barcode"`
+		UOMID        string  `json:"uom_id" binding:"required"`
+		BaseUnitQty  float64 `json:"base_unit_qty"`
+		GSTRate      float64 `json:"gst_rate"`
+		IsFree       bool    `json:"is_free"`
+		AllowDecimal bool    `json:"allow_decimal"`
+		MinStock     float64 `json:"min_stock"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -231,12 +231,12 @@ func (h *ProductHandler) Create(c *gin.Context) {
 
 func (h *ProductHandler) SetPrice(c *gin.Context) {
 	var req struct {
-		ProductID           string  `json:"product_id" binding:"required"`
-		StoreID             string  `json:"store_id" binding:"required"`
-		MRP                 float64 `json:"mrp"`
-		CostPrice           float64 `json:"cost_price"`
-		SellPrice           float64 `json:"sell_price" binding:"required"`
-		WholesaleSellPrice  float64 `json:"wholesale_sell_price"`
+		ProductID          string  `json:"product_id" binding:"required"`
+		StoreID            string  `json:"store_id" binding:"required"`
+		MRP                float64 `json:"mrp"`
+		CostPrice          float64 `json:"cost_price"`
+		SellPrice          float64 `json:"sell_price" binding:"required"`
+		WholesaleSellPrice float64 `json:"wholesale_sell_price"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -314,11 +314,11 @@ func (h *ProductHandler) CreatePackingUnit(c *gin.Context) {
 	}
 
 	var req struct {
-		Label          string   `json:"label" binding:"required"`
-		QtyInParent    float64  `json:"qty_in_parent"`
-		Barcode        string   `json:"barcode"`
-		ParentUnitID   *string  `json:"parent_unit_id"`
-		SortOrder      int      `json:"sort_order"`
+		Label        string  `json:"label" binding:"required"`
+		QtyInParent  float64 `json:"qty_in_parent"`
+		Barcode      string  `json:"barcode"`
+		ParentUnitID *string `json:"parent_unit_id"`
+		SortOrder    int     `json:"sort_order"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

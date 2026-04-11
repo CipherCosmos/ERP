@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"gbos/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gbos/internal/db"
 )
 
 type StockHandler struct{}
@@ -90,13 +90,13 @@ func (h *StockHandler) GetProductStock(c *gin.Context) {
 
 func (h *StockHandler) Adjust(c *gin.Context) {
 	var req struct {
-		ProductID  string  `json:"product_id" binding:"required"`
-		StoreID    string  `json:"store_id" binding:"required"`
-		BatchNo    string  `json:"batch_no"`
-		Quantity   float64 `json:"quantity" binding:"required"`
-		Type       string  `json:"type" binding:"required"` // add, remove, reserve, release
-		Reason     string  `json:"reason"` // damage, expiry, error, count_variance, received, returned
-		UserID     string  `json:"user_id" binding:"required"`
+		ProductID string  `json:"product_id" binding:"required"`
+		StoreID   string  `json:"store_id" binding:"required"`
+		BatchNo   string  `json:"batch_no"`
+		Quantity  float64 `json:"quantity" binding:"required"`
+		Type      string  `json:"type" binding:"required"` // add, remove, reserve, release
+		Reason    string  `json:"reason"`                  // damage, expiry, error, count_variance, received, returned
+		UserID    string  `json:"user_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -327,11 +327,11 @@ func (h *SyncHandler) MarkSynced(c *gin.Context) {
 
 func (h *SyncHandler) Push(c *gin.Context) {
 	var req struct {
-		TableName  string      `json:"table_name" binding:"required"`
-		RecordID   string      `json:"record_id" binding:"required"`
-		Operation  string      `json:"operation" binding:"required"`
-		StoreID    string      `json:"store_id" binding:"required"`
-		Data       interface{} `json:"data"`
+		TableName string      `json:"table_name" binding:"required"`
+		RecordID  string      `json:"record_id" binding:"required"`
+		Operation string      `json:"operation" binding:"required"`
+		StoreID   string      `json:"store_id" binding:"required"`
+		Data      interface{} `json:"data"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -352,9 +352,9 @@ func (h *SyncHandler) Push(c *gin.Context) {
 
 func (h *SyncHandler) ConflictResolution(c *gin.Context) {
 	var req struct {
-		TableName   string `json:"table_name" binding:"required"`
-		RecordID    string `json:"record_id" binding:"required"`
-		Resolution  string `json:"resolution" binding:"required"` // local_wins, remote_wins
+		TableName  string `json:"table_name" binding:"required"`
+		RecordID   string `json:"record_id" binding:"required"`
+		Resolution string `json:"resolution" binding:"required"` // local_wins, remote_wins
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

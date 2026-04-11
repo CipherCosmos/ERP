@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"time"
 
+	"gbos/internal/db"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gbos/internal/db"
 )
 
 type ExpenseHandler struct{}
@@ -16,12 +16,12 @@ func NewExpenseHandler() *ExpenseHandler {
 }
 
 type CreateExpenseRequest struct {
-	StoreID      string  `json:"store_id" binding:"required"`
-	CategoryID   string  `json:"category_id" binding:"required"`
-	Amount       float64 `json:"amount" binding:"required"`
-	Description  string  `json:"description"`
-	ExpenseDate  string  `json:"expense_date" binding:"required"`
-	UserID       string  `json:"user_id" binding:"required"`
+	StoreID     string  `json:"store_id" binding:"required"`
+	CategoryID  string  `json:"category_id" binding:"required"`
+	Amount      float64 `json:"amount" binding:"required"`
+	Description string  `json:"description"`
+	ExpenseDate string  `json:"expense_date" binding:"required"`
+	UserID      string  `json:"user_id" binding:"required"`
 }
 
 func (h *ExpenseHandler) Create(c *gin.Context) {
