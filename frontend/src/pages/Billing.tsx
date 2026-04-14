@@ -69,7 +69,11 @@ export default function Billing() {
 
   useEffect(() => {
     const c = customers.find((x) => x.id === selectedCustomerId);
-    if (c?.is_wholesale) setUseWholesalePrices(true);
+    if (c?.is_wholesale) {
+      setUseWholesalePrices(true);
+    } else {
+      setUseWholesalePrices(false);
+    }
   }, [selectedCustomerId, customers]);
 
   useEffect(() => {
@@ -129,7 +133,9 @@ export default function Billing() {
     try {
       const { data } = await barcodeApi.lookup(trimmed, store.id);
       if (data && typeof data === 'object' && 'id' in data) {
-        addToCart({ product: mapBarcodeLookupToProduct(data as Record<string, unknown>), quantity: 1, discount: 0 });
+        const d = data as Record<string, unknown>;
+        const packingQty = Number(d.packing_qty) || 1;
+        addToCart({ product: mapBarcodeLookupToProduct(d), quantity: packingQty, discount: 0 });
         setSearch('');
         return;
       }
@@ -195,7 +201,7 @@ export default function Billing() {
 
     const invoiceBody = {
       store_id: store.id,
-      customer_id: !useSplitPayment && paymentMode === 'credit' ? selectedCustomerId : undefined,
+      customer_id: selectedCustomerId || undefined,
       invoice_date: new Date().toISOString(),
       sub_total: subtotal,
       cgst: gstSplit,

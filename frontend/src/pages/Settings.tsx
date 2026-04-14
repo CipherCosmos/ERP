@@ -1,11 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { authApi, storeApi, syncApi } from '../services/api';
 
 export default function Settings() {
   const navigate = useNavigate();
   const { user, store, language, setLanguage, setStore } = useAppStore();
+  const { i18n } = useTranslation();
+
+  const changeLanguage = (lang: string) => {
+    setLanguage(lang);
+    i18n.changeLanguage(lang);
+    localStorage.setItem('gbos-lang', lang);
+  };
+
   const [activeTab, setActiveTab] = useState<'store' | 'users' | 'sync' | 'language'>('store');
   const [allStores, setAllStores] = useState<{ id: string; name: string }[]>([]);
   const [storeSwitching, setStoreSwitching] = useState(false);
@@ -321,7 +330,7 @@ export default function Settings() {
                   name="language"
                   value="en"
                   checked={language === 'en'}
-                  onChange={() => setLanguage('en')}
+                  onChange={() => changeLanguage('en')}
                 />
                 <span style={styles.languageLabel}>English</span>
               </label>
@@ -331,7 +340,7 @@ export default function Settings() {
                   name="language"
                   value="hi"
                   checked={language === 'hi'}
-                  onChange={() => setLanguage('hi')}
+                  onChange={() => changeLanguage('hi')}
                 />
                 <span style={styles.languageLabel}>हिन्दी (Hindi)</span>
               </label>
@@ -341,7 +350,7 @@ export default function Settings() {
                   name="language"
                   value="kn"
                   checked={language === 'kn'}
-                  onChange={() => setLanguage('kn')}
+                  onChange={() => changeLanguage('kn')}
                 />
                 <span style={styles.languageLabel}>ಕನ್ನಡ (Kannada)</span>
               </label>

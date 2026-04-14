@@ -20,6 +20,10 @@ import Losses from './pages/Losses';
 import ProfitLoss from './pages/ProfitLoss';
 import CreditAging from './pages/CreditAging';
 import Expenses from './pages/Expenses';
+import Invoices from './pages/Invoices';
+import AuditLog from './pages/AuditLog';
+import StockTransfer from './pages/StockTransfer';
+import GRN from './pages/GRN';
 
 function App() {
   return (
@@ -45,6 +49,10 @@ function App() {
         <Route path="/profit-loss" element={<ProfitLoss />} />
         <Route path="/credit-aging" element={<CreditAging />} />
         <Route path="/expenses" element={<Expenses />} />
+        <Route path="/invoices" element={<Invoices />} />
+        <Route path="/audit" element={<AuditLog />} />
+        <Route path="/stock-transfer" element={<StockTransfer />} />
+        <Route path="/grn" element={<GRN />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

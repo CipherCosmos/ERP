@@ -106,6 +106,53 @@ func (h *VendorHandler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": vendorID, "name": req.Name})
 }
 
+func (h *VendorHandler) Update(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		Name        string   `json:"name"`
+		Phone       string   `json:"phone"`
+		Address     string   `json:"address"`
+		GSTIN       string   `json:"gstin"`
+		State       string   `json:"state"`
+		CreditDays  *int     `json:"credit_days"`
+		CreditLimit *float64 `json:"credit_limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var cd, cl interface{}
+	if req.CreditDays != nil {
+		cd = *req.CreditDays
+	}
+	if req.CreditLimit != nil {
+		cl = *req.CreditLimit
+	}
+
+	res, err := db.DB.Exec(`UPDATE vendors SET
+		name = COALESCE(NULLIF(?, ''), name),
+		phone = COALESCE(NULLIF(?, ''), phone),
+		address = COALESCE(NULLIF(?, ''), address),
+		gstin = COALESCE(NULLIF(?, ''), gstin),
+		state = COALESCE(NULLIF(?, ''), state),
+		credit_days = COALESCE(?, credit_days),
+		credit_limit = COALESCE(?, credit_limit),
+		updated_at = datetime('now')
+		WHERE id = ?`,
+		req.Name, req.Phone, req.Address, req.GSTIN, req.State, cd, cl, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "vendor not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
 type PurchaseHandler struct{}
 
 func NewPurchaseHandler() *PurchaseHandler {
@@ -262,11 +309,20 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	poNo := "PO-" + time.Now().Format("20060102150405")
 
 	type lineCalc struct {
-		item              PurchaseItemReq
-		taxable, cgst, sgst, lineTotal float64
+		item                                    PurchaseItemReq
+		taxable, cgst, sgst, igst, lineTotal float64
 	}
 	lines := make([]lineCalc, 0, len(req.Items))
-	var subtotal, sumCgst, sumSgst, grandTotal float64
+	var subtotal, sumCgst, sumSgst, sumIgst, grandTotal float64
+
+	// Determine inter-state: compare store GSTIN vs vendor GSTIN
+	isInterState := false
+	var storeGSTIN, vendorGSTIN string
+	_ = tx.QueryRow(`SELECT COALESCE(gstin, '') FROM stores WHERE id = ?`, req.StoreID).Scan(&storeGSTIN)
+	_ = tx.QueryRow(`SELECT COALESCE(gstin, '') FROM vendors WHERE id = ?`, req.VendorID).Scan(&vendorGSTIN)
+	if len(storeGSTIN) >= 2 && len(vendorGSTIN) >= 2 && storeGSTIN[:2] != vendorGSTIN[:2] {
+		isInterState = true
+	}
 
 	for _, item := range req.Items {
 		var gstRate float64
@@ -288,7 +344,13 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 			return
 		}
 		gst := taxable * gstRate / 100.0
-		lc := gst / 2
+		var lCgst, lSgst, lIgst float64
+		if isInterState {
+			lIgst = gst
+		} else {
+			lCgst = gst / 2
+			lSgst = gst / 2
+		}
 		lineTotal := taxable + gst
 		if item.Total > 0 && math.Abs(item.Total-lineTotal) > 0.05 {
 			tx.Rollback()
@@ -296,17 +358,18 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 			return
 		}
 		subtotal += taxable
-		sumCgst += lc
-		sumSgst += lc
+		sumCgst += lCgst
+		sumSgst += lSgst
+		sumIgst += lIgst
 		grandTotal += lineTotal
-		lines = append(lines, lineCalc{item, taxable, lc, lc, lineTotal})
+		lines = append(lines, lineCalc{item, taxable, lCgst, lSgst, lIgst, lineTotal})
 	}
 
-	_, err = tx.Exec(`INSERT INTO purchase_orders 
+	_, err = tx.Exec(`INSERT INTO purchase_orders
 		(id, po_no, store_id, vendor_id, order_date, expected_date, sub_total, cgst, sgst, igst, total, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 'pending')`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
 		poID, poNo, req.StoreID, req.VendorID, req.OrderDate, req.ExpectedDate,
-		subtotal, sumCgst, sumSgst, grandTotal)
+		subtotal, sumCgst, sumSgst, sumIgst, grandTotal)
 	if err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -316,11 +379,11 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	for _, ln := range lines {
 		item := ln.item
 		itemID := uuid.New().String()
-		_, err = tx.Exec(`INSERT INTO purchase_items 
+		_, err = tx.Exec(`INSERT INTO purchase_items
 			(id, po_id, product_id, quantity, uom_id, rate, discount, cgst, sgst, igst, total)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			itemID, poID, item.ProductID, item.Quantity, item.UOMID,
-			item.Rate, item.Discount, ln.cgst, ln.sgst, ln.lineTotal)
+			item.Rate, item.Discount, ln.cgst, ln.sgst, ln.igst, ln.lineTotal)
 		if err != nil {
 			tx.Rollback()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

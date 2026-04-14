@@ -9,6 +9,9 @@ export type PendingInvoice = {
   id: string;
   payload: PendingInvoicePayload;
   createdAt: string;
+  /** If set, the invoice was already created on the server (only splits remain). */
+  createdInvoiceId?: string;
+  retryCount?: number;
 };
 
 function readAll(): PendingInvoice[] {
@@ -40,6 +43,7 @@ export function enqueuePendingInvoice(payload: PendingInvoicePayload): string {
     id,
     payload,
     createdAt: new Date().toISOString(),
+    retryCount: 0,
   });
   writeAll(list);
   return id;
@@ -48,6 +52,8 @@ export function enqueuePendingInvoice(payload: PendingInvoicePayload): string {
 export function removePendingInvoice(id: string) {
   writeAll(readAll().filter((p) => p.id !== id));
 }
+
+const MAX_RETRIES = 5;
 
 export async function flushPendingInvoiceQueue(
   createInvoice: (body: Record<string, unknown>) => Promise<{ id: string }>,
@@ -60,17 +66,55 @@ export async function flushPendingInvoiceQueue(
   let flushed = 0;
   let failed = 0;
   for (const item of pending) {
+    // Skip items that have failed too many times
+    if ((item.retryCount ?? 0) >= MAX_RETRIES) {
+      failed++;
+      continue;
+    }
+
     try {
-      const inv = await createInvoice(item.payload.invoiceBody);
+      let invoiceId = item.createdInvoiceId;
+
+      // Step 1: Create invoice (only if not already created)
+      if (!invoiceId) {
+        const inv = await createInvoice(item.payload.invoiceBody);
+        invoiceId = inv.id;
+        // Persist the created invoice ID so we don't re-create on retry
+        const all = readAll();
+        const idx = all.findIndex((p) => p.id === item.id);
+        if (idx >= 0) {
+          all[idx].createdInvoiceId = invoiceId;
+          writeAll(all);
+        }
+      }
+
+      // Step 2: Add split payments (if any)
       const splits = item.payload.splitPayments;
       if (splits && splits.length > 0 && addSplitPayments) {
-        await addSplitPayments(inv.id, splits);
+        try {
+          await addSplitPayments(invoiceId, splits);
+        } catch (splitErr: any) {
+          // If splits fail with 409 (already exists), treat as success
+          if (splitErr?.response?.status === 409) {
+            // Already recorded, proceed
+          } else {
+            throw splitErr;
+          }
+        }
       }
+
       removePendingInvoice(item.id);
       flushed++;
     } catch {
+      // Increment retry count
+      const all = readAll();
+      const idx = all.findIndex((p) => p.id === item.id);
+      if (idx >= 0) {
+        all[idx].retryCount = (all[idx].retryCount ?? 0) + 1;
+        writeAll(all);
+      }
       failed++;
-      break;
+      // Continue to next item instead of breaking
     }
   }
   return { flushed, failed };

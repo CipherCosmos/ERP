@@ -61,6 +61,15 @@ func (h *PaymentHandler) AddSplitPayments(c *gin.Context) {
 		return
 	}
 
+	// Idempotency: check if payments already exist for this invoice
+	var existingPaymentCount int
+	tx.QueryRow(`SELECT COUNT(*) FROM invoice_payments WHERE invoice_id = ?`, req.InvoiceID).Scan(&existingPaymentCount)
+	if existingPaymentCount > 0 {
+		tx.Rollback()
+		c.JSON(http.StatusConflict, gin.H{"error": "payments already recorded for this invoice"})
+		return
+	}
+
 	var totalPaid float64
 	for _, p := range req.Payments {
 		paymentID := uuid.New().String()

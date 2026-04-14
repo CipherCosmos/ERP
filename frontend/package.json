@@ -3,15 +3,17 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
+    "@tanstack/react-query": "^5.12.0",
+    "axios": "^1.6.2",
+    "i18next": "^23.16.8",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-i18next": "^15.4.1",
     "react-router-dom": "^6.20.0",
     "react-scripts": "5.0.1",
-    "axios": "^1.6.2",
-    "@tanstack/react-query": "^5.12.0",
-    "zustand": "^4.4.7",
-    "jspdf": "^2.5.1",
-    "jspdf-autotable": "^3.8.1"
+    "zustand": "^4.4.7"
   },
   "scripts": {
     "start": "react-scripts start",
@@ -26,11 +28,21 @@
     "typescript": "^4.9.5"
   },
   "eslintConfig": {
-    "extends": ["react-app"]
+    "extends": [
+      "react-app"
+    ]
   },
   "browserslist": {
-    "production": [">0.2%", "not dead", "not op_mini all"],
-    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
   },
   "proxy": "http://localhost:8080"
 }

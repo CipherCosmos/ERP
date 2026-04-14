@@ -89,6 +89,7 @@ export const useAppStore = create<AppState>()(
         user: state.user,
         store: state.store,
         language: state.language,
+        cart: state.cart,
       }),
     }
   )

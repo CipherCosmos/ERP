@@ -38,6 +38,10 @@ export default function Menu() {
     { key: 'profit-loss', labelKey: 'profitLoss', icon: '💵', path: '/profit-loss', roles: ['owner', 'manager'] },
     { key: 'credit-aging', labelKey: 'creditAging', icon: '📅', path: '/credit-aging', roles: ['owner', 'manager'] },
     { key: 'gstr1', labelKey: 'gstr1', icon: '📋', path: '/gstr1', roles: ['owner', 'manager'] },
+    { key: 'invoices', labelKey: 'invoices', icon: '🧾', path: '/invoices', roles: ['owner', 'manager', 'cashier'] },
+    { key: 'stock-transfer', labelKey: 'stockTransfer', icon: '🔄', path: '/stock-transfer', roles: ['owner', 'manager', 'warehouse'] },
+    { key: 'grn', labelKey: 'grn', icon: '📥', path: '/grn', roles: ['owner', 'manager', 'warehouse'] },
+    { key: 'audit', labelKey: 'audit', icon: '🔍', path: '/audit', roles: ['owner', 'manager'] },
     { key: 'settings', labelKey: 'settings', icon: '⚙️', path: '/settings', roles: ['owner'] },
   ];
 

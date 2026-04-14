@@ -66,6 +66,7 @@ func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 	db.DB.QueryRow(`SELECT COUNT(*) FROM (
 		SELECT p.id FROM products p
 		LEFT JOIN stock s ON p.id = s.product_id AND s.store_id = ?
+		WHERE p.is_active = 1 AND p.min_stock > 0
 		GROUP BY p.id HAVING COALESCE(SUM(s.quantity), 0) <= p.min_stock
 	)`, storeID).Scan(&lowStockCount)
 
@@ -439,9 +440,9 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 
 	var totalLosses float64
 	db.DB.QueryRow(`SELECT COALESCE(SUM(il.quantity * COALESCE((
-		SELECT s.cost_price FROM stock s
+		SELECT AVG(s.cost_price) FROM stock s
 		WHERE s.product_id = il.product_id AND s.store_id = il.store_id
-		ORDER BY s.quantity DESC LIMIT 1), 0)), 0)
+		AND s.cost_price > 0), 0)), 0)
 		FROM inventory_losses il
 		WHERE il.store_id = ? AND il.created_at >= ? AND il.created_at <= ?`,
 		storeID, startDate, endDate+" 23:59:59").Scan(&totalLosses)

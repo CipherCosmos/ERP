@@ -245,6 +245,90 @@ func (h *ProductHandler) Create(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"id": productID, "barcode": barcode})
 }
 
+func (h *ProductHandler) Update(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		Name         string   `json:"name"`
+		NameHi       string   `json:"name_hi"`
+		NameKn       string   `json:"name_kn"`
+		CategoryID   string   `json:"category_id"`
+		HSNCode      string   `json:"hsn_code"`
+		Barcode      string   `json:"barcode"`
+		UOMID        string   `json:"uom_id"`
+		BaseUnitQty  *float64 `json:"base_unit_qty"`
+		GSTRate      *float64 `json:"gst_rate"`
+		IsFree       *bool    `json:"is_free"`
+		AllowDecimal *bool    `json:"allow_decimal"`
+		MinStock     *float64 `json:"min_stock"`
+		IsActive     *bool    `json:"is_active"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var buq, gst, ms, isFree, allowDec, isAct interface{}
+	if req.BaseUnitQty != nil {
+		buq = *req.BaseUnitQty
+	}
+	if req.GSTRate != nil {
+		gst = *req.GSTRate
+	}
+	if req.MinStock != nil {
+		ms = *req.MinStock
+	}
+	if req.IsFree != nil {
+		if *req.IsFree {
+			isFree = 1
+		} else {
+			isFree = 0
+		}
+	}
+	if req.AllowDecimal != nil {
+		if *req.AllowDecimal {
+			allowDec = 1
+		} else {
+			allowDec = 0
+		}
+	}
+	if req.IsActive != nil {
+		if *req.IsActive {
+			isAct = 1
+		} else {
+			isAct = 0
+		}
+	}
+
+	res, err := db.DB.Exec(`UPDATE products SET
+		name = COALESCE(NULLIF(?, ''), name),
+		name_hi = COALESCE(NULLIF(?, ''), name_hi),
+		name_kn = COALESCE(NULLIF(?, ''), name_kn),
+		category_id = COALESCE(NULLIF(?, ''), category_id),
+		hsn_code = COALESCE(NULLIF(?, ''), hsn_code),
+		barcode = COALESCE(NULLIF(?, ''), barcode),
+		uom_id = COALESCE(NULLIF(?, ''), uom_id),
+		base_unit_qty = COALESCE(?, base_unit_qty),
+		gst_rate = COALESCE(?, gst_rate),
+		is_free = COALESCE(?, is_free),
+		allow_decimal = COALESCE(?, allow_decimal),
+		min_stock = COALESCE(?, min_stock),
+		is_active = COALESCE(?, is_active),
+		updated_at = datetime('now')
+		WHERE id = ?`,
+		req.Name, req.NameHi, req.NameKn, req.CategoryID, req.HSNCode,
+		req.Barcode, req.UOMID, buq, gst, isFree, allowDec, ms, isAct, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
 func (h *ProductHandler) SetPrice(c *gin.Context) {
 	var req struct {
 		ProductID          string  `json:"product_id" binding:"required"`

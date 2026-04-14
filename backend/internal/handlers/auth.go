@@ -7,6 +7,7 @@ import (
 
 	"gbos/internal/auth"
 	"gbos/internal/db"
+	"gbos/internal/middleware"
 	"gbos/internal/models"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -107,3 +108,139 @@ func Register(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{"id": userID, "username": req.Username, "role": req.Role})
 }
+
+func ListUsers(c *gin.Context) {
+	storeID := c.Query("store_id")
+	if storeID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
+
+	rows, err := db.DB.Query(`SELECT id, username, role, store_id, is_active, created_at, updated_at
+		FROM users WHERE store_id = ? ORDER BY username`, storeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	users := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		var id, username, role, sid string
+		var isActive bool
+		var createdAt, updatedAt string
+		rows.Scan(&id, &username, &role, &sid, &isActive, &createdAt, &updatedAt)
+		users = append(users, map[string]interface{}{
+			"id": id, "username": username, "role": role, "store_id": sid,
+			"is_active": isActive, "created_at": createdAt, "updated_at": updatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, users)
+}
+
+func DeactivateUser(c *gin.Context) {
+	id := c.Param("id")
+
+	var targetStore string
+	err := db.DB.QueryRow(`SELECT store_id FROM users WHERE id = ?`, id).Scan(&targetStore)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, targetStore) {
+		abortStoreMismatch(c)
+		return
+	}
+
+	// Prevent deactivating self
+	uid := middleware.GetUserID(c)
+	if uid == id {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot deactivate yourself"})
+		return
+	}
+
+	_, err = db.DB.Exec(`UPDATE users SET is_active = 0, updated_at = datetime('now') WHERE id = ?`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func ActivateUser(c *gin.Context) {
+	id := c.Param("id")
+
+	var targetStore string
+	err := db.DB.QueryRow(`SELECT store_id FROM users WHERE id = ?`, id).Scan(&targetStore)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, targetStore) {
+		abortStoreMismatch(c)
+		return
+	}
+
+	_, err = db.DB.Exec(`UPDATE users SET is_active = 1, updated_at = datetime('now') WHERE id = ?`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func ChangePassword(c *gin.Context) {
+	var req struct {
+		OldPassword string `json:"old_password" binding:"required"`
+		NewPassword string `json:"new_password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	uid := middleware.GetUserID(c)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
+		return
+	}
+
+	var currentHash string
+	err := db.DB.QueryRow(`SELECT password_hash FROM users WHERE id = ?`, uid).Scan(&currentHash)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.OldPassword)); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "current password is incorrect"})
+		return
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	_, err = db.DB.Exec(`UPDATE users SET password_hash = ?, updated_at = datetime('now') WHERE id = ?`, string(newHash), uid)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+

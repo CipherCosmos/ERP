@@ -103,12 +103,15 @@ func (h *StockHandler) GetProductStock(c *gin.Context) {
 
 func (h *StockHandler) Adjust(c *gin.Context) {
 	var req struct {
-		ProductID string  `json:"product_id" binding:"required"`
-		StoreID   string  `json:"store_id" binding:"required"`
-		BatchNo   string  `json:"batch_no"`
-		Quantity  float64 `json:"quantity" binding:"required"`
-		Type      string  `json:"type" binding:"required"` // add, remove, reserve, release
-		Reason    string  `json:"reason"`                  // damage, expiry, error, count_variance, received, returned
+		ProductID  string  `json:"product_id" binding:"required"`
+		StoreID    string  `json:"store_id" binding:"required"`
+		BatchNo    string  `json:"batch_no"`
+		Quantity   float64 `json:"quantity" binding:"required"`
+		Type       string  `json:"type" binding:"required"` // add, remove, reserve, release
+		Reason     string  `json:"reason"`                  // damage, expiry, error, count_variance, received, returned
+		CostPrice  float64 `json:"cost_price"`
+		ExpiryDate string  `json:"expiry_date"`
+		MfgDate    string  `json:"mfg_date"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -130,6 +133,8 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 			req.Reason = "received"
 		} else if req.Type == "remove" {
 			req.Reason = "count_variance"
+		} else {
+			req.Reason = req.Type
 		}
 	}
 
@@ -145,7 +150,7 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 	}
 
 	var currentQty float64
-	err = tx.QueryRow(`SELECT COALESCE(quantity, 0) FROM stock 
+	err = tx.QueryRow(`SELECT COALESCE(quantity, 0) FROM stock
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 		req.ProductID, req.StoreID, batchNo).Scan(&currentQty)
 
@@ -157,12 +162,30 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 		newQty = currentQty - req.Quantity
 	case "reserve":
 		newQty = currentQty
-		_, err = tx.Exec(`UPDATE stock SET reserved_qty = reserved_qty + ? 
+		// Check underflow before reserve
+		var currentReserved float64
+		tx.QueryRow(`SELECT COALESCE(reserved_qty, 0) FROM stock WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+			req.ProductID, req.StoreID, batchNo).Scan(&currentReserved)
+		if currentReserved+req.Quantity > currentQty {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot reserve more than available quantity"})
+			return
+		}
+		_, err = tx.Exec(`UPDATE stock SET reserved_qty = reserved_qty + ?
 			WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 			req.Quantity, req.ProductID, req.StoreID, batchNo)
 	case "release":
 		newQty = currentQty
-		_, err = tx.Exec(`UPDATE stock SET reserved_qty = reserved_qty - ? 
+		// Check underflow before release
+		var currentReserved float64
+		tx.QueryRow(`SELECT COALESCE(reserved_qty, 0) FROM stock WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+			req.ProductID, req.StoreID, batchNo).Scan(&currentReserved)
+		if req.Quantity > currentReserved {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot release more than reserved quantity"})
+			return
+		}
+		_, err = tx.Exec(`UPDATE stock SET reserved_qty = reserved_qty - ?
 			WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 			req.Quantity, req.ProductID, req.StoreID, batchNo)
 	default:
@@ -177,20 +200,32 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 			return
 		}
 
-		if currentQty == 0 {
-			_, err = tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price)
-				VALUES (?, ?, ?, ?, ?, 0)`, uuid.New().String(), req.ProductID, req.StoreID, batchNo, newQty)
-		} else {
-			_, err = tx.Exec(`UPDATE stock SET quantity = ? WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
-				newQty, req.ProductID, req.StoreID, batchNo)
+		// Determine cost_price: use provided, or fall back to product_prices
+		costPrice := req.CostPrice
+		if costPrice == 0 && req.Type == "add" {
+			_ = tx.QueryRow(`SELECT COALESCE(cost_price, 0) FROM product_prices WHERE product_id = ? AND store_id = ?`,
+				req.ProductID, req.StoreID).Scan(&costPrice)
 		}
 
-		// Log the adjustment for audit
-		if err == nil {
-			_, err = tx.Exec(`INSERT INTO stock_adjustments (id, product_id, store_id, batch_no, quantity, adjustment_type, reason, user_id)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-				uuid.New().String(), req.ProductID, req.StoreID, batchNo, req.Quantity, req.Type, req.Reason, uid)
+		if currentQty == 0 {
+			_, err = tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price, expiry_date, mfg_date)
+				VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))`,
+				uuid.New().String(), req.ProductID, req.StoreID, batchNo, newQty, costPrice, req.ExpiryDate, req.MfgDate)
+		} else {
+			_, err = tx.Exec(`UPDATE stock SET quantity = ?, cost_price = CASE WHEN ? > 0 THEN ? ELSE cost_price END,
+				expiry_date = CASE WHEN ? != '' THEN ? ELSE expiry_date END,
+				mfg_date = CASE WHEN ? != '' THEN ? ELSE mfg_date END
+				WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+				newQty, costPrice, costPrice, req.ExpiryDate, req.ExpiryDate, req.MfgDate, req.MfgDate,
+				req.ProductID, req.StoreID, batchNo)
 		}
+	}
+
+	// Log ALL adjustment types for audit
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO stock_adjustments (id, product_id, store_id, batch_no, quantity, adjustment_type, reason, user_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), req.ProductID, req.StoreID, batchNo, req.Quantity, req.Type, req.Reason, uid)
 	}
 
 	if err != nil {
@@ -227,35 +262,49 @@ func (h *StockHandler) Transfer(c *gin.Context) {
 		return
 	}
 
-	var fromQty float64
-	err = tx.QueryRow(`SELECT quantity FROM stock 
+	var fromQty, costPrice float64
+	var expiryDate, mfgDate sql.NullString
+	err = tx.QueryRow(`SELECT quantity, cost_price, expiry_date, mfg_date FROM stock
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
-		req.ProductID, req.FromStoreID, req.BatchNo).Scan(&fromQty)
+		req.ProductID, req.FromStoreID, req.BatchNo).Scan(&fromQty, &costPrice, &expiryDate, &mfgDate)
 	if err != nil || fromQty < req.Quantity {
 		tx.Rollback()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient stock"})
 		return
 	}
 
-	tx.Exec(`UPDATE stock SET quantity = quantity - ? 
+	// Check reserved_qty
+	var reservedQty float64
+	_ = tx.QueryRow(`SELECT COALESCE(reserved_qty, 0) FROM stock
+		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+		req.ProductID, req.FromStoreID, req.BatchNo).Scan(&reservedQty)
+	if fromQty-reservedQty < req.Quantity {
+		tx.Rollback()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient unreserved stock for transfer"})
+		return
+	}
+
+	tx.Exec(`UPDATE stock SET quantity = quantity - ?
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 		req.Quantity, req.ProductID, req.FromStoreID, req.BatchNo)
 
 	var toQty float64
-	err = tx.QueryRow(`SELECT quantity FROM stock 
+	err = tx.QueryRow(`SELECT quantity FROM stock
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 		req.ProductID, req.ToStoreID, req.BatchNo).Scan(&toQty)
 	if err == sql.ErrNoRows {
-		tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity) 
-			VALUES (?, ?, ?, ?, ?)`,
-			uuid.New().String(), req.ProductID, req.ToStoreID, req.BatchNo, req.Quantity)
+		tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price, expiry_date, mfg_date)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), req.ProductID, req.ToStoreID, req.BatchNo, req.Quantity,
+			costPrice, expiryDate, mfgDate)
 	} else {
-		tx.Exec(`UPDATE stock SET quantity = quantity + ? 
+		tx.Exec(`UPDATE stock SET quantity = quantity + ?
 			WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 			req.Quantity, req.ProductID, req.ToStoreID, req.BatchNo)
 	}
 
 	tx.Commit()
+	auditAction(c, "stock_transfer", "stock", req.ProductID, req.FromStoreID, req.ToStoreID)
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
@@ -274,7 +323,7 @@ func (h *StockHandler) LowStock(c *gin.Context) {
 		SELECT p.id, p.name, p.min_stock, COALESCE(SUM(s.quantity), 0) as current_stock
 		FROM products p
 		LEFT JOIN stock s ON p.id = s.product_id AND s.store_id = ?
-		WHERE p.is_active = 1
+		WHERE p.is_active = 1 AND p.min_stock > 0
 		GROUP BY p.id
 		HAVING current_stock <= p.min_stock
 		ORDER BY current_stock ASC`, storeID)

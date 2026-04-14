@@ -43,6 +43,11 @@ export const authApi = {
     api.post('/auth/login', { username, password }),
   register: (username: string, password: string, role: string, storeId: string) =>
     api.post('/auth/register', { username, password, role, store_id: storeId }),
+  listUsers: (storeId: string) => api.get('/auth/users', { params: { store_id: storeId } }),
+  deactivateUser: (id: string) => api.post(`/auth/users/${id}/deactivate`),
+  activateUser: (id: string) => api.post(`/auth/users/${id}/activate`),
+  changePassword: (oldPassword: string, newPassword: string) =>
+    api.post('/auth/change-password', { old_password: oldPassword, new_password: newPassword }),
 };
 
 export const categoryApi = {
@@ -62,6 +67,8 @@ export const productApi = {
   ) => api.post(`/products/${productId}/packing-units`, data),
   create: (data: Partial<Product>) =>
     api.post('/products', data),
+  update: (id: string, data: Partial<Product>) =>
+    api.put(`/products/${id}`, data),
   setPrice: (data: { product_id: string; store_id: string; mrp: number; cost_price: number; sell_price: number; wholesale_sell_price?: number }) =>
     api.post('/products/price', data),
 };
@@ -74,6 +81,8 @@ export const invoiceApi = {
     api.post('/invoices', data),
   exportGSTR1: (storeId: string, month: string) =>
     api.get(`/invoices/gstr1?store_id=${storeId}&month=${month}`),
+  markGSTR1Filed: (storeId: string, month: string) =>
+    api.post('/invoices/gstr1/mark-filed', { store_id: storeId, month }),
 };
 
 export const customerApi = {
@@ -104,6 +113,15 @@ export const vendorApi = {
     credit_days?: number;
     credit_limit?: number;
   }) => api.post('/vendors', data),
+  update: (id: string, data: {
+    name?: string;
+    phone?: string;
+    address?: string;
+    gstin?: string;
+    state?: string;
+    credit_days?: number;
+    credit_limit?: number;
+  }) => api.put(`/vendors/${id}`, data),
 };
 
 export const paymentApi = {
@@ -139,7 +157,17 @@ export const stockApi = {
     quantity: number;
     type: string;
     reason: string;
+    cost_price?: number;
+    expiry_date?: string;
+    mfg_date?: string;
   }) => api.post('/stock/adjust', data),
+  transfer: (data: {
+    product_id: string;
+    from_store_id: string;
+    to_store_id: string;
+    quantity: number;
+    batch_no?: string;
+  }) => api.post('/stock/transfer', data),
 };
 
 export const uomApi = {
@@ -222,6 +250,11 @@ export const reportApi = {
     api.get('/reports/credit-aging', { params }),
   getGSTR3B: (params: { store_id: string; month: string }) =>
     api.get('/reports/gstr-3b', { params }),
+};
+
+export const auditApi = {
+  list: (params: { store_id: string; user_id?: string; table?: string; limit?: string }) =>
+    api.get('/audit', { params }),
 };
 
 export const creditApi = {

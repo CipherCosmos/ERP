@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi } from '../services/api';
+import { StatCard, BarChart, PieChart } from '../components/Charts';
 
 interface DashboardData {
   revenue: number;
@@ -14,12 +15,26 @@ interface DashboardData {
   credit_outstanding: number;
 }
 
+interface TopProduct {
+  product: string;
+  quantity: number;
+  sales: number;
+}
+
+interface PaymentMode {
+  mode: string;
+  count: number;
+  total: number;
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(false);
   const [range, setRange] = useState('today');
+  const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
+  const [paymentBreakup, setPaymentBreakup] = useState<PaymentMode[]>([]);
 
   useEffect(() => {
     if (!user || user.role === 'cashier') {
@@ -31,12 +46,41 @@ export default function Dashboard() {
     if (store) loadDashboard();
   }, [store, range]);
 
+  const getRangeDates = () => {
+    const now = new Date();
+    const end = now.toISOString().slice(0, 10);
+    let start = end;
+    if (range === 'week') {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 7);
+      start = d.toISOString().slice(0, 10);
+    } else if (range === 'month') {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() - 1);
+      start = d.toISOString().slice(0, 10);
+    } else if (range === 'year') {
+      const d = new Date(now);
+      d.setFullYear(d.getFullYear() - 1);
+      start = d.toISOString().slice(0, 10);
+    }
+    return { start, end };
+  };
+
   const loadDashboard = async () => {
     if (!store) return;
     setLoading(true);
     try {
       const { data: dashboardData } = await analyticsApi.dashboard({ store_id: store.id, range });
       setData(dashboardData);
+
+      // Load charts data
+      const { start, end } = getRangeDates();
+      const [topRes, payRes] = await Promise.allSettled([
+        analyticsApi.topProducts({ store_id: store.id, start_date: start, end_date: end, limit: 5 }),
+        analyticsApi.paymentBreakup({ store_id: store.id, start_date: start, end_date: end }),
+      ]);
+      if (topRes.status === 'fulfilled') setTopProducts(topRes.value.data || []);
+      if (payRes.status === 'fulfilled') setPaymentBreakup(payRes.value.data || []);
     } catch (err) {
       console.error('Failed to load dashboard:', err);
     } finally {
@@ -64,42 +108,76 @@ export default function Dashboard() {
         <p>Loading...</p>
       ) : (
         <>
+          {/* KPI Stat Cards */}
           <div style={styles.statsGrid}>
-            <div style={styles.statCard}>
-              <div style={styles.statLabel}>Revenue</div>
-              <div style={styles.statValue}>₹{data?.revenue?.toFixed(2) || '0.00'}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.statLabel}>GST Collected</div>
-              <div style={styles.statValue}>₹{data?.gst_collected?.toFixed(2) || '0.00'}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.statLabel}>Invoices</div>
-              <div style={styles.statValue}>{data?.invoice_count || 0}</div>
-            </div>
-            <div style={styles.statCard}>
-              <div style={styles.statLabel}>Avg Bill Value</div>
-              <div style={styles.statValue}>₹{data?.avg_bill_value?.toFixed(2) || '0.00'}</div>
-            </div>
+            <StatCard
+              title="Revenue"
+              value={`\u20B9${data?.revenue?.toFixed(2) || '0.00'}`}
+              color="#1976d2"
+            />
+            <StatCard
+              title="GST Collected"
+              value={`\u20B9${data?.gst_collected?.toFixed(2) || '0.00'}`}
+              color="#4caf50"
+            />
+            <StatCard
+              title="Invoices"
+              value={data?.invoice_count || 0}
+              color="#ff9800"
+            />
+            <StatCard
+              title="Avg Bill Value"
+              value={`\u20B9${data?.avg_bill_value?.toFixed(2) || '0.00'}`}
+              color="#9c27b0"
+            />
           </div>
 
+          {/* Alerts row */}
           <div style={styles.alertsGrid}>
-            <div style={{...styles.alertCard, background: data?.low_stock_count > 0 ? '#fff3e0' : '#e8f5e9'}}>
-              <div style={styles.alertLabel}>Low Stock Items</div>
-              <div style={styles.alertValue}>{data?.low_stock_count || 0}</div>
-              {data?.low_stock_count > 0 && (
-                <button style={styles.alertBtn} onClick={() => navigate('/inventory')}>View</button>
-              )}
+            <StatCard
+              title="Low Stock Items"
+              value={data?.low_stock_count || 0}
+              subtitle={data?.low_stock_count > 0 ? 'Click Inventory to review' : 'All good'}
+              color={data?.low_stock_count > 0 ? '#ff5722' : '#4caf50'}
+            />
+            <StatCard
+              title="Credit Outstanding"
+              value={`\u20B9${data?.credit_outstanding?.toFixed(2) || '0.00'}`}
+              subtitle={data?.credit_outstanding > 0 ? 'Click Credit to review' : 'All clear'}
+              color={data?.credit_outstanding > 0 ? '#e91e63' : '#4caf50'}
+            />
+          </div>
+
+          {/* Alert action buttons */}
+          <div style={styles.alertActions}>
+            {data?.low_stock_count > 0 && (
+              <button style={styles.alertBtn} onClick={() => navigate('/inventory')}>View Low Stock</button>
+            )}
+            {data?.credit_outstanding > 0 && (
+              <button style={styles.alertBtn} onClick={() => navigate('/credit')}>View Credit</button>
+            )}
+          </div>
+
+          {/* Charts row */}
+          <div style={styles.chartsGrid}>
+            <div style={styles.chartCard}>
+              <h3 style={styles.chartTitle}>Top 5 Products by Sales</h3>
+              <BarChart
+                data={topProducts.map(p => ({ label: p.product, value: p.sales }))}
+                height={230}
+                width={460}
+              />
             </div>
-            <div style={{...styles.alertCard, background: data?.credit_outstanding > 0 ? '#ffebee' : '#e8f5e9'}}>
-              <div style={styles.alertLabel}>Credit Outstanding</div>
-              <div style={styles.alertValue}>₹{data?.credit_outstanding?.toFixed(2) || '0.00'}</div>
-              {data?.credit_outstanding > 0 && (
-                <button style={styles.alertBtn} onClick={() => navigate('/credit')}>View</button>
-              )}
+            <div style={styles.chartCard}>
+              <h3 style={styles.chartTitle}>Payment Mode Breakdown</h3>
+              <PieChart
+                data={paymentBreakup.map(p => ({ label: p.mode, value: p.total }))}
+                size={190}
+              />
             </div>
           </div>
 
+          {/* Quick Actions */}
           <div style={styles.quickActions}>
             <h3>Quick Actions</h3>
             <div style={styles.actionButtons}>
@@ -121,14 +199,12 @@ const styles: Record<string, React.CSSProperties> = {
   rangeSelect: {},
   select: { padding: '0.5rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ddd' },
   statsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', marginBottom: '1rem' },
-  statCard: { background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
-  statLabel: { fontSize: '0.875rem', color: '#666', marginBottom: '0.5rem' },
-  statValue: { fontSize: '1.5rem', fontWeight: 'bold', color: '#1976d2' },
-  alertsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginBottom: '1rem' },
-  alertCard: { padding: '1rem', borderRadius: '8px' },
-  alertLabel: { fontSize: '0.875rem', color: '#666', marginBottom: '0.25rem' },
-  alertValue: { fontSize: '1.25rem', fontWeight: 'bold', marginBottom: '0.5rem' },
-  alertBtn: { padding: '0.25rem 0.75rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
+  alertsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginBottom: '0.5rem' },
+  alertActions: { display: 'flex', gap: '0.5rem', marginBottom: '1rem' },
+  alertBtn: { padding: '0.25rem 0.75rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' },
+  chartsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem', marginBottom: '1rem' },
+  chartCard: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
+  chartTitle: { margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#333' },
   quickActions: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
   actionButtons: { display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' },
   actionBtn: { padding: '0.75rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },

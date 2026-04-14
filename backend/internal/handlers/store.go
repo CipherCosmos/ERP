@@ -248,14 +248,28 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	// Check if matched via product_units barcode — include packing unit info
+	var packQtyInParent float64
+	var packLabel string
+	if barcode != pbarcode {
+		// Barcode matched a packing unit, not the product's own barcode
+		_ = db.DB.QueryRow(`SELECT qty_in_parent, label FROM product_units WHERE product_id = ? AND barcode = ?`,
+			id, barcode).Scan(&packQtyInParent, &packLabel)
+	}
+
+	resp := gin.H{
 		"id": id, "name": name, "name_hi": nameHi, "name_kn": nameKn,
 		"barcode": pbarcode, "hsn_code": hsn, "gst_rate": gstRate,
 		"uom_id": uomID, "category_id": categoryID, "base_unit_qty": baseQty,
 		"allow_decimal": allowDec != 0, "min_stock": minStock,
 		"is_free": isFree != 0, "is_active": isActive != 0,
 		"sell_price": sellPrice, "mrp": mrp, "wholesale_sell_price": wholesale, "stock": stock,
-	})
+	}
+	if packQtyInParent > 0 {
+		resp["packing_qty"] = packQtyInParent
+		resp["packing_label"] = packLabel
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 type ExpiryHandler struct{}

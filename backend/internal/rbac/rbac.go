@@ -63,6 +63,13 @@ const (
 	PermReportView    = "report.view"
 
 	PermExpiryRead = "expiry.read"
+
+	PermUserList       = "user.list"
+	PermUserDeactivate = "user.deactivate"
+	PermPasswordChange = "password.change"
+	PermProductUpdate  = "product.update"
+	PermVendorUpdate   = "vendor.update"
+	PermGSTR1File      = "gstr1.file"
 )
 
 var rolePermissions = map[string][]string{
@@ -74,6 +81,7 @@ var rolePermissions = map[string][]string{
 		PermCategoryWrite,
 		PermProductCatalogWrite,
 		PermProductPrice,
+		PermProductUpdate,
 		PermStockMove,
 		PermSyncMark,
 		PermSyncPush,
@@ -86,6 +94,7 @@ var rolePermissions = map[string][]string{
 		PermCreditView,
 		PermCreditPay,
 		PermVendorWrite,
+		PermVendorUpdate,
 		PermPurchaseWrite,
 		PermPurchaseRead,
 		PermAuditPost,
@@ -106,6 +115,10 @@ var rolePermissions = map[string][]string{
 		PermAnalyticsView,
 		PermReportView,
 		PermExpiryRead,
+		PermUserList,
+		PermUserDeactivate,
+		PermPasswordChange,
+		PermGSTR1File,
 	},
 
 	"cashier": {
@@ -120,6 +133,7 @@ var rolePermissions = map[string][]string{
 		PermSyncMark,
 		PermSyncRead,
 		PermExpiryRead,
+		PermPasswordChange,
 	},
 
 	"helper": {

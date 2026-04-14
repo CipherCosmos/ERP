@@ -46,6 +46,10 @@ func main() {
 
 		api.POST("/auth/login", handlers.Login)
 		api.POST("/auth/register", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserRegister), handlers.Register)
+		api.GET("/auth/users", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserList), handlers.ListUsers)
+		api.POST("/auth/users/:id/deactivate", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserDeactivate), handlers.DeactivateUser)
+		api.POST("/auth/users/:id/activate", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserDeactivate), handlers.ActivateUser)
+		api.POST("/auth/change-password", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPasswordChange), handlers.ChangePassword)
 
 		categories := api.Group("/categories")
 		{
@@ -62,6 +66,7 @@ func main() {
 			products.POST("/:id/packing-units", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductCatalogWrite), prods.CreatePackingUnit)
 			products.GET("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCatalogRead), prods.Get)
 			products.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductCatalogWrite), prods.Create)
+			products.PUT("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductUpdate), prods.Update)
 			products.POST("/price", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermProductPrice), prods.SetPrice)
 		}
 
@@ -90,6 +95,7 @@ func main() {
 			inv := handlers.NewInvoiceHandler()
 			invoices.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceRead), inv.List)
 			invoices.GET("/gstr1", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), inv.GSTR1Export)
+			invoices.POST("/gstr1/mark-filed", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermGSTR1File), inv.GSTR1MarkFiled)
 			invoices.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceCreate), inv.Create)
 			invoices.GET("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceRead), inv.Get)
 		}
@@ -118,6 +124,7 @@ func main() {
 			vendors.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCatalogRead), v.List)
 			vendors.GET("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCatalogRead), v.Get)
 			vendors.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermVendorWrite), v.Create)
+			vendors.PUT("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermVendorUpdate), v.Update)
 		}
 
 		purchases := api.Group("/purchases")

@@ -357,13 +357,32 @@ func (h *CreditHandler) Payment(c *gin.Context) {
 		return
 	}
 
+	// Handle overpayment: store as advance credit
+	var advanceNote string
+	if remaining > 0.01 {
+		advanceID := uuid.New().String()
+		_, err = tx.Exec(`INSERT INTO credit_entries (id, customer_id, amount, paid_amount, type, status)
+			VALUES (?, ?, ?, ?, 'advance', 'completed')`,
+			advanceID, req.CustomerID, remaining, remaining)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		advanceNote = fmt.Sprintf("%.2f advance balance recorded", remaining)
+	}
+
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	auditAction(c, "credit_payment", "credit_entries", paymentID, "", fmt.Sprintf("%.2f", req.Amount))
-	c.JSON(http.StatusOK, gin.H{"id": paymentID, "status": "completed"})
+	resp := gin.H{"id": paymentID, "status": "completed"}
+	if advanceNote != "" {
+		resp["advance_note"] = advanceNote
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (h *CreditHandler) Overdue(c *gin.Context) {
