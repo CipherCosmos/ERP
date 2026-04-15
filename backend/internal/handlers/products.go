@@ -95,11 +95,14 @@ func (h *ProductHandler) List(c *gin.Context) {
 	search := c.Query("search")
 
 	query := `
-		SELECT p.id, p.name, COALESCE(p.name_hi, ''), COALESCE(p.name_kn, ''), p.category_id, COALESCE(p.hsn_code, ''), p.barcode, 
+		SELECT p.id, p.name, COALESCE(p.name_hi, ''), COALESCE(p.name_kn, ''), p.category_id, COALESCE(p.hsn_code, ''), p.barcode,
 		       p.uom_id, p.base_unit_qty, p.gst_rate, p.is_free, p.is_active, p.allow_decimal, p.min_stock,
 		       COALESCE(pp.sell_price, 0) as sell_price,
 		       COALESCE(pp.mrp, 0) as mrp,
-		       COALESCE(pp.wholesale_sell_price, 0) as wholesale_sell_price
+		       COALESCE(pp.wholesale_sell_price, 0) as wholesale_sell_price,
+		       COALESCE(p.image_url, '') as image_url,
+		       COALESCE(p.brand, '') as brand,
+		       COALESCE(p.sac_code, '') as sac_code
 		FROM products p
 		LEFT JOIN product_prices pp ON p.id = pp.product_id AND pp.store_id = ?
 		WHERE p.is_active = 1`
@@ -131,10 +134,11 @@ func (h *ProductHandler) List(c *gin.Context) {
 		var id, name, nameHi, nameKn, categoryID, hsnCode, barcode, uomID string
 		var baseUnitQty, gstRate, minStock, sellPrice, mrp, wholesaleSell float64
 		var isFree, isActive, allowDecimal bool
+		var imageURL, brand, sacCode string
 
 		err := rows.Scan(&id, &name, &nameHi, &nameKn, &categoryID, &hsnCode, &barcode,
 			&uomID, &baseUnitQty, &gstRate, &isFree, &isActive, &allowDecimal, &minStock,
-			&sellPrice, &mrp, &wholesaleSell)
+			&sellPrice, &mrp, &wholesaleSell, &imageURL, &brand, &sacCode)
 		if err != nil {
 			fmt.Println("Scan error:", err)
 			continue
@@ -145,7 +149,8 @@ func (h *ProductHandler) List(c *gin.Context) {
 			"uom_id": uomID, "base_unit_qty": baseUnitQty, "gst_rate": gstRate,
 			"is_free": isFree, "is_active": isActive, "allow_decimal": allowDecimal,
 			"min_stock": minStock, "sell_price": sellPrice, "mrp": mrp,
-			"wholesale_sell_price": wholesaleSell,
+			"wholesale_sell_price": wholesaleSell, "image_url": imageURL,
+			"brand": brand, "sac_code": sacCode,
 		})
 	}
 
@@ -166,18 +171,20 @@ func (h *ProductHandler) Get(c *gin.Context) {
 
 	var product models.Product
 	var sellPrice, mrp, costPrice, wholesale float64
+	var imageURL, brand, sacCode string
 	err := db.DB.QueryRow(`
 		SELECT p.id, p.name, p.name_hi, p.name_kn, p.category_id, p.hsn_code, p.barcode,
 		       p.uom_id, p.base_unit_qty, p.gst_rate, p.is_free, p.is_active, p.allow_decimal, p.min_stock,
 		       COALESCE(pp.sell_price, 0), COALESCE(pp.mrp, 0), COALESCE(pp.cost_price, 0),
-		       COALESCE(pp.wholesale_sell_price, 0)
+		       COALESCE(pp.wholesale_sell_price, 0),
+		       COALESCE(p.image_url, ''), COALESCE(p.brand, ''), COALESCE(p.sac_code, '')
 		FROM products p
 		LEFT JOIN product_prices pp ON p.id = pp.product_id AND pp.store_id = ?
 		WHERE p.id = ?`, storeID, id).Scan(
 		&product.ID, &product.Name, &product.NameHi, &product.NameKn, &product.CategoryID,
 		&product.HSNCode, &product.Barcode, &product.UOMID, &product.BaseUnitQty, &product.GSTRate,
-		&product.IsFree, &product.Is_active, &product.AllowDecimal, &product.MinStock,
-		&sellPrice, &mrp, &costPrice, &wholesale,
+		&product.IsFree, &product.IsActive, &product.AllowDecimal, &product.MinStock,
+		&sellPrice, &mrp, &costPrice, &wholesale, &imageURL, &brand, &sacCode,
 	)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "product not found"})
@@ -192,9 +199,10 @@ func (h *ProductHandler) Get(c *gin.Context) {
 		"id": product.ID, "name": product.Name, "name_hi": product.NameHi, "name_kn": product.NameKn,
 		"category_id": product.CategoryID, "hsn_code": product.HSNCode, "barcode": product.Barcode,
 		"uom_id": product.UOMID, "base_unit_qty": product.BaseUnitQty, "gst_rate": product.GSTRate,
-		"is_free": product.IsFree, "is_active": product.Is_active, "allow_decimal": product.AllowDecimal,
+		"is_free": product.IsFree, "is_active": product.IsActive, "allow_decimal": product.AllowDecimal,
 		"min_stock":  product.MinStock,
 		"sell_price": sellPrice, "mrp": mrp, "cost_price": costPrice, "wholesale_sell_price": wholesale,
+		"image_url": imageURL, "brand": brand, "sac_code": sacCode,
 	})
 }
 
@@ -205,6 +213,7 @@ func (h *ProductHandler) Create(c *gin.Context) {
 		NameKn       string  `json:"name_kn"`
 		CategoryID   string  `json:"category_id" binding:"required"`
 		HSNCode      string  `json:"hsn_code"`
+		SACCode      string  `json:"sac_code"`
 		Barcode      string  `json:"barcode"`
 		UOMID        string  `json:"uom_id" binding:"required"`
 		BaseUnitQty  float64 `json:"base_unit_qty"`
@@ -212,6 +221,9 @@ func (h *ProductHandler) Create(c *gin.Context) {
 		IsFree       bool    `json:"is_free"`
 		AllowDecimal bool    `json:"allow_decimal"`
 		MinStock     float64 `json:"min_stock"`
+		ImageURL     string  `json:"image_url"`
+		Brand        string  `json:"brand"`
+		Description  string  `json:"description"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -232,11 +244,12 @@ func (h *ProductHandler) Create(c *gin.Context) {
 	}
 
 	productID := uuid.New().String()
-	_, err := db.DB.Exec(`INSERT INTO products 
-		(id, name, name_hi, name_kn, category_id, hsn_code, barcode, uom_id, base_unit_qty, gst_rate, is_free, allow_decimal, min_stock)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		productID, req.Name, req.NameHi, req.NameKn, req.CategoryID, req.HSNCode, barcode,
-		req.UOMID, req.BaseUnitQty, req.GSTRate, req.IsFree, req.AllowDecimal, req.MinStock)
+	_, err := db.DB.Exec(`INSERT INTO products
+		(id, name, name_hi, name_kn, category_id, hsn_code, sac_code, barcode, uom_id, base_unit_qty, gst_rate, is_free, allow_decimal, min_stock, image_url, brand, description)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		productID, req.Name, req.NameHi, req.NameKn, req.CategoryID, req.HSNCode, req.SACCode, barcode,
+		req.UOMID, req.BaseUnitQty, req.GSTRate, req.IsFree, req.AllowDecimal, req.MinStock,
+		req.ImageURL, req.Brand, req.Description)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -253,6 +266,7 @@ func (h *ProductHandler) Update(c *gin.Context) {
 		NameKn       string   `json:"name_kn"`
 		CategoryID   string   `json:"category_id"`
 		HSNCode      string   `json:"hsn_code"`
+		SACCode      string   `json:"sac_code"`
 		Barcode      string   `json:"barcode"`
 		UOMID        string   `json:"uom_id"`
 		BaseUnitQty  *float64 `json:"base_unit_qty"`
@@ -261,6 +275,9 @@ func (h *ProductHandler) Update(c *gin.Context) {
 		AllowDecimal *bool    `json:"allow_decimal"`
 		MinStock     *float64 `json:"min_stock"`
 		IsActive     *bool    `json:"is_active"`
+		ImageURL     string   `json:"image_url"`
+		Brand        string   `json:"brand"`
+		Description  string   `json:"description"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -305,6 +322,7 @@ func (h *ProductHandler) Update(c *gin.Context) {
 		name_kn = COALESCE(NULLIF(?, ''), name_kn),
 		category_id = COALESCE(NULLIF(?, ''), category_id),
 		hsn_code = COALESCE(NULLIF(?, ''), hsn_code),
+		sac_code = COALESCE(NULLIF(?, ''), sac_code),
 		barcode = COALESCE(NULLIF(?, ''), barcode),
 		uom_id = COALESCE(NULLIF(?, ''), uom_id),
 		base_unit_qty = COALESCE(?, base_unit_qty),
@@ -313,10 +331,14 @@ func (h *ProductHandler) Update(c *gin.Context) {
 		allow_decimal = COALESCE(?, allow_decimal),
 		min_stock = COALESCE(?, min_stock),
 		is_active = COALESCE(?, is_active),
+		image_url = COALESCE(NULLIF(?, ''), image_url),
+		brand = COALESCE(NULLIF(?, ''), brand),
+		description = COALESCE(NULLIF(?, ''), description),
 		updated_at = datetime('now')
 		WHERE id = ?`,
-		req.Name, req.NameHi, req.NameKn, req.CategoryID, req.HSNCode,
-		req.Barcode, req.UOMID, buq, gst, isFree, allowDec, ms, isAct, id)
+		req.Name, req.NameHi, req.NameKn, req.CategoryID, req.HSNCode, req.SACCode,
+		req.Barcode, req.UOMID, buq, gst, isFree, allowDec, ms, isAct,
+		req.ImageURL, req.Brand, req.Description, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

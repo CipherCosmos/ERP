@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"math"
 	"net/http"
 	"time"
@@ -308,6 +309,28 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	poID := uuid.New().String()
 	poNo := "PO-" + time.Now().Format("20060102150405") + "-" + poID[:4]
 
+	// Vendor credit limit enforcement
+	var vendorCreditLimit float64
+	_ = tx.QueryRow(`SELECT COALESCE(credit_limit, 0) FROM vendors WHERE id = ?`, req.VendorID).Scan(&vendorCreditLimit)
+	if vendorCreditLimit > 0 {
+		var outstanding float64
+		_ = tx.QueryRow(`SELECT COALESCE(SUM(total), 0) FROM purchase_orders WHERE vendor_id = ? AND status IN ('pending','partial')`,
+			req.VendorID).Scan(&outstanding)
+		// grandTotal is computed below; compute it early for the check
+		var checkTotal float64
+		for _, item := range req.Items {
+			var gstRate float64
+			_ = tx.QueryRow(`SELECT COALESCE(gst_rate, 0) FROM products WHERE id = ?`, item.ProductID).Scan(&gstRate)
+			taxable := item.Rate*item.Quantity - item.Discount
+			checkTotal += taxable + taxable*gstRate/100.0
+		}
+		if outstanding+checkTotal > vendorCreditLimit {
+			tx.Rollback()
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("vendor credit limit exceeded: outstanding=%.2f + new=%.2f > limit=%.2f", outstanding, checkTotal, vendorCreditLimit)})
+			return
+		}
+	}
+
 	type lineCalc struct {
 		item                                    PurchaseItemReq
 		taxable, cgst, sgst, igst, lineTotal float64
@@ -395,7 +418,10 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 		}
 	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusCreated, gin.H{"id": poID, "po_no": poNo, "total": grandTotal})
 }
@@ -484,7 +510,10 @@ func (h *PurchaseHandler) Receive(c *gin.Context) {
 	}
 	tx.Exec(`UPDATE purchase_orders SET status = ? WHERE id = ?`, status, req.POID)
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": status})
 }

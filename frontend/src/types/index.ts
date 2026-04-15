@@ -40,6 +40,7 @@ export interface Product {
   name_kn?: string;
   category_id: string;
   hsn_code: string;
+  sac_code?: string;
   barcode: string;
   uom_id: string;
   base_unit_qty: number;
@@ -51,6 +52,9 @@ export interface Product {
   sell_price: number;
   mrp: number;
   wholesale_sell_price?: number;
+  image_url?: string;
+  brand?: string;
+  description?: string;
 }
 
 export interface ProductPrice {
@@ -60,6 +64,7 @@ export interface ProductPrice {
   mrp: number;
   cost_price: number;
   sell_price: number;
+  wholesale_sell_price?: number;
   is_active: boolean;
 }
 
@@ -72,6 +77,31 @@ export interface Stock {
   reserved_qty: number;
   expiry_date: string | null;
   cost_price: number;
+}
+
+export interface StockAdjustment {
+  id: string;
+  product_id: string;
+  store_id: string;
+  batch_no?: string;
+  quantity_before: number;
+  quantity_after: number;
+  type: 'add' | 'reduce' | 'conversion' | 'transfer' | 'damage' | 'loss';
+  reason?: string;
+  cost_price?: number;
+  user_id: string;
+  created_at: string;
+}
+
+export interface PackingUnit {
+  id: string;
+  product_id: string;
+  label: string;
+  qty_in_parent?: number;
+  barcode?: string;
+  parent_unit_id?: string;
+  sort_order?: number;
+  is_active: boolean;
 }
 
 export interface Customer {
@@ -140,6 +170,32 @@ export interface CreditEntry {
   status: 'pending' | 'partial' | 'paid';
 }
 
+export interface Return {
+  id: string;
+  product_id: string;
+  store_id: string;
+  invoice_id?: string;
+  quantity: number;
+  amount: number;
+  reason: string;
+  refund_mode?: string;
+  status: 'pending' | 'approved';
+  user_id: string;
+  created_at: string;
+}
+
+export interface Loss {
+  id: string;
+  product_id: string;
+  store_id: string;
+  batch_no?: string;
+  quantity: number;
+  loss_type: string;
+  reason?: string;
+  user_id: string;
+  created_at: string;
+}
+
 export interface Vendor {
   id: string;
   name: string;
@@ -147,6 +203,8 @@ export interface Vendor {
   address: string;
   gstin: string;
   state: string;
+  credit_days?: number;
+  credit_limit?: number;
   is_active: boolean;
 }
 
@@ -158,8 +216,89 @@ export interface PurchaseOrder {
   order_date: string;
   expected_date: string | null;
   sub_total: number;
+  cgst?: number;
+  sgst?: number;
+  igst?: number;
   total: number;
-  status: 'pending' | 'received' | 'partial';
+  status: 'pending' | 'received' | 'partial' | 'cancelled';
+}
+
+export interface PurchaseOrderItem {
+  id: string;
+  po_id: string;
+  product_id: string;
+  quantity: number;
+  uom_id?: string;
+  rate: number;
+  discount?: number;
+  total?: number;
+}
+
+export interface VendorPayment {
+  id: string;
+  vendor_id: string;
+  vendor_name?: string;
+  po_id?: string;
+  amount: number;
+  payment_mode: string;
+  reference?: string;
+  payment_date: string;
+  notes?: string;
+  user_id: string;
+  store_id: string;
+  created_at: string;
+}
+
+export interface PurchaseReturn {
+  id: string;
+  po_id?: string;
+  vendor_id: string;
+  vendor_name?: string;
+  store_id: string;
+  return_date: string;
+  total: number;
+  status: 'pending' | 'approved';
+  reason?: string;
+  user_id: string;
+  created_at: string;
+}
+
+export interface PurchaseReturnItem {
+  id: string;
+  return_id: string;
+  product_id: string;
+  quantity: number;
+  rate: number;
+  total: number;
+}
+
+export interface Expense {
+  id: string;
+  store_id: string;
+  category_id: string;
+  amount: number;
+  description?: string;
+  expense_date: string;
+  user_id: string;
+  created_at: string;
+}
+
+export interface ExpenseCategory {
+  id: string;
+  name: string;
+  description?: string;
+  is_active: boolean;
+}
+
+export interface AuditLog {
+  id: string;
+  store_id: string;
+  user_id: string;
+  table_name: string;
+  operation: 'INSERT' | 'UPDATE' | 'DELETE';
+  record_id: string;
+  changes?: Record<string, unknown>;
+  created_at: string;
 }
 
 export interface SyncRecord {

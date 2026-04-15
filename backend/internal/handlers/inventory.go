@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -89,7 +90,10 @@ func (h *StockHandler) GetProductStock(c *gin.Context) {
 		var quantity, reservedQty, costPrice float64
 		var expiryDate sql.NullString
 
-		rows.Scan(&id, &batchNo, &quantity, &reservedQty, &expiryDate, &costPrice)
+		if err := rows.Scan(&id, &batchNo, &quantity, &reservedQty, &expiryDate, &costPrice); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to scan stock data"})
+			return
+		}
 		batches = append(batches, map[string]interface{}{
 			"id": id, "batch_no": batchNo, "quantity": quantity,
 			"reserved_qty": reservedQty, "expiry_date": expiryDate.String,
@@ -241,7 +245,10 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 		return
 	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	auditAction(c, "stock_adjust", "stock", req.ProductID, req.Type, req.Reason)
 	c.JSON(http.StatusOK, gin.H{"success": true, "new_quantity": newQty})
 }
@@ -282,35 +289,54 @@ func (h *StockHandler) Transfer(c *gin.Context) {
 
 	// Check reserved_qty
 	var reservedQty float64
-	_ = tx.QueryRow(`SELECT COALESCE(reserved_qty, 0) FROM stock
+	if err := tx.QueryRow(`SELECT COALESCE(reserved_qty, 0) FROM stock
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
-		req.ProductID, req.FromStoreID, req.BatchNo).Scan(&reservedQty)
+		req.ProductID, req.FromStoreID, req.BatchNo).Scan(&reservedQty); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check reserved stock"})
+		return
+	}
 	if fromQty-reservedQty < req.Quantity {
 		tx.Rollback()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient unreserved stock for transfer"})
 		return
 	}
 
-	tx.Exec(`UPDATE stock SET quantity = quantity - ?
+	if _, err := tx.Exec(`UPDATE stock SET quantity = quantity - ?
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
-		req.Quantity, req.ProductID, req.FromStoreID, req.BatchNo)
+		req.Quantity, req.ProductID, req.FromStoreID, req.BatchNo); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	var toQty float64
 	err = tx.QueryRow(`SELECT quantity FROM stock
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 		req.ProductID, req.ToStoreID, req.BatchNo).Scan(&toQty)
 	if err == sql.ErrNoRows {
-		tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price, expiry_date, mfg_date)
+		if _, err := tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price, expiry_date, mfg_date)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			uuid.New().String(), req.ProductID, req.ToStoreID, req.BatchNo, req.Quantity,
-			costPrice, expiryDate, mfgDate)
+			costPrice, expiryDate, mfgDate); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	} else {
-		tx.Exec(`UPDATE stock SET quantity = quantity + ?
+		if _, err := tx.Exec(`UPDATE stock SET quantity = quantity + ?
 			WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
-			req.Quantity, req.ProductID, req.ToStoreID, req.BatchNo)
+			req.Quantity, req.ProductID, req.ToStoreID, req.BatchNo); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	auditAction(c, "stock_transfer", "stock", req.ProductID, req.FromStoreID, req.ToStoreID)
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
@@ -498,6 +524,113 @@ func (h *SyncHandler) ConflictResolution(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func (h *StockHandler) Convert(c *gin.Context) {
+	var req struct {
+		ProductID   string  `json:"product_id" binding:"required"`
+		StoreID     string  `json:"store_id" binding:"required"`
+		FromBatchNo string  `json:"from_batch_no" binding:"required"`
+		ToUnitID    string  `json:"to_unit_id" binding:"required"`
+		Quantity    float64 `json:"quantity" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
+		return
+	}
+	uid := middleware.GetUserID(c)
+	if uid == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
+		return
+	}
+
+	// Look up the conversion factor from product_units
+	var qtyInParent float64
+	var label string
+	err := db.DB.QueryRow(`SELECT qty_in_parent, label FROM product_units WHERE id = ? AND product_id = ?`,
+		req.ToUnitID, req.ProductID).Scan(&qtyInParent, &label)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "packing unit not found for this product"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if qtyInParent <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid conversion factor"})
+		return
+	}
+
+	convertedQty := req.Quantity * qtyInParent
+
+	tx, err := db.DB.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Deduct source quantity
+	var sourceQty float64
+	err = tx.QueryRow(`SELECT quantity FROM stock WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+		req.ProductID, req.StoreID, req.FromBatchNo).Scan(&sourceQty)
+	if err != nil || sourceQty < req.Quantity {
+		tx.Rollback()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "insufficient stock in source batch"})
+		return
+	}
+
+	_, err = tx.Exec(`UPDATE stock SET quantity = quantity - ? WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+		req.Quantity, req.ProductID, req.StoreID, req.FromBatchNo)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Add converted quantity to a new batch
+	newBatch := fmt.Sprintf("CONV-%s-%s", label, time.Now().Format("20060102150405"))
+	var costPrice float64
+	_ = tx.QueryRow(`SELECT cost_price FROM stock WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+		req.ProductID, req.StoreID, req.FromBatchNo).Scan(&costPrice)
+
+	_, err = tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(product_id, store_id, batch_no) DO UPDATE SET quantity = quantity + excluded.quantity`,
+		uuid.New().String(), req.ProductID, req.StoreID, newBatch, convertedQty, costPrice/qtyInParent)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Log as stock_adjustment
+	_, err = tx.Exec(`INSERT INTO stock_adjustments (id, product_id, store_id, batch_no, quantity, adjustment_type, reason, user_id)
+		VALUES (?, ?, ?, ?, ?, 'conversion', ?, ?)`,
+		uuid.New().String(), req.ProductID, req.StoreID, req.FromBatchNo, req.Quantity,
+		fmt.Sprintf("converted %.2f to %.2f via unit %s", req.Quantity, convertedQty, label), uid)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	auditAction(c, "stock_convert", "stock", req.ProductID, req.FromBatchNo, newBatch)
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"from_qty":      req.Quantity,
+		"converted_qty": convertedQty,
+		"new_batch":     newBatch,
+	})
 }
 
 func (h *StockHandler) GetAdjustments(c *gin.Context) {

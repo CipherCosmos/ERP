@@ -22,17 +22,24 @@ func Initialize(dbPath string) error {
 		}
 	}
 	var err error
-	DB, err = sql.Open("sqlite3", dbPath+"?_foreign_keys=on&cache=shared&_loc=auto")
+	DB, err = sql.Open("sqlite3", dbPath+"?_foreign_keys=on&cache=shared&_loc=auto&_journal_mode=WAL")
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}
 
-	DB.SetMaxOpenConns(25)
-	DB.SetMaxIdleConns(5)
+	// WAL mode + busy timeout for concurrent access (multiple billing counters)
+	DB.Exec("PRAGMA busy_timeout = 5000")
+
+	DB.SetMaxOpenConns(2)
+	DB.SetMaxIdleConns(2)
 	DB.SetConnMaxLifetime(5 * time.Minute)
 
 	if err = createTables(); err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	if err = runMigrations(); err != nil {
+		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
 	if err = seedDefaults(); err != nil {

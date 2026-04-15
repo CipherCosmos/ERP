@@ -70,6 +70,9 @@ const (
 	PermProductUpdate  = "product.update"
 	PermVendorUpdate   = "vendor.update"
 	PermGSTR1File      = "gstr1.file"
+	PermInvoiceVoid    = "invoice.void"
+	PermVendorPayment  = "vendor.payment"
+	PermPurchaseReturn = "purchase.return"
 )
 
 var rolePermissions = map[string][]string{
@@ -119,6 +122,9 @@ var rolePermissions = map[string][]string{
 		PermUserDeactivate,
 		PermPasswordChange,
 		PermGSTR1File,
+		PermInvoiceVoid,
+		PermVendorPayment,
+		PermPurchaseReturn,
 	},
 
 	"cashier": {

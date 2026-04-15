@@ -1,117 +1,192 @@
-import { useState, useEffect, useCallback } from 'react';
-import { useAppStore } from '../stores/appStore';
-import { productApi, customerApi, categoryApi } from '../services/api';
-import {
-  initDB,
-  saveProducts,
-  getProducts,
-  saveCustomers,
-  getCustomers,
-  saveCategories,
-  getCategories,
-} from '../services/offlineDb';
-import type { Product, Customer, Category } from '../types';
+import { useEffect, useState } from 'react';
 
-interface OfflineDataState {
-  products: Product[];
-  customers: Customer[];
-  categories: Category[];
-  loading: boolean;
-  isOfflineData: boolean;
-}
+const DB_NAME = 'gbos-offline';
+const STORE_NAME = 'app-data';
+const SYNC_TIME_KEY = 'last-sync-time';
+const SYNC_INTERVAL = 60 * 60 * 1000; // 1 hour
 
-/**
- * Hook that fetches products, customers, and categories from the API on mount.
- *
- *  - On success: saves the data into IndexedDB for future offline use.
- *  - On failure (offline / network error): loads previously cached data from IndexedDB.
- *
- * Returns the data along with loading state and a flag indicating whether the
- * data came from the offline cache.
- */
-export function useOfflineData(): OfflineDataState {
-  const store = useAppStore((s) => s.store);
-  const storeId = store?.id ?? '';
+let db: IDBDatabase | null = null;
 
-  const [products, setProducts] = useState<Product[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [isOfflineData, setIsOfflineData] = useState(false);
-
-  const fetchData = useCallback(async () => {
-    if (!storeId) {
-      setLoading(false);
+function openDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (db) {
+      resolve(db);
       return;
     }
 
-    setLoading(true);
-
-    // Ensure IndexedDB is ready
-    try {
-      await initDB();
-    } catch (err) {
-      console.error('[useOfflineData] Failed to initialise IndexedDB:', err);
-    }
-
-    try {
-      // Fetch all three in parallel from the API
-      const [prodRes, custRes, catRes] = await Promise.all([
-        productApi.list({ store_id: storeId }),
-        customerApi.list(storeId),
-        categoryApi.list(storeId),
-      ]);
-
-      const prodData: Product[] = prodRes.data ?? [];
-      const custData: Customer[] = custRes.data ?? [];
-      const catData: Category[] = catRes.data ?? [];
-
-      setProducts(prodData);
-      setCustomers(custData);
-      setCategories(catData);
-      setIsOfflineData(false);
-
-      // Persist to IndexedDB in the background (fire-and-forget)
-      saveProducts(prodData).catch((e) =>
-        console.warn('[useOfflineData] Failed to cache products:', e)
-      );
-      saveCustomers(custData).catch((e) =>
-        console.warn('[useOfflineData] Failed to cache customers:', e)
-      );
-      saveCategories(catData).catch((e) =>
-        console.warn('[useOfflineData] Failed to cache categories:', e)
-      );
-    } catch (networkErr) {
-      // Network request failed -- fall back to IndexedDB
-      console.warn(
-        '[useOfflineData] Network unavailable, loading from IndexedDB',
-        networkErr
-      );
-
-      try {
-        const [offlineProds, offlineCusts, offlineCats] = await Promise.all([
-          getProducts<Product>(),
-          getCustomers<Customer>(),
-          getCategories<Category>(),
-        ]);
-
-        setProducts(offlineProds);
-        setCustomers(offlineCusts);
-        setCategories(offlineCats);
-        setIsOfflineData(true);
-      } catch (dbErr) {
-        console.error('[useOfflineData] IndexedDB fallback also failed:', dbErr);
-        // Keep state empty -- nothing we can do
-        setIsOfflineData(true);
+    const request = indexedDB.open(DB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      db = request.result;
+      resolve(db);
+    };
+    request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
+      const database = (event.target as IDBOpenDBRequest).result;
+      if (!database.objectStoreNames.contains(STORE_NAME)) {
+        database.createObjectStore(STORE_NAME, { keyPath: 'key' });
       }
-    } finally {
-      setLoading(false);
-    }
-  }, [storeId]);
+    };
+  });
+}
+
+async function saveToIndexedDB(key: string, data: unknown): Promise<void> {
+  const database = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction(STORE_NAME, 'readwrite');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.put({
+      key,
+      data,
+      timestamp: Date.now(),
+    });
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+async function getFromIndexedDB(key: string): Promise<unknown | null> {
+  const database = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = database.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get(key);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const result = request.result;
+      resolve(result ? result.data : null);
+    };
+  });
+}
+
+async function getSyncTime(): Promise<number> {
+  const database = await openDB();
+  return new Promise((resolve) => {
+    const tx = database.transaction(STORE_NAME, 'readonly');
+    const store = tx.objectStore(STORE_NAME);
+    const request = store.get(SYNC_TIME_KEY);
+    request.onerror = () => resolve(0);
+    request.onsuccess = () => {
+      const result = request.result;
+      resolve(result ? result.data : 0);
+    };
+  });
+}
+
+async function setSyncTime(time: number): Promise<void> {
+  await saveToIndexedDB(SYNC_TIME_KEY, time);
+}
+
+interface UseOfflineDataOptions {
+  key: string;
+  fetcher: () => Promise<unknown>;
+  ttl?: number;
+}
+
+export function useOfflineData({ key, fetcher, ttl = SYNC_INTERVAL }: UseOfflineDataOptions) {
+  const [data, setData] = useState<unknown | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
 
-  return { products, customers, categories, loading, isOfflineData };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadData() {
+      try {
+        setLoading(true);
+        setError(null);
+
+        if (isOnline) {
+          try {
+            const freshData = await fetcher();
+            if (isMounted) {
+              setData(freshData);
+              await saveToIndexedDB(key, freshData);
+              await setSyncTime(Date.now());
+            }
+          } catch (fetchError) {
+            const cachedData = await getFromIndexedDB(key);
+            if (cachedData) {
+              if (isMounted) {
+                setData(cachedData);
+              }
+            } else if (isMounted) {
+              setError(fetchError as Error);
+            }
+          }
+        } else {
+          const cachedData = await getFromIndexedDB(key);
+          if (isMounted) {
+            if (cachedData) {
+              setData(cachedData);
+            } else {
+              setError(new Error('No cached data available offline'));
+            }
+          }
+        }
+      } catch (err) {
+        if (isMounted) {
+          setError(err as Error);
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    }
+
+    loadData();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [key, fetcher, isOnline]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function checkAndRefresh() {
+      if (!isOnline) return;
+
+      const lastSync = await getSyncTime();
+      const now = Date.now();
+
+      if (now - lastSync > SYNC_INTERVAL) {
+        try {
+          const freshData = await fetcher();
+          if (isMounted) {
+            setData(freshData);
+            await saveToIndexedDB(key, freshData);
+            await setSyncTime(now);
+          }
+        } catch (err) {
+          console.error('Auto-refresh failed:', err);
+        }
+      }
+    }
+
+    const timer = setTimeout(checkAndRefresh, SYNC_INTERVAL);
+
+    return () => {
+      isMounted = false;
+      clearTimeout(timer);
+    };
+  }, [key, fetcher, isOnline]);
+
+  return { data, loading, error, isOffline: !isOnline };
 }
+
+export { saveToIndexedDB, getFromIndexedDB, setSyncTime, getSyncTime };

@@ -1543,6 +1543,117 @@ if [ "$ADMIN_UID" != "PARSE_ERROR" ] && [ -n "$ADMIN_UID" ]; then
   assert_status "Edge: cannot deactivate self → 400" "400" "$STATUS"
 fi
 
+###############################################################################
+header "PHASE 17: Invoice Void & New Features"
+###############################################################################
+
+echo -e "\n${YELLOW}-- Void Invoice --${NC}"
+
+# Create a simple invoice to void
+RESP=$(auth_post "/invoices" "{\"store_id\":\"$STORE_ID\",\"invoice_date\":\"${TODAY}T23:20:00\",\"sub_total\":280,\"cgst\":16.80,\"sgst\":16.80,\"total\":313.60,\"status\":\"completed\",\"payment_mode\":\"cash\",\"items\":[{\"product_id\":\"$PROD_BUTTER_ID\",\"quantity\":2,\"rate\":140,\"total\":280}]}")
+split_response "$RESP"
+assert_status "Invoice: create for void test" "201" "$STATUS"
+VOID_INV_ID=$(jq_val "$BODY" "d.get('id','')")
+
+# Get initial stock
+BUTTER_BEFORE_VOID=$(get_stock_qty "$PROD_BUTTER_ID" "$STORE_ID")
+
+# Void the invoice
+RESP=$(auth_post "/invoices/$VOID_INV_ID/void" '{}')
+split_response "$RESP"
+assert_status "Invoice: void" "200" "$STATUS"
+
+# Verify stock restored
+BUTTER_AFTER_VOID=$(get_stock_qty "$PROD_BUTTER_ID" "$STORE_ID")
+EXPECTED_BUTTER=$(python3 -c "print(float('$BUTTER_BEFORE_VOID') + 2)")
+assert_eq "Invoice: void restores stock +2" "$BUTTER_AFTER_VOID" "$EXPECTED_BUTTER"
+
+# Try to void already-voided → FAIL
+RESP=$(auth_post "/invoices/$VOID_INV_ID/void" '{}')
+split_response "$RESP"
+assert_status "Invoice: double void → 400" "400" "$STATUS"
+
+echo -e "\n${YELLOW}-- Vendor Payments --${NC}"
+
+RESP=$(auth_post "/vendor-payments" "{\"vendor_id\":\"$VENDOR_LOCAL_ID\",\"po_id\":\"$PO1_ID\",\"amount\":5000,\"payment_mode\":\"bank_transfer\",\"reference\":\"TXN12345\",\"payment_date\":\"$TODAY\",\"notes\":\"PO1 payment\",\"store_id\":\"$STORE_ID\"}")
+split_response "$RESP"
+assert_status "VendorPayments: create" "201" "$STATUS"
+
+RESP=$(auth_get "/vendor-payments?store_id=$STORE_ID")
+split_response "$RESP"
+assert_status "VendorPayments: list" "200" "$STATUS"
+VP_COUNT=$(jq_val "$BODY" "len(d) if isinstance(d,list) else 0")
+assert_gt "VendorPayments: has entries" "$VP_COUNT" "0"
+
+RESP=$(auth_get "/vendor-payments/summary?store_id=$STORE_ID")
+split_response "$RESP"
+assert_status "VendorPayments: summary" "200" "$STATUS"
+
+echo -e "\n${YELLOW}-- Purchase Returns --${NC}"
+
+RESP=$(auth_post "/purchase-returns" "{\"po_id\":\"$PO1_ID\",\"vendor_id\":\"$VENDOR_LOCAL_ID\",\"store_id\":\"$STORE_ID\",\"return_date\":\"$TODAY\",\"reason\":\"defective items\",\"items\":[{\"product_id\":\"$PROD_MILK_ID\",\"quantity\":10,\"rate\":25}]}")
+split_response "$RESP"
+assert_status "PurchaseReturns: create" "201" "$STATUS"
+PR_ID=$(jq_val "$BODY" "d.get('id','')")
+
+RESP=$(auth_get "/purchase-returns?store_id=$STORE_ID")
+split_response "$RESP"
+assert_status "PurchaseReturns: list" "200" "$STATUS"
+PR_COUNT=$(jq_val "$BODY" "len(d) if isinstance(d,list) else 0")
+assert_gt "PurchaseReturns: has entries" "$PR_COUNT" "0"
+
+RESP=$(auth_post "/purchase-returns/$PR_ID/approve?store_id=$STORE_ID" '{}')
+split_response "$RESP"
+assert_status "PurchaseReturns: approve" "200" "$STATUS"
+
+echo -e "\n${YELLOW}-- Stock Conversion --${NC}"
+
+# Create a product with packing units
+RESP=$(auth_post "/products" "{\"name\":\"Beverage Can\",\"category_id\":\"$CAT_DAIRY_ID\",\"uom_id\":\"$UOM_NOS_ID\",\"gst_rate\":5,\"base_qty\":1,\"min_stock\":10}")
+split_response "$RESP"
+BEV_PID=$(jq_val "$BODY" "d.get('id','')")
+
+RESP=$(auth_post "/products/price" "{\"product_id\":\"$BEV_PID\",\"store_id\":\"$STORE_ID\",\"mrp\":50,\"cost_price\":30,\"sell_price\":45}")
+split_response "$RESP"
+
+# Add stock in individual units
+RESP=$(auth_post "/stock/adjust" "{\"product_id\":\"$BEV_PID\",\"store_id\":\"$STORE_ID\",\"batch_no\":\"BEV-IND\",\"quantity\":100,\"type\":\"add\",\"cost_price\":30}")
+split_response "$RESP"
+assert_status "Stock: add individual beverage units" "200" "$STATUS"
+
+# Create packing unit (dozen = 12 cans)
+RESP=$(auth_post "/products/$BEV_PID/packing-units" '{"label":"Pack of 12","qty_in_parent":12,"barcode":"BEV12PACK"}')
+split_response "$RESP"
+PU_ID=$(jq_val "$BODY" "d.get('id','')")
+assert_status "PackingUnits: create dozen" "201" "$STATUS"
+
+echo -e "\n${YELLOW}-- Multi-Store Analytics --${NC}"
+
+RESP=$(auth_get "/analytics/multi-store")
+split_response "$RESP"
+assert_status "Analytics: multi-store (all)" "200" "$STATUS"
+MS_TOTAL_REV=$(jq_val "$BODY" "d.get('total_revenue',0)")
+assert_gt "Analytics: multi-store revenue > 0" "$MS_TOTAL_REV" "1000"
+
+RESP=$(auth_get "/analytics/multi-store?store_ids=$STORE_ID,$STORE2_ID&range=today")
+split_response "$RESP"
+assert_status "Analytics: multi-store (filtered)" "200" "$STATUS"
+
+echo -e "\n${YELLOW}-- Product Fields (brand, sac, image) --${NC}"
+
+# Create product with new fields
+RESP=$(auth_post "/products" "{\"name\":\"Premium Ghee\",\"category_id\":\"$CAT_DAIRY_ID\",\"uom_id\":\"$UOM_L_ID\",\"gst_rate\":5,\"base_qty\":1,\"brand\":\"DesiBrand\",\"sac_code\":\"02101200\",\"description\":\"Pure Desi Ghee\",\"image_url\":\"https://example.com/ghee.jpg\"}")
+split_response "$RESP"
+assert_status "Products: create with brand/sac/image" "201" "$STATUS"
+GHEE_PID=$(jq_val "$BODY" "d.get('id','')")
+
+RESP=$(auth_get "/products/$GHEE_PID?store_id=$STORE_ID")
+split_response "$RESP"
+assert_status "Products: get with fields" "200" "$STATUS"
+assert_contains "Products: has brand" "$BODY" "DesiBrand"
+assert_contains "Products: has sac_code" "$BODY" "02101200"
+assert_contains "Products: has description" "$BODY" "Pure Desi"
+
 echo ""
 echo -e "${BLUE}═══════════════════════════════════════${NC}"
 echo -e "${BLUE}  ALL PHASES COMPLETE${NC}"

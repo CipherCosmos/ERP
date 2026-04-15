@@ -156,20 +156,36 @@ export default function Billing() {
 
   const calculateTotals = () => {
     let subtotal = 0;
-    let totalGST = 0;
+    let cgst = 0;
+    let sgst = 0;
+    let igst = 0;
+
+    // Detect inter-state: compare store GSTIN vs customer GSTIN
+    const isInterState = (() => {
+      if (!store?.gstin || !selectedCustomerId) return false;
+      const customer = customers.find(c => c.id === selectedCustomerId);
+      if (!customer?.gstin) return false;
+      return store.gstin.substring(0, 2) !== customer.gstin.substring(0, 2);
+    })();
 
     cart.forEach((item) => {
       const rate = lineUnitPrice(item.product, useWholesalePrices);
       const itemTotal = rate * item.quantity;
       const gstAmount = (itemTotal * item.product.gst_rate) / 100;
+
+      if (isInterState) {
+        igst += gstAmount;
+      } else {
+        cgst += gstAmount / 2;
+        sgst += gstAmount / 2;
+      }
       subtotal += itemTotal;
-      totalGST += gstAmount;
     });
 
-    const roundOff = Math.round(subtotal + totalGST) - (subtotal + totalGST);
-    const total = subtotal + totalGST + roundOff;
+    const roundOff = Math.round(subtotal + cgst + sgst + igst) - (subtotal + cgst + sgst + igst);
+    const total = subtotal + cgst + sgst + igst + roundOff;
 
-    return { subtotal, totalGST, roundOff, total };
+    return { subtotal, cgst, sgst, igst, roundOff, total };
   };
 
   const getPaymentAmount = () => {
@@ -188,8 +204,7 @@ export default function Billing() {
       return;
     }
 
-    const { subtotal, totalGST, roundOff, total } = calculateTotals();
-    const gstSplit = totalGST / 2;
+    const { subtotal, cgst, sgst, igst, roundOff, total } = calculateTotals();
 
     if (useSplitPayment) {
       const paidAmount = splitPayments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
@@ -204,9 +219,9 @@ export default function Billing() {
       customer_id: selectedCustomerId || undefined,
       invoice_date: new Date().toISOString(),
       sub_total: subtotal,
-      cgst: gstSplit,
-      sgst: gstSplit,
-      igst: 0,
+      cgst,
+      sgst,
+      igst,
       discount: 0,
       round_off: roundOff,
       total,
@@ -240,6 +255,9 @@ export default function Billing() {
           payments: splitLines,
         });
       }
+
+      // Print receipt
+      printReceipt(invoice, cart);
 
       clearCart();
       setPaymentMode('cash');
@@ -288,7 +306,85 @@ export default function Billing() {
     }
   };
 
-  const { subtotal, totalGST, roundOff, total } = calculateTotals();
+  const printReceipt = (invoice: any, items: any[]) => {
+    const { cgst, sgst, igst } = calculateTotals();
+    const customer = selectedCustomerId ? customers.find(c => c.id === selectedCustomerId) : null;
+
+    const receiptHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Receipt ${invoice.invoice_no}</title>
+        <style>
+          body { font-family: monospace; width: 80mm; margin: 0; padding: 10px; }
+          .header { text-align: center; font-weight: bold; margin-bottom: 10px; }
+          .line { border-bottom: 1px dashed #000; margin: 5px 0; }
+          table { width: 100%; font-size: 12px; }
+          th, td { padding: 4px; text-align: left; }
+          .text-right { text-align: right; }
+          .total { font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <div class="header">RECEIPT</div>
+        <div>${store?.name}</div>
+        <div class="line"></div>
+        <div>Invoice: ${invoice.invoice_no}</div>
+        <div>Date: ${new Date(invoice.invoice_date).toLocaleString()}</div>
+        ${customer ? `<div>Customer: ${customer.name}</div>` : '<div>Customer: Walk-in</div>'}
+        <div class="line"></div>
+        <table>
+          <thead>
+            <tr>
+              <th>Item</th>
+              <th class="text-right">Qty</th>
+              <th class="text-right">Rate</th>
+              <th class="text-right">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map(item => `
+              <tr>
+                <td>${item.product.name}</td>
+                <td class="text-right">${item.quantity}</td>
+                <td class="text-right">₹${lineUnitPrice(item.product, useWholesalePrices).toFixed(2)}</td>
+                <td class="text-right">₹${(lineUnitPrice(item.product, useWholesalePrices) * item.quantity).toFixed(2)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+        <div class="line"></div>
+        <table>
+          <tr>
+            <td>Subtotal:</td>
+            <td class="text-right">₹${calculateTotals().subtotal.toFixed(2)}</td>
+          </tr>
+          ${cgst > 0 ? `<tr><td>CGST:</td><td class="text-right">₹${cgst.toFixed(2)}</td></tr>` : ''}
+          ${sgst > 0 ? `<tr><td>SGST:</td><td class="text-right">₹${sgst.toFixed(2)}</td></tr>` : ''}
+          ${igst > 0 ? `<tr><td>IGST:</td><td class="text-right">₹${igst.toFixed(2)}</td></tr>` : ''}
+          <tr class="total">
+            <td>Total:</td>
+            <td class="text-right">₹${calculateTotals().total.toFixed(2)}</td>
+          </tr>
+        </table>
+        <div class="line"></div>
+        <div style="text-align: center; font-size: 11px; margin-top: 10px;">
+          Thank you!
+        </div>
+      </body>
+      </html>
+    `;
+
+    const printWindow = window.open('', '_blank', 'height=400,width=300');
+    if (printWindow) {
+      printWindow.document.write(receiptHtml);
+      printWindow.document.close();
+      setTimeout(() => printWindow.print(), 250);
+    }
+  };
+
+  const { subtotal, cgst, sgst, igst, roundOff, total } = calculateTotals();
 
   return (
     <div style={styles.container}>
@@ -335,6 +431,14 @@ export default function Billing() {
               style={styles.productCard}
               onClick={() => addToCart({ product: p, quantity: 1, discount: 0 })}
             >
+              {p.image_url && (
+                <img
+                  src={p.image_url}
+                  alt={p.name}
+                  style={styles.productImage}
+                  onError={(e) => (e.currentTarget.style.display = 'none')}
+                />
+              )}
               <div style={styles.productName}>{p.name}</div>
               <div style={styles.productPrice}>₹{lineUnitPrice(p, useWholesalePrices).toFixed(2)}</div>
             </div>
@@ -356,18 +460,33 @@ export default function Billing() {
               </div>
               <div style={styles.cartItemActions}>
                 <button
-                  onClick={() =>
-                    updateCartQuantity(item.product.id, item.quantity - 1)
-                  }
+                  onClick={() => {
+                    const newQty = item.product.allow_decimal
+                      ? item.quantity - 0.5
+                      : item.quantity - 1;
+                    updateCartQuantity(item.product.id, Math.max(0.5, newQty));
+                  }}
                   style={styles.qtyBtn}
                 >
                   -
                 </button>
-                <span style={styles.qty}>{item.quantity}</span>
+                <input
+                  type={item.product.allow_decimal ? 'number' : 'text'}
+                  value={item.quantity}
+                  onChange={(e) => {
+                    const val = parseFloat(e.target.value) || 0;
+                    if (val > 0) updateCartQuantity(item.product.id, val);
+                  }}
+                  step={item.product.allow_decimal ? '0.5' : '1'}
+                  style={{...styles.qtyInput, width: '60px'}}
+                />
                 <button
-                  onClick={() =>
-                    updateCartQuantity(item.product.id, item.quantity + 1)
-                  }
+                  onClick={() => {
+                    const newQty = item.product.allow_decimal
+                      ? item.quantity + 0.5
+                      : item.quantity + 1;
+                    updateCartQuantity(item.product.id, newQty);
+                  }}
                   style={styles.qtyBtn}
                 >
                   +
@@ -388,10 +507,18 @@ export default function Billing() {
             <span>Subtotal</span>
             <span>₹{subtotal.toFixed(2)}</span>
           </div>
-          <div style={styles.totalRow}>
-            <span>GST</span>
-            <span>₹{totalGST.toFixed(2)}</span>
-          </div>
+          {cgst > 0 && <div style={styles.totalRow}>
+            <span>CGST</span>
+            <span>₹{cgst.toFixed(2)}</span>
+          </div>}
+          {sgst > 0 && <div style={styles.totalRow}>
+            <span>SGST</span>
+            <span>₹{sgst.toFixed(2)}</span>
+          </div>}
+          {igst > 0 && <div style={styles.totalRow}>
+            <span>IGST</span>
+            <span>₹{igst.toFixed(2)}</span>
+          </div>}
           <div style={styles.totalRow}>
             <span>Round Off</span>
             <span>₹{roundOff.toFixed(2)}</span>
@@ -560,6 +687,13 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'center',
     boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
   },
+  productImage: {
+    width: '100%',
+    height: '80px',
+    objectFit: 'cover',
+    borderRadius: '4px',
+    marginBottom: '0.5rem',
+  },
   productName: {
     fontSize: '0.875rem',
     marginBottom: '0.25rem',
@@ -604,6 +738,13 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '4px',
     background: 'white',
     cursor: 'pointer',
+  },
+  qtyInput: {
+    border: '1px solid #ddd',
+    borderRadius: '4px',
+    padding: '4px',
+    fontSize: '0.875rem',
+    textAlign: 'center',
   },
   qty: {
     minWidth: '24px',

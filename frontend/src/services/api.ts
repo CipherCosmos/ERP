@@ -79,6 +79,7 @@ export const invoiceApi = {
   get: (id: string) => api.get(`/invoices/${id}`),
   create: (data: Partial<Invoice>) =>
     api.post('/invoices', data),
+  void: (id: string) => api.post(`/invoices/${id}/void`),
   exportGSTR1: (storeId: string, month: string) =>
     api.get(`/invoices/gstr1?store_id=${storeId}&month=${month}`),
   markGSTR1Filed: (storeId: string, month: string) =>
@@ -168,6 +169,13 @@ export const stockApi = {
     quantity: number;
     batch_no?: string;
   }) => api.post('/stock/transfer', data),
+  convert: (data: {
+    product_id: string;
+    store_id: string;
+    from_batch_no: string;
+    to_unit_id: string;
+    quantity: number;
+  }) => api.post('/stock/convert', data),
 };
 
 export const uomApi = {
@@ -185,6 +193,8 @@ export const analyticsApi = {
     api.get('/analytics/sales/hourly', { params }),
   paymentBreakup: (params: { store_id: string; start_date: string; end_date: string }) =>
     api.get('/analytics/sales/payment', { params }),
+  multiStore: (params: { store_ids?: string; range?: string }) =>
+    api.get('/analytics/multi-store', { params }),
 };
 
 export const purchaseApi = {
@@ -271,6 +281,38 @@ export const expenseApi = {
   getCategories: () => api.get('/expenses/categories'),
   getSummary: (params: { store_id: string; start_date?: string; end_date?: string }) =>
     api.get('/expenses/summary', { params }),
+};
+
+export const vendorPaymentApi = {
+  list: (params: { store_id: string; vendor_id?: string }) =>
+    api.get('/vendor-payments', { params }),
+  create: (data: {
+    vendor_id: string;
+    po_id?: string;
+    amount: number;
+    payment_mode: string;
+    reference?: string;
+    payment_date: string;
+    notes?: string;
+    store_id: string;
+  }) => api.post('/vendor-payments', data),
+  summary: (params: { store_id: string; start_date?: string; end_date?: string }) =>
+    api.get('/vendor-payments/summary', { params }),
+};
+
+export const purchaseReturnApi = {
+  list: (params: { store_id: string; vendor_id?: string }) =>
+    api.get('/purchase-returns', { params }),
+  create: (data: {
+    po_id?: string;
+    vendor_id: string;
+    store_id: string;
+    return_date: string;
+    reason?: string;
+    items: { product_id: string; quantity: number; rate: number }[];
+  }) => api.post('/purchase-returns', data),
+  approve: (id: string, storeId: string) =>
+    api.post(`/purchase-returns/${id}/approve?store_id=${storeId}`),
 };
 
 export default api;

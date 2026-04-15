@@ -41,6 +41,9 @@ export default function Menu() {
     { key: 'invoices', labelKey: 'invoices', icon: '🧾', path: '/invoices', roles: ['owner', 'manager', 'cashier'] },
     { key: 'stock-transfer', labelKey: 'stockTransfer', icon: '🔄', path: '/stock-transfer', roles: ['owner', 'manager', 'warehouse'] },
     { key: 'grn', labelKey: 'grn', icon: '📥', path: '/grn', roles: ['owner', 'manager', 'warehouse'] },
+    { key: 'vendor-payments', labelKey: 'vendorPayments', icon: '💳', path: '/vendor-payments', roles: ['owner', 'manager'] },
+    { key: 'purchase-returns', labelKey: 'purchaseReturns', icon: '↩️', path: '/purchase-returns', roles: ['owner', 'manager'] },
+    { key: 'multi-store', labelKey: 'multiStore', icon: '🏪', path: '/multi-store', roles: ['owner'] },
     { key: 'audit', labelKey: 'audit', icon: '🔍', path: '/audit', roles: ['owner', 'manager'] },
     { key: 'settings', labelKey: 'settings', icon: '⚙️', path: '/settings', roles: ['owner'] },
   ];

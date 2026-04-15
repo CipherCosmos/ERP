@@ -1,5 +1,6 @@
 // GBOS ERP - Service Worker
 // Provides offline-first caching for the app shell and API responses.
+// Includes background sync for pending invoice submissions.
 
 const CACHE_VERSION = 'v1';
 const STATIC_CACHE = 'gbos-static-' + CACHE_VERSION;
@@ -89,6 +90,137 @@ self.addEventListener('fetch', (event) => {
   // Default: cache-first for everything else
   event.respondWith(cacheFirstStrategy(request));
 });
+
+// ─── Background Sync ──────────────────────────────────────────────────────────
+self.addEventListener('sync', (event) => {
+  if (event.tag === 'sync-pending-invoices') {
+    console.log('[SW] Background sync triggered for pending invoices');
+    event.waitUntil(syncPendingInvoices());
+  }
+});
+
+async function syncPendingInvoices() {
+  try {
+    // Open IndexedDB to get pending invoices
+    const db = await openIndexedDB();
+    const pendingInvoices = await getPendingInvoicesFromDB(db);
+
+    if (pendingInvoices.length === 0) {
+      console.log('[SW] No pending invoices to sync');
+      return;
+    }
+
+    console.log('[SW] Syncing', pendingInvoices.length, 'pending invoices');
+
+    // Try to sync each pending invoice
+    for (const invoice of pendingInvoices) {
+      try {
+        const response = await fetch('/api/v1/invoices', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + (await getTokenFromStorage()),
+            'X-Store-ID': await getStoreIdFromStorage(),
+          },
+          body: JSON.stringify(invoice.data),
+        });
+
+        if (response.ok) {
+          // Mark as synced in IndexedDB
+          await markInvoiceAsSynced(db, invoice.id);
+          console.log('[SW] Synced invoice:', invoice.id);
+
+          // Notify all clients that sync succeeded
+          notifyClients({
+            type: 'SYNC_SUCCESS',
+            invoiceId: invoice.id,
+          });
+        }
+      } catch (error) {
+        console.error('[SW] Failed to sync invoice:', invoice.id, error);
+      }
+    }
+  } catch (error) {
+    console.error('[SW] Background sync error:', error);
+    throw error; // Re-throw to retry later
+  }
+}
+
+function openIndexedDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('gbos-offline', 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains('pending-invoices')) {
+        db.createObjectStore('pending-invoices', { keyPath: 'id' });
+      }
+    };
+  });
+}
+
+function getPendingInvoicesFromDB(db) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('pending-invoices', 'readonly');
+    const store = tx.objectStore('pending-invoices');
+    const request = store.getAll();
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+function markInvoiceAsSynced(db, invoiceId) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('pending-invoices', 'readwrite');
+    const store = tx.objectStore('pending-invoices');
+    const request = store.delete(invoiceId);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+async function getTokenFromStorage() {
+  return new Promise((resolve) => {
+    const clients = self.clients.matchAll();
+    clients.then((clientList) => {
+      if (clientList.length > 0) {
+        clientList[0].postMessage({ type: 'GET_TOKEN' });
+        self.onmessage = (event) => {
+          if (event.data.type === 'TOKEN') {
+            resolve(event.data.token);
+          }
+        };
+      }
+      resolve('');
+    });
+  });
+}
+
+async function getStoreIdFromStorage() {
+  return new Promise((resolve) => {
+    const clients = self.clients.matchAll();
+    clients.then((clientList) => {
+      if (clientList.length > 0) {
+        clientList[0].postMessage({ type: 'GET_STORE_ID' });
+        self.onmessage = (event) => {
+          if (event.data.type === 'STORE_ID') {
+            resolve(event.data.storeId);
+          }
+        };
+      }
+      resolve('');
+    });
+  });
+}
+
+function notifyClients(message) {
+  self.clients.matchAll().then((clientList) => {
+    clientList.forEach((client) => {
+      client.postMessage(message);
+    });
+  });
+}
 
 // ─── Strategies ────────────────────────────────────────────────────────────────
 

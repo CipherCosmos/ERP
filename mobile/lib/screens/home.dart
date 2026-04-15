@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
+import 'package:intl/intl.dart';
 import '../services/api.dart';
+import '../models/models.dart';
 import 'login.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -86,7 +87,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildDashboard() {
     if (_dashboard == null) return Center(child: CircularProgressIndicator());
-    
+
     return RefreshIndicator(
       onRefresh: _loadData,
       child: ListView(
@@ -140,14 +141,268 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildStock() {
-    return Center(child: Text('Stock Management', style: TextStyle(fontSize: 18)));
+    return StockTab();
   }
 
   Widget _buildCustomers() {
-    return Center(child: Text('Customer Management', style: TextStyle(fontSize: 18)));
+    return CustomersTab();
   }
 
   Widget _buildInvoices() {
-    return Center(child: Text('Invoice History', style: TextStyle(fontSize: 18)));
+    return InvoicesTab();
+  }
+}
+
+// Stock Tab
+class StockTab extends StatefulWidget {
+  @override
+  _StockTabState createState() => _StockTabState();
+}
+
+class _StockTabState extends State<StockTab> {
+  late Future<List<Stock>> _stockFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _stockFuture = ApiService.getStock();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RefreshIndicator(
+      onRefresh: () async {
+        setState(() {
+          _stockFuture = ApiService.getStock();
+        });
+      },
+      child: FutureBuilder<List<Stock>>(
+        future: _stockFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          }
+          final stock = snapshot.data ?? [];
+          if (stock.isEmpty) {
+            return Center(child: Text('No stock available'));
+          }
+          return ListView.builder(
+            itemCount: stock.length,
+            itemBuilder: (context, index) {
+              final item = stock[index];
+              return Card(
+                margin: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: ListTile(
+                  title: Text('Product ID: ${item.productId}'),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(height: 4),
+                      Text('Batch: ${item.batchNo}'),
+                      Text('Qty: ${item.quantity} (Reserved: ${item.reservedQty})'),
+                      if (item.expiryDate != null) Text('Expiry: ${item.expiryDate}'),
+                    ],
+                  ),
+                  trailing: Text('₹${item.costPrice.toStringAsFixed(2)}'),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+// Customers Tab
+class CustomersTab extends StatefulWidget {
+  @override
+  _CustomersTabState createState() => _CustomersTabState();
+}
+
+class _CustomersTabState extends State<CustomersTab> {
+  late Future<List<Customer>> _customersFuture;
+  TextEditingController _searchController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _customersFuture = ApiService.getCustomers();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: EdgeInsets.all(8),
+          child: TextField(
+            controller: _searchController,
+            decoration: InputDecoration(
+              hintText: 'Search customers...',
+              prefixIcon: Icon(Icons.search),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onChanged: (query) {
+              setState(() {
+                _customersFuture = ApiService.getCustomers(search: query);
+              });
+            },
+          ),
+        ),
+        Expanded(
+          child: FutureBuilder<List<Customer>>(
+            future: _customersFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return Center(child: Text('Error: ${snapshot.error}'));
+              }
+              final customers = snapshot.data ?? [];
+              if (customers.isEmpty) {
+                return Center(child: Text('No customers found'));
+              }
+              return ListView.builder(
+                itemCount: customers.length,
+                itemBuilder: (context, index) {
+                  final customer = customers[index];
+                  return Card(
+                    margin: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: ListTile(
+                      title: Text(customer.name),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(height: 4),
+                          Text('Phone: ${customer.phone}'),
+                          Text('Outstanding: ₹${customer.outstanding.toStringAsFixed(2)}'),
+                          Text('Credit Limit: ₹${customer.creditLimit.toStringAsFixed(2)}'),
+                        ],
+                      ),
+                      isThreeLine: true,
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+}
+
+// Invoices Tab
+class InvoicesTab extends StatefulWidget {
+  @override
+  _InvoicesTabState createState() => _InvoicesTabState();
+}
+
+class _InvoicesTabState extends State<InvoicesTab> {
+  late Future<List<Invoice>> _invoicesFuture;
+  DateTime? _startDate;
+  DateTime? _endDate;
+
+  @override
+  void initState() {
+    super.initState();
+    _invoicesFuture = ApiService.getInvoices();
+  }
+
+  Future<void> _pickDateRange() async {
+    final picked = await showDateRangePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+    );
+    if (picked != null) {
+      setState(() {
+        _startDate = picked.start;
+        _endDate = picked.end;
+        _invoicesFuture = ApiService.getInvoices(
+          startDate: DateFormat('yyyy-MM-dd').format(_startDate!),
+          endDate: DateFormat('yyyy-MM-dd').format(_endDate!),
+        );
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Padding(
+          padding: EdgeInsets.all(8),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _startDate != null
+                      ? '${DateFormat('dd/MM/yyyy').format(_startDate!)} - ${DateFormat('dd/MM/yyyy').format(_endDate!)}'
+                      : 'Select date range',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+              ElevatedButton(
+                onPressed: _pickDateRange,
+                child: Text('Filter'),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: FutureBuilder<List<Invoice>>(
+            future: _invoicesFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return Center(child: Text('Error: ${snapshot.error}'));
+              }
+              final invoices = snapshot.data ?? [];
+              if (invoices.isEmpty) {
+                return Center(child: Text('No invoices found'));
+              }
+              return ListView.builder(
+                itemCount: invoices.length,
+                itemBuilder: (context, index) {
+                  final invoice = invoices[index];
+                  return Card(
+                    margin: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    child: ListTile(
+                      title: Text('${invoice.invoiceNo}'),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(height: 4),
+                          Text('Date: ${DateFormat('dd/MM/yyyy').format(invoice.invoiceDate)}'),
+                          Text('Payment: ${invoice.paymentMode}'),
+                          Text('Status: ${invoice.status}'),
+                        ],
+                      ),
+                      trailing: Text('₹${invoice.total.toStringAsFixed(2)}',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      isThreeLine: true,
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
   }
 }

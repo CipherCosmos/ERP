@@ -24,6 +24,9 @@ import Invoices from './pages/Invoices';
 import AuditLog from './pages/AuditLog';
 import StockTransfer from './pages/StockTransfer';
 import GRN from './pages/GRN';
+import VendorPayments from './pages/VendorPayments';
+import PurchaseReturns from './pages/PurchaseReturns';
+import MultiStoreDashboard from './pages/MultiStoreDashboard';
 
 function App() {
   return (
@@ -53,6 +56,9 @@ function App() {
         <Route path="/audit" element={<AuditLog />} />
         <Route path="/stock-transfer" element={<StockTransfer />} />
         <Route path="/grn" element={<GRN />} />
+        <Route path="/vendor-payments" element={<VendorPayments />} />
+        <Route path="/purchase-returns" element={<PurchaseReturns />} />
+        <Route path="/multi-store" element={<MultiStoreDashboard />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

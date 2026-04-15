@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"gbos/internal/db"
@@ -63,18 +64,22 @@ func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 	}
 
 	var lowStockCount int
-	db.DB.QueryRow(`SELECT COUNT(*) FROM (
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM (
 		SELECT p.id FROM products p
 		LEFT JOIN stock s ON p.id = s.product_id AND s.store_id = ?
 		WHERE p.is_active = 1 AND p.min_stock > 0
 		GROUP BY p.id HAVING COALESCE(SUM(s.quantity), 0) <= p.min_stock
-	)`, storeID).Scan(&lowStockCount)
+	)`, storeID).Scan(&lowStockCount); err != nil {
+		lowStockCount = 0
+	}
 
 	var creditOutStanding float64
-	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(ce.amount - ce.paid_amount), 0)
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(ce.amount - ce.paid_amount), 0)
 		FROM credit_entries ce
 		JOIN customers c ON ce.customer_id = c.id
-		WHERE ce.status IN ('pending','partial') AND c.store_id = ?`, storeID).Scan(&creditOutStanding)
+		WHERE ce.status IN ('pending','partial') AND c.store_id = ?`, storeID).Scan(&creditOutStanding); err != nil {
+		creditOutStanding = 0
+	}
 
 	c.JSON(http.StatusOK, map[string]interface{}{
 		"revenue":           revenue,
@@ -138,7 +143,9 @@ func (h *AnalyticsHandler) SalesByCategory(c *gin.Context) {
 		var name string
 		var sales float64
 		var itemCount int
-		rows.Scan(&name, &sales, &itemCount)
+		if err := rows.Scan(&name, &sales, &itemCount); err != nil {
+			continue
+		}
 		categorySales = append(categorySales, map[string]interface{}{
 			"category": name, "sales": sales, "item_count": itemCount,
 		})
@@ -197,7 +204,9 @@ func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 	for rows.Next() {
 		var name string
 		var qty, sales float64
-		rows.Scan(&name, &qty, &sales)
+		if err := rows.Scan(&name, &qty, &sales); err != nil {
+			continue
+		}
 		topProducts = append(topProducts, map[string]interface{}{
 			"product": name, "quantity": qty, "sales": sales,
 		})
@@ -235,7 +244,9 @@ func (h *AnalyticsHandler) HourlySales(c *gin.Context) {
 		var hour string
 		var count int
 		var sales float64
-		rows.Scan(&hour, &count, &sales)
+		if err := rows.Scan(&hour, &count, &sales); err != nil {
+			continue
+		}
 		hourlySales = append(hourlySales, map[string]interface{}{
 			"hour": hour + ":00", "count": count, "sales": sales,
 		})
@@ -282,7 +293,9 @@ func (h *AnalyticsHandler) PaymentModeBreakup(c *gin.Context) {
 		var mode string
 		var count int
 		var total float64
-		rows.Scan(&mode, &count, &total)
+		if err := rows.Scan(&mode, &count, &total); err != nil {
+			continue
+		}
 		paymentBreakup = append(paymentBreakup, map[string]interface{}{
 			"mode": mode, "count": count, "total": total,
 		})
@@ -340,7 +353,9 @@ func (h *AuditHandler) List(c *gin.Context) {
 		var oldValue, newValue sql.NullString
 		var createdAt string
 
-		rows.Scan(&id, &userID, &username, &storeID, &action, &tableName, &recordID, &oldValue, &newValue, &createdAt)
+		if err := rows.Scan(&id, &userID, &username, &storeID, &action, &tableName, &recordID, &oldValue, &newValue, &createdAt); err != nil {
+			continue
+		}
 		logs = append(logs, map[string]interface{}{
 			"id": id, "user_id": userID, "username": username,
 			"store_id": storeID, "action": action, "table_name": tableName,
@@ -381,6 +396,96 @@ func (h *AuditHandler) Log(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+func (h *AnalyticsHandler) MultiStore(c *gin.Context) {
+	// Only accessible to owners (enforced by route-level RBAC, but double check)
+	if sessionRole(c) != "owner" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "multi-store analytics requires owner role"})
+		return
+	}
+
+	storeIDs := c.Query("store_ids")
+	dateRange := c.DefaultQuery("range", "today")
+
+	var startDate, endDate string
+	now := time.Now()
+	switch dateRange {
+	case "today":
+		startDate = now.Format("2006-01-02")
+		endDate = startDate
+	case "week":
+		startDate = now.AddDate(0, 0, -7).Format("2006-01-02")
+		endDate = now.Format("2006-01-02")
+	case "month":
+		startDate = now.AddDate(0, -1, 0).Format("2006-01-02")
+		endDate = now.Format("2006-01-02")
+	case "year":
+		startDate = now.AddDate(-1, 0, 0).Format("2006-01-02")
+		endDate = now.Format("2006-01-02")
+	default:
+		startDate = now.Format("2006-01-02")
+		endDate = startDate
+	}
+
+	query := `SELECT s.id, s.name,
+		COALESCE(SUM(i.total), 0) as revenue,
+		COALESCE(SUM(i.cgst + i.sgst + i.igst), 0) as gst,
+		COUNT(i.id) as invoice_count
+		FROM stores s
+		LEFT JOIN invoices i ON s.id = i.store_id AND date(i.invoice_date) >= ? AND date(i.invoice_date) <= ?
+		WHERE s.is_active = 1`
+	args := []interface{}{startDate, endDate}
+
+	if storeIDs != "" {
+		ids := strings.Split(storeIDs, ",")
+		placeholders := make([]string, len(ids))
+		for j, sid := range ids {
+			placeholders[j] = "?"
+			args = append(args, strings.TrimSpace(sid))
+		}
+		query += " AND s.id IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	query += " GROUP BY s.id, s.name ORDER BY revenue DESC"
+
+	rows, err := db.DB.Query(query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	var stores []map[string]interface{}
+	var totalRevenue, totalGST float64
+	var totalInvoices int
+	for rows.Next() {
+		var storeID, storeName string
+		var revenue, gst float64
+		var invoiceCount int
+		if err := rows.Scan(&storeID, &storeName, &revenue, &gst, &invoiceCount); err != nil {
+			continue
+		}
+		stores = append(stores, map[string]interface{}{
+			"store_id":      storeID,
+			"store_name":    storeName,
+			"revenue":       revenue,
+			"gst":           gst,
+			"invoice_count": invoiceCount,
+		})
+		totalRevenue += revenue
+		totalGST += gst
+		totalInvoices += invoiceCount
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"date_range": map[string]string{"start": startDate, "end": endDate},
+		"totals": map[string]interface{}{
+			"revenue":       totalRevenue,
+			"gst":           totalGST,
+			"invoice_count": totalInvoices,
+		},
+		"stores": stores,
+	})
 }
 
 type ReportHandler struct{}
@@ -427,30 +532,38 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 	}
 
 	var totalCOGS float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(ii.unit_cost_at_sale * ii.quantity), 0)
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(ii.unit_cost_at_sale * ii.quantity), 0)
 		FROM invoice_items ii
 		JOIN invoices i ON ii.invoice_id = i.id
 		WHERE i.store_id = ? AND date(i.invoice_date) >= ? AND date(i.invoice_date) <= ? AND i.status = 'completed'`,
-		storeID, startDate, endDate).Scan(&totalCOGS)
+		storeID, startDate, endDate).Scan(&totalCOGS); err != nil {
+		totalCOGS = 0
+	}
 
 	var totalReturns float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM returns
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM returns
 		WHERE store_id = ? AND date(created_at) >= ? AND date(created_at) <= ? AND status = 'completed'`,
-		storeID, startDate, endDate).Scan(&totalReturns)
+		storeID, startDate, endDate).Scan(&totalReturns); err != nil {
+		totalReturns = 0
+	}
 
 	var totalLosses float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(il.quantity * COALESCE((
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(il.quantity * COALESCE((
 		SELECT AVG(s.cost_price) FROM stock s
 		WHERE s.product_id = il.product_id AND s.store_id = il.store_id
 		AND s.cost_price > 0), 0)), 0)
 		FROM inventory_losses il
 		WHERE il.store_id = ? AND date(il.created_at) >= ? AND date(il.created_at) <= ?`,
-		storeID, startDate, endDate).Scan(&totalLosses)
+		storeID, startDate, endDate).Scan(&totalLosses); err != nil {
+		totalLosses = 0
+	}
 
 	var totalExpenses float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM expenses 
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM expenses
 		WHERE store_id = ? AND expense_date >= ? AND expense_date <= ?`,
-		storeID, startDate, endDate).Scan(&totalExpenses)
+		storeID, startDate, endDate).Scan(&totalExpenses); err != nil {
+		totalExpenses = 0
+	}
 
 	taxableRevenue := totalRevenue - totalCGST - totalSGST
 	grossProfit := taxableRevenue - totalCOGS
@@ -522,7 +635,9 @@ func (h *ReportHandler) GetCreditAging(c *gin.Context) {
 	var totalDue float64
 	for rows.Next() {
 		var r CreditAgingReport
-		rows.Scan(&r.CustomerID, &r.CustomerName, &r.TotalDue, &r.Current, &r.Days30, &r.Days60, &r.Over90)
+		if err := rows.Scan(&r.CustomerID, &r.CustomerName, &r.TotalDue, &r.Current, &r.Days30, &r.Days60, &r.Over90); err != nil {
+			continue
+		}
 		aging = append(aging, r)
 		totalDue += r.TotalDue
 	}

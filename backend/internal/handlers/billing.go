@@ -281,9 +281,11 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 		return
 	}
 
+	var isWholesaleCustomer bool
 	if req.CustomerID != nil && *req.CustomerID != "" {
 		var custStore sql.NullString
-		err = tx.QueryRow(`SELECT store_id FROM customers WHERE id = ?`, *req.CustomerID).Scan(&custStore)
+		var isWholesale bool
+		err = tx.QueryRow(`SELECT store_id, is_wholesale FROM customers WHERE id = ?`, *req.CustomerID).Scan(&custStore, &isWholesale)
 		if err == sql.ErrNoRows {
 			tx.Rollback()
 			c.JSON(http.StatusBadRequest, gin.H{"error": "customer not found"})
@@ -299,6 +301,7 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "customer does not belong to this store"})
 			return
 		}
+		isWholesaleCustomer = isWholesale
 	}
 
 	if req.CustomerID != nil && req.PaymentMode == "credit" {
@@ -348,6 +351,17 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 			tx.Rollback()
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid product on line: " + item.ProductID})
 			return
+		}
+		// Wholesale price enforcement: wholesale customers must use wholesale_sell_price
+		if isWholesaleCustomer {
+			var wholesalePrice float64
+			_ = tx.QueryRow(`SELECT COALESCE(wholesale_sell_price, 0) FROM product_prices WHERE product_id = ? AND store_id = ?`,
+				item.ProductID, req.StoreID).Scan(&wholesalePrice)
+			if wholesalePrice > 0 && math.Abs(item.Rate-wholesalePrice) > 0.01 {
+				tx.Rollback()
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("wholesale customer rate must match wholesale_sell_price (%.2f) for product %s", wholesalePrice, item.ProductID)})
+				return
+			}
 		}
 		var cgst, sgst, igst float64
 		if gstRate > 0 {
@@ -532,4 +546,96 @@ func (h *InvoiceHandler) GSTR1MarkFiled(c *gin.Context) {
 	}
 	n, _ := res.RowsAffected()
 	c.JSON(http.StatusOK, gin.H{"success": true, "invoices_marked": n})
+}
+
+func (h *InvoiceHandler) Void(c *gin.Context) {
+	id := c.Param("id")
+
+	var storeID, status string
+	err := db.DB.QueryRow(`SELECT store_id, status FROM invoices WHERE id = ?`, id).Scan(&storeID, &status)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "invoice not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
+	if status != "completed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only completed invoices can be voided"})
+		return
+	}
+
+	tx, err := db.DB.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Set invoice status to voided
+	_, err = tx.Exec(`UPDATE invoices SET status = 'voided', updated_at = datetime('now') WHERE id = ?`, id)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Restore stock for each line item
+	rows, err := tx.Query(`SELECT product_id, batch_no, quantity, unit_cost_at_sale FROM invoice_items WHERE invoice_id = ?`, id)
+	if err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var productID, batchNo string
+		var qty, costPrice float64
+		if err := rows.Scan(&productID, &batchNo, &qty, &costPrice); err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if batchNo == "" {
+			batchNo = "VOID-RESTORE"
+		}
+		// Try to add back to existing batch
+		res, err := tx.Exec(`UPDATE stock SET quantity = quantity + ? WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
+			qty, productID, storeID, batchNo)
+		if err != nil {
+			tx.Rollback()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			_, err = tx.Exec(`INSERT INTO stock (id, product_id, store_id, batch_no, quantity, cost_price) VALUES (?, ?, ?, ?, ?, ?)`,
+				uuid.New().String(), productID, storeID, batchNo, qty, costPrice)
+			if err != nil {
+				tx.Rollback()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+	}
+
+	// Void any credit entry linked to this invoice
+	if _, err := tx.Exec(`UPDATE credit_entries SET status = 'voided' WHERE invoice_id = ? AND status IN ('pending','partial')`, id); err != nil {
+		tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	auditAction(c, "invoice_void", "invoices", id, "completed", "voided")
+	c.JSON(http.StatusOK, gin.H{"success": true, "status": "voided"})
 }

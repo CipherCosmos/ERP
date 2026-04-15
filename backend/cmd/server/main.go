@@ -1,7 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"gbos/internal/auth"
 	"gbos/internal/config"
@@ -15,6 +21,15 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	// JWT security: refuse to start in release mode with default secret
+	if cfg.GinMode == "release" && cfg.IsDefaultSecret() {
+		log.Fatal("FATAL: Cannot start in release mode with default JWT_SECRET. Set JWT_SECRET environment variable.")
+	}
+	if cfg.IsDefaultSecret() {
+		log.Println("WARNING: Using default JWT secret. Set JWT_SECRET environment variable for production.")
+	}
+
 	auth.Configure(cfg.JWTSecret, cfg.JWTExpiration)
 
 	if err := db.Initialize(cfg.DatabasePath); err != nil {
@@ -25,11 +40,17 @@ func main() {
 	models.DB = db.DB
 
 	authMw := middleware.NewAuthMiddleware()
+	rateLimiter := middleware.NewRateLimiter()
 
+	gin.SetMode(cfg.GinMode)
 	r := gin.Default()
 
+	// Global rate limit: 100 requests/second per IP, with burst of 100
+	r.Use(rateLimiter.GlobalRateLimit(100, 100))
+
+	corsOrigin := cfg.CORSOrigin
 	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Origin", corsOrigin)
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Store-ID, X-User-Role")
 		if c.Request.Method == "OPTIONS" {
@@ -44,7 +65,7 @@ func main() {
 	{
 		api.GET("/health", handlers.Health)
 
-		api.POST("/auth/login", handlers.Login)
+		api.POST("/auth/login", rateLimiter.LoginRateLimit(), handlers.Login)
 		api.POST("/auth/register", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserRegister), handlers.Register)
 		api.GET("/auth/users", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserList), handlers.ListUsers)
 		api.POST("/auth/users/:id/deactivate", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserDeactivate), handlers.DeactivateUser)
@@ -77,6 +98,7 @@ func main() {
 			stock.GET("/product/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCatalogRead), s.GetProductStock)
 			stock.POST("/adjust", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStockMove), s.Adjust)
 			stock.POST("/transfer", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStockMove), s.Transfer)
+			stock.POST("/convert", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermStockMove), s.Convert)
 			stock.GET("/low", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCatalogRead), s.LowStock)
 			stock.GET("/adjustments", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermCatalogRead), s.GetAdjustments)
 		}
@@ -97,6 +119,7 @@ func main() {
 			invoices.GET("/gstr1", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), inv.GSTR1Export)
 			invoices.POST("/gstr1/mark-filed", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermGSTR1File), inv.GSTR1MarkFiled)
 			invoices.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceCreate), inv.Create)
+			invoices.POST("/:id/void", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceVoid), inv.Void)
 			invoices.GET("/:id", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermInvoiceRead), inv.Get)
 		}
 
@@ -145,6 +168,7 @@ func main() {
 			analytics.GET("/sales/top", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermAnalyticsView), a.TopProducts)
 			analytics.GET("/sales/hourly", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermAnalyticsView), a.HourlySales)
 			analytics.GET("/sales/payment", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermAnalyticsView), a.PaymentModeBreakup)
+			analytics.GET("/multi-store", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermAnalyticsView), a.MultiStore)
 		}
 
 		audit := api.Group("/audit")
@@ -193,10 +217,10 @@ func main() {
 
 		returns := api.Group("/returns")
 		{
-			r := handlers.NewReturnHandler()
-			returns.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnRead), r.List)
-			returns.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnCreate), r.Create)
-			returns.POST("/:id/approve", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnApprove), r.Approve)
+			ret := handlers.NewReturnHandler()
+			returns.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnRead), ret.List)
+			returns.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnCreate), ret.Create)
+			returns.POST("/:id/approve", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReturnApprove), ret.Approve)
 		}
 
 		losses := api.Group("/losses")
@@ -216,10 +240,10 @@ func main() {
 
 		reports := api.Group("/reports")
 		{
-			r := handlers.NewReportHandler()
-			reports.GET("/profit-loss", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), r.GetProfitLoss)
-			reports.GET("/credit-aging", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), r.GetCreditAging)
-			reports.GET("/gstr-3b", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), r.GetGSTR3B)
+			rep := handlers.NewReportHandler()
+			reports.GET("/profit-loss", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), rep.GetProfitLoss)
+			reports.GET("/credit-aging", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), rep.GetCreditAging)
+			reports.GET("/gstr-3b", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermReportView), rep.GetGSTR3B)
 		}
 
 		expenses := api.Group("/expenses")
@@ -230,8 +254,46 @@ func main() {
 			expenses.GET("/summary", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermExpenseRead), e.GetSummary)
 			expenses.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermExpenseWrite), e.Create)
 		}
+
+		vendorPayments := api.Group("/vendor-payments")
+		{
+			vp := handlers.NewVendorPaymentHandler()
+			vendorPayments.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermVendorPayment), vp.List)
+			vendorPayments.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermVendorPayment), vp.Create)
+			vendorPayments.GET("/summary", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermVendorPayment), vp.Summary)
+		}
+
+		purchaseReturns := api.Group("/purchase-returns")
+		{
+			pr := handlers.NewPurchaseReturnHandler()
+			purchaseReturns.GET("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPurchaseReturn), pr.List)
+			purchaseReturns.POST("", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPurchaseReturn), pr.Create)
+			purchaseReturns.POST("/:id/approve", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermPurchaseReturn), pr.Approve)
+		}
 	}
 
-	log.Printf("Starting GBOS server on port %s", cfg.ServerPort)
-	r.Run(":" + cfg.ServerPort)
+	// Graceful shutdown
+	srv := &http.Server{
+		Addr:    ":" + cfg.ServerPort,
+		Handler: r,
+	}
+
+	go func() {
+		log.Printf("Starting GBOS server on port %s (mode: %s)", cfg.ServerPort, cfg.GinMode)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("Server forced to shutdown: %v", err)
+	}
+	log.Println("Server stopped")
 }

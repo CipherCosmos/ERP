@@ -69,6 +69,22 @@ export default function Invoices() {
     }
   };
 
+  const handleVoid = async () => {
+    if (!detail) return;
+    if (!window.confirm(`Are you sure you want to void invoice ${detail.invoice.invoice_no}? This will restore stock.`)) {
+      return;
+    }
+    try {
+      await invoiceApi.void(detail.invoice.id);
+      alert('Invoice voided successfully');
+      setDetail(null);
+      loadInvoices();
+    } catch (err) {
+      console.error('Failed to void invoice:', err);
+      alert('Failed to void invoice');
+    }
+  };
+
   const generatePDF = () => {
     if (!detail) return;
     const { invoice, items } = detail;
@@ -391,6 +407,11 @@ export default function Invoices() {
                   <button type="button" style={styles.printBtn} onClick={generatePDF}>
                     Print PDF
                   </button>
+                  {detail.invoice.status !== 'voided' && detail.invoice.status !== 'cancelled' && (
+                    <button type="button" style={styles.voidBtn} onClick={handleVoid}>
+                      Void Invoice
+                    </button>
+                  )}
                   <button type="button" style={styles.backBtn} onClick={() => setDetail(null)}>
                     Close
                   </button>
@@ -447,4 +468,5 @@ const styles: Record<string, React.CSSProperties> = {
   totalRow: { display: 'flex', justifyContent: 'space-between', padding: '0.25rem 0', fontSize: '0.9rem' },
   modalActions: { display: 'flex', gap: '0.5rem', marginTop: '1rem', flexWrap: 'wrap' },
   printBtn: { padding: '0.5rem 1rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
+  voidBtn: { padding: '0.5rem 1rem', background: '#f44336', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
 };
