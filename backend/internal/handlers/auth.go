@@ -63,8 +63,9 @@ func Login(c *gin.Context) {
 		VALUES (?, 'users', ?, 'login', ?, 'completed')`,
 		uuid.New().String(), user.ID.String(), user.StoreID.String())
 
-	user.CreatedAt = time.Now()
-	user.UpdatedAt = time.Now()
+	now := time.Now().Format("2006-01-02 15:04:05")
+	user.CreatedAt = now
+	user.UpdatedAt = now
 	c.JSON(http.StatusOK, LoginResponse{Token: token, User: user})
 }
 

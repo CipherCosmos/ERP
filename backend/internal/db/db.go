@@ -22,7 +22,7 @@ func Initialize(dbPath string) error {
 		}
 	}
 	var err error
-	DB, err = sql.Open("sqlite3", dbPath+"?_foreign_keys=on&cache=shared")
+	DB, err = sql.Open("sqlite3", dbPath+"?_foreign_keys=on&cache=shared&_loc=auto")
 	if err != nil {
 		return fmt.Errorf("failed to open database: %w", err)
 	}

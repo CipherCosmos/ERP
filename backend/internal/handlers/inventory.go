@@ -29,8 +29,8 @@ func (h *StockHandler) List(c *gin.Context) {
 	}
 
 	rows, err := db.DB.Query(`
-		SELECT s.id, s.product_id, p.name, s.store_id, s.batch_no, s.quantity, s.reserved_qty, 
-		       s.expiry_date, s.cost_price, s.created_at
+		SELECT s.id, s.product_id, p.name, s.store_id, s.batch_no, s.quantity, s.reserved_qty,
+		       s.expiry_date, s.cost_price
 		FROM stock s
 		JOIN products p ON s.product_id = p.id
 		WHERE s.store_id = ? AND s.quantity > 0
@@ -46,9 +46,8 @@ func (h *StockHandler) List(c *gin.Context) {
 		var id, productID, storeID, batchNo, productName string
 		var quantity, reservedQty, costPrice float64
 		var expiryDate sql.NullString
-		var createdAt time.Time
 
-		err := rows.Scan(&id, &productID, &productName, &storeID, &batchNo, &quantity, &reservedQty, &expiryDate, &costPrice, &createdAt)
+		err := rows.Scan(&id, &productID, &productName, &storeID, &batchNo, &quantity, &reservedQty, &expiryDate, &costPrice)
 		if err != nil {
 			continue
 		}
@@ -117,6 +116,10 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if req.Quantity < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "quantity must be positive"})
+		return
+	}
 	uid := middleware.GetUserID(c)
 	if uid == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "user context required"})
@@ -153,6 +156,10 @@ func (h *StockHandler) Adjust(c *gin.Context) {
 	err = tx.QueryRow(`SELECT COALESCE(quantity, 0) FROM stock
 		WHERE product_id = ? AND store_id = ? AND batch_no = ?`,
 		req.ProductID, req.StoreID, batchNo).Scan(&currentQty)
+	if err == sql.ErrNoRows {
+		currentQty = 0
+		err = nil
+	}
 
 	var newQty float64
 	switch req.Type {
@@ -379,7 +386,7 @@ func (h *SyncHandler) GetPending(c *gin.Context) {
 	var pending []map[string]interface{}
 	for rows.Next() {
 		var id, tableName, recordID, operation, status string
-		var createdAt time.Time
+		var createdAt string
 		rows.Scan(&id, &tableName, &recordID, &operation, &status, &createdAt)
 		pending = append(pending, map[string]interface{}{
 			"id": id, "table_name": tableName, "record_id": recordID,
@@ -529,7 +536,7 @@ func (h *StockHandler) GetAdjustments(c *gin.Context) {
 	for rows.Next() {
 		var id, pid, productName, sid, batchNo, adjustmentType, reason, userID string
 		var quantity float64
-		var createdAt time.Time
+		var createdAt string
 
 		if err := rows.Scan(&id, &pid, &productName, &sid, &batchNo, &quantity,
 			&adjustmentType, &reason, &userID, &createdAt); err != nil {

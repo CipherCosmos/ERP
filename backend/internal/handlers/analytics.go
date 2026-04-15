@@ -53,10 +53,10 @@ func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 	var revenue, gstCollected, discountGiven float64
 	var invoiceCount, transactionCount int
 
-	err := db.DB.QueryRow(`SELECT COALESCE(SUM(total), 0), COALESCE(SUM(cgst + sgst + igst), 0), 
+	err := db.DB.QueryRow(`SELECT COALESCE(SUM(total), 0), COALESCE(SUM(cgst + sgst + igst), 0),
 		COALESCE(SUM(discount), 0), COUNT(DISTINCT id), COUNT(id)
-		FROM invoices WHERE store_id = ? AND invoice_date >= ? AND invoice_date <= ?`,
-		storeID, startDate, endDate+" 23:59:59").Scan(&revenue, &gstCollected, &discountGiven, &invoiceCount, &transactionCount)
+		FROM invoices WHERE store_id = ? AND date(invoice_date) >= ? AND date(invoice_date) <= ?`,
+		storeID, startDate, endDate).Scan(&revenue, &gstCollected, &discountGiven, &invoiceCount, &transactionCount)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -121,8 +121,8 @@ func (h *AnalyticsHandler) SalesByCategory(c *gin.Context) {
 		args = append(args, startDate)
 	}
 	if endDate != "" {
-		query += " AND i.invoice_date <= ?"
-		args = append(args, endDate+" 23:59:59")
+		query += " AND date(i.invoice_date) <= ?"
+		args = append(args, endDate)
 	}
 	query += " GROUP BY c.id, c.name ORDER BY sales DESC"
 
@@ -181,8 +181,8 @@ func (h *AnalyticsHandler) TopProducts(c *gin.Context) {
 		args = append(args, startDate)
 	}
 	if endDate != "" {
-		query += " AND i.invoice_date <= ?"
-		args = append(args, endDate+" 23:59:59")
+		query += " AND date(i.invoice_date) <= ?"
+		args = append(args, endDate)
 	}
 	query += fmt.Sprintf(" GROUP BY p.id ORDER BY sales DESC LIMIT %d", limitN)
 
@@ -265,8 +265,8 @@ func (h *AnalyticsHandler) PaymentModeBreakup(c *gin.Context) {
 		args = append(args, startDate)
 	}
 	if endDate != "" {
-		query += " AND invoice_date <= ?"
-		args = append(args, endDate+" 23:59:59")
+		query += " AND date(invoice_date) <= ?"
+		args = append(args, endDate)
 	}
 	query += " GROUP BY payment_mode"
 
@@ -338,7 +338,7 @@ func (h *AuditHandler) List(c *gin.Context) {
 	for rows.Next() {
 		var id, userID, username, storeID, action, tableName, recordID string
 		var oldValue, newValue sql.NullString
-		var createdAt time.Time
+		var createdAt string
 
 		rows.Scan(&id, &userID, &username, &storeID, &action, &tableName, &recordID, &oldValue, &newValue, &createdAt)
 		logs = append(logs, map[string]interface{}{
@@ -419,8 +419,8 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 
 	var totalRevenue, totalCGST, totalSGST float64
 	err := db.DB.QueryRow(`SELECT COALESCE(SUM(total), 0), COALESCE(SUM(cgst), 0), COALESCE(SUM(sgst), 0)
-		FROM invoices WHERE store_id = ? AND invoice_date >= ? AND invoice_date <= ? AND status = 'completed'`,
-		storeID, startDate, endDate+" 23:59:59").Scan(&totalRevenue, &totalCGST, &totalSGST)
+		FROM invoices WHERE store_id = ? AND date(invoice_date) >= ? AND date(invoice_date) <= ? AND status = 'completed'`,
+		storeID, startDate, endDate).Scan(&totalRevenue, &totalCGST, &totalSGST)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -430,13 +430,13 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 	db.DB.QueryRow(`SELECT COALESCE(SUM(ii.unit_cost_at_sale * ii.quantity), 0)
 		FROM invoice_items ii
 		JOIN invoices i ON ii.invoice_id = i.id
-		WHERE i.store_id = ? AND i.invoice_date >= ? AND i.invoice_date <= ? AND i.status = 'completed'`,
-		storeID, startDate, endDate+" 23:59:59").Scan(&totalCOGS)
+		WHERE i.store_id = ? AND date(i.invoice_date) >= ? AND date(i.invoice_date) <= ? AND i.status = 'completed'`,
+		storeID, startDate, endDate).Scan(&totalCOGS)
 
 	var totalReturns float64
-	db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM returns 
-		WHERE store_id = ? AND created_at >= ? AND created_at <= ? AND status = 'completed'`,
-		storeID, startDate, endDate+" 23:59:59").Scan(&totalReturns)
+	db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM returns
+		WHERE store_id = ? AND date(created_at) >= ? AND date(created_at) <= ? AND status = 'completed'`,
+		storeID, startDate, endDate).Scan(&totalReturns)
 
 	var totalLosses float64
 	db.DB.QueryRow(`SELECT COALESCE(SUM(il.quantity * COALESCE((
@@ -444,8 +444,8 @@ func (h *ReportHandler) GetProfitLoss(c *gin.Context) {
 		WHERE s.product_id = il.product_id AND s.store_id = il.store_id
 		AND s.cost_price > 0), 0)), 0)
 		FROM inventory_losses il
-		WHERE il.store_id = ? AND il.created_at >= ? AND il.created_at <= ?`,
-		storeID, startDate, endDate+" 23:59:59").Scan(&totalLosses)
+		WHERE il.store_id = ? AND date(il.created_at) >= ? AND date(il.created_at) <= ?`,
+		storeID, startDate, endDate).Scan(&totalLosses)
 
 	var totalExpenses float64
 	db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM expenses 

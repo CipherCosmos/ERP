@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"time"
@@ -89,14 +90,15 @@ func (h *ReturnHandler) List(c *gin.Context) {
 
 	var returns []map[string]interface{}
 	for rows.Next() {
-		var id, invoiceID, productID, storeID, reason, refundMode, status string
+		var id, productID, storeID, reason, refundMode, status string
+		var invoiceID sql.NullString
 		var quantity, amount float64
-		var createdAt time.Time
+		var createdAt string
 
 		rows.Scan(&id, &invoiceID, &productID, &storeID, &quantity, &amount, &reason, &refundMode, &status, &createdAt)
 
 		returns = append(returns, map[string]interface{}{
-			"id": id, "invoice_id": invoiceID, "product_id": productID, "store_id": storeID,
+			"id": id, "invoice_id": invoiceID.String, "product_id": productID, "store_id": storeID,
 			"quantity": quantity, "amount": amount, "reason": reason,
 			"refund_mode": refundMode, "status": status, "created_at": createdAt,
 		})
@@ -221,9 +223,13 @@ func (h *LossHandler) Create(c *gin.Context) {
 	}
 
 	// Deduct stock from any available batch
-	_, err = tx.Exec(`UPDATE stock SET quantity = quantity - ? 
-		WHERE product_id = ? AND store_id = ? AND quantity >= ?
-		ORDER BY quantity DESC LIMIT 1`,
+	_, err = tx.Exec(`UPDATE stock SET quantity = quantity - ?
+		WHERE rowid = (
+			SELECT rowid FROM stock
+			WHERE product_id = ? AND store_id = ? AND quantity >= ?
+			ORDER BY quantity DESC
+			LIMIT 1
+		)`,
 		req.Quantity, req.ProductID, req.StoreID, req.Quantity)
 	if err != nil {
 		tx.Rollback()
@@ -269,7 +275,7 @@ func (h *LossHandler) List(c *gin.Context) {
 	for rows.Next() {
 		var id, productID, storeID, batchNo, lossType, reason, userID string
 		var quantity float64
-		var createdAt time.Time
+		var createdAt string
 
 		rows.Scan(&id, &productID, &storeID, &batchNo, &quantity, &lossType, &reason, &userID, &createdAt)
 

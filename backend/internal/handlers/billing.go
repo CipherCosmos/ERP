@@ -152,7 +152,7 @@ func (h *InvoiceHandler) List(c *gin.Context) {
 	for rows.Next() {
 		var id, invoiceNo, storeID, userID string
 		var customerID sql.NullString
-		var invoiceDate time.Time
+		var invoiceDate string
 		var subTotal, cgst, sgst, igst, discount, roundOff, total float64
 		var status, paymentMode string
 
@@ -464,19 +464,19 @@ func (h *InvoiceHandler) GSTR1Export(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var gstr1Data []map[string]interface{}
+	gstr1Data := make([]map[string]interface{}, 0)
 	var totalTax, totalInvoice float64
 
 	for rows.Next() {
 		var invoiceNo, customerName, gstin string
-		var invoiceDate time.Time
+		var invoiceDate string
 		var total, cgst, sgst, igst float64
 
 		rows.Scan(&invoiceNo, &invoiceDate, &total, &cgst, &sgst, &igst, &gstin, &customerName)
 
 		gstr1Data = append(gstr1Data, map[string]interface{}{
 			"invoice_no":    invoiceNo,
-			"date":          invoiceDate.Format("02-01-2006"),
+			"date":          invoiceDate,
 			"customer_name": customerName,
 			"gstin":         gstin,
 			"taxable_value": total - cgst - sgst - igst,

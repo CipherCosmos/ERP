@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"net/http"
-	"time"
 
 	"gbos/internal/db"
 	"gbos/internal/middleware"
@@ -97,7 +96,7 @@ func (h *ExpenseHandler) List(c *gin.Context) {
 	for rows.Next() {
 		var id, storeID, categoryID, categoryName, description, userID string
 		var amount float64
-		var expenseDate, createdAt time.Time
+		var expenseDate, createdAt string
 
 		rows.Scan(&id, &storeID, &categoryID, &categoryName, &amount, &description, &expenseDate, &userID, &createdAt)
 

@@ -306,7 +306,7 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	}
 
 	poID := uuid.New().String()
-	poNo := "PO-" + time.Now().Format("20060102150405")
+	poNo := "PO-" + time.Now().Format("20060102150405") + "-" + poID[:4]
 
 	type lineCalc struct {
 		item                                    PurchaseItemReq
@@ -379,10 +379,14 @@ func (h *PurchaseHandler) Create(c *gin.Context) {
 	for _, ln := range lines {
 		item := ln.item
 		itemID := uuid.New().String()
+		var uomID interface{}
+		if item.UOMID != "" {
+			uomID = item.UOMID
+		}
 		_, err = tx.Exec(`INSERT INTO purchase_items
 			(id, po_id, product_id, quantity, uom_id, rate, discount, cgst, sgst, igst, total)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			itemID, poID, item.ProductID, item.Quantity, item.UOMID,
+			itemID, poID, item.ProductID, item.Quantity, uomID,
 			item.Rate, item.Discount, ln.cgst, ln.sgst, ln.igst, ln.lineTotal)
 		if err != nil {
 			tx.Rollback()

@@ -128,7 +128,7 @@ func (h *PaymentHandler) GetInvoicePayments(c *gin.Context) {
 	for rows.Next() {
 		var id, paymentMode, reference string
 		var amount float64
-		var createdAt time.Time
+		var createdAt string
 
 		rows.Scan(&id, &paymentMode, &amount, &reference, &createdAt)
 
@@ -196,16 +196,13 @@ func (h *PaymentHandler) GetSettlementReport(c *gin.Context) {
 		return
 	}
 
-	startDate := date + " 00:00:00"
-	endDate := date + " 23:59:59"
-
 	var totalSales float64
 	var totalInvoices int
 	err := db.DB.QueryRow(`
 		SELECT COALESCE(SUM(total), 0), COUNT(*)
-		FROM invoices 
-		WHERE store_id = ? AND invoice_date >= ? AND invoice_date <= ? AND status = 'completed'`,
-		storeID, startDate, endDate).Scan(&totalSales, &totalInvoices)
+		FROM invoices
+		WHERE store_id = ? AND date(invoice_date) = ? AND status = 'completed'`,
+		storeID, date).Scan(&totalSales, &totalInvoices)
 	if err != nil && err != sql.ErrNoRows {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -219,9 +216,9 @@ func (h *PaymentHandler) GetSettlementReport(c *gin.Context) {
 		SELECT LOWER(TRIM(ip.payment_mode)) as pm, SUM(ip.amount) as amt, COUNT(*) as cnt
 		FROM invoice_payments ip
 		INNER JOIN invoices i ON i.id = ip.invoice_id
-		WHERE i.store_id = ? AND i.invoice_date >= ? AND i.invoice_date <= ? AND i.status = 'completed'
+		WHERE i.store_id = ? AND date(i.invoice_date) = ? AND i.status = 'completed'
 		GROUP BY LOWER(TRIM(ip.payment_mode))`,
-		storeID, startDate, endDate)
+		storeID, date)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -255,10 +252,10 @@ func (h *PaymentHandler) GetSettlementReport(c *gin.Context) {
 	rows2, err := db.DB.Query(`
 		SELECT LOWER(TRIM(i.payment_mode)) as pm, SUM(i.total) as amt, COUNT(*) as cnt
 		FROM invoices i
-		WHERE i.store_id = ? AND i.invoice_date >= ? AND i.invoice_date <= ? AND i.status = 'completed'
+		WHERE i.store_id = ? AND date(i.invoice_date) = ? AND i.status = 'completed'
 		AND NOT EXISTS (SELECT 1 FROM invoice_payments p WHERE p.invoice_id = i.id)
 		GROUP BY LOWER(TRIM(i.payment_mode))`,
-		storeID, startDate, endDate)
+		storeID, date)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

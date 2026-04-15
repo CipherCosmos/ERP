@@ -29,7 +29,7 @@ func (h *CategoryHandler) List(c *gin.Context) {
 	}
 
 	rows, err := db.DB.Query(`
-		SELECT id, name, name_hi, name_kn, parent_id, hsn_code, is_active, created_at, updated_at
+		SELECT id, name, COALESCE(name_hi,''), COALESCE(name_kn,''), parent_id, COALESCE(hsn_code,''), is_active
 		FROM categories WHERE is_active = 1 ORDER BY name`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -40,7 +40,7 @@ func (h *CategoryHandler) List(c *gin.Context) {
 	var categories []models.Category
 	for rows.Next() {
 		var cat models.Category
-		err := rows.Scan(&cat.ID, &cat.Name, &cat.NameHi, &cat.NameKn, &cat.ParentID, &cat.HSNCode, &cat.IsActive, &cat.CreatedAt, &cat.UpdatedAt)
+		err := rows.Scan(&cat.ID, &cat.Name, &cat.NameHi, &cat.NameKn, &cat.ParentID, &cat.HSNCode, &cat.IsActive)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

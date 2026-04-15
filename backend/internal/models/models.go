@@ -1,8 +1,6 @@
 package models
 
 import (
-	"time"
-
 	"database/sql"
 	"github.com/google/uuid"
 )
@@ -26,8 +24,8 @@ type User struct {
 	Role         UserRole  `json:"role"`
 	StoreID      uuid.UUID `json:"store_id"`
 	IsActive     bool      `json:"is_active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	CreatedAt    string`json:"created_at"`
+	UpdatedAt    string`json:"updated_at"`
 }
 
 type Store struct {
@@ -38,8 +36,8 @@ type Store struct {
 	GSTIN        string    `json:"gstin"`
 	LocationType string    `json:"location_type"` // store | warehouse
 	IsActive     bool      `json:"is_active"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	CreatedAt    string`json:"created_at"`
+	UpdatedAt    string`json:"updated_at"`
 }
 
 type Category struct {
@@ -50,8 +48,8 @@ type Category struct {
 	ParentID  *uuid.UUID `json:"parent_id"`
 	HSNCode   string     `json:"hsn_code"`
 	IsActive  bool       `json:"is_active"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 type UnitOfMeasure struct {
@@ -60,8 +58,8 @@ type UnitOfMeasure struct {
 	Name          string    `json:"name"`
 	DecimalPlaces int       `json:"decimal_places"`
 	IsActive      bool      `json:"is_active"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	CreatedAt     string`json:"created_at"`
+	UpdatedAt     string`json:"updated_at"`
 }
 
 type Product struct {
@@ -80,8 +78,8 @@ type Product struct {
 	AllowDecimal bool      `json:"allow_decimal"`
 	ImageURL     string    `json:"image_url"`
 	MinStock     float64   `json:"min_stock"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	CreatedAt    string`json:"created_at"`
+	UpdatedAt    string`json:"updated_at"`
 }
 
 type ProductPrice struct {
@@ -93,8 +91,8 @@ type ProductPrice struct {
 	SellPrice          float64   `json:"sell_price"`
 	WholesaleSellPrice float64   `json:"wholesale_sell_price"`
 	IsActive           bool      `json:"is_active"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	CreatedAt          string`json:"created_at"`
+	UpdatedAt          string`json:"updated_at"`
 }
 
 type Stock struct {
@@ -104,11 +102,11 @@ type Stock struct {
 	BatchNo     string     `json:"batch_no"`
 	Quantity    float64    `json:"quantity"`
 	ReservedQty float64    `json:"reserved_qty"`
-	ExpiryDate  *time.Time `json:"expiry_date"`
-	MfgDate     *time.Time `json:"mfg_date"`
+	ExpiryDate  *string `json:"expiry_date"`
+	MfgDate     *string `json:"mfg_date"`
 	CostPrice   float64    `json:"cost_price"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 type Customer struct {
@@ -122,8 +120,8 @@ type Customer struct {
 	IsWholesale bool      `json:"is_wholesale"`
 	StoreID     uuid.UUID `json:"store_id"`
 	IsActive    bool      `json:"is_active"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	CreatedAt   string`json:"created_at"`
+	UpdatedAt   string`json:"updated_at"`
 }
 
 type Vendor struct {
@@ -136,8 +134,8 @@ type Vendor struct {
 	CreditDays  int       `json:"credit_days"`
 	CreditLimit float64   `json:"credit_limit"`
 	IsActive    bool      `json:"is_active"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	CreatedAt   string`json:"created_at"`
+	UpdatedAt   string`json:"updated_at"`
 }
 
 type Invoice struct {
@@ -146,7 +144,7 @@ type Invoice struct {
 	StoreID      uuid.UUID  `json:"store_id"`
 	UserID       uuid.UUID  `json:"user_id"`
 	CustomerID   *uuid.UUID `json:"customer_id"`
-	InvoiceDate  time.Time  `json:"invoice_date"`
+	InvoiceDate  string `json:"invoice_date"`
 	SubTotal     float64    `json:"sub_total"`
 	CGST         float64    `json:"cgst"`
 	SGST         float64    `json:"sgst"`
@@ -157,9 +155,9 @@ type Invoice struct {
 	Status       string     `json:"status"`
 	PaymentMode  string     `json:"payment_mode"`
 	IsGSTR1Filed bool       `json:"is_gstr1_filed"`
-	GSTR1Month   *time.Time `json:"gstr1_month"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	GSTR1Month   *string `json:"gstr1_month"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 type InvoiceItem struct {
@@ -175,7 +173,7 @@ type InvoiceItem struct {
 	IGST           float64   `json:"igst"`
 	Total          float64   `json:"total"`
 	UnitCostAtSale float64   `json:"unit_cost_at_sale"`
-	CreatedAt      time.Time `json:"created_at"`
+	CreatedAt      string`json:"created_at"`
 }
 
 type PurchaseOrder struct {
@@ -183,8 +181,8 @@ type PurchaseOrder struct {
 	PO_NO        string     `json:"po_no"`
 	StoreID      uuid.UUID  `json:"store_id"`
 	VendorID     uuid.UUID  `json:"vendor_id"`
-	OrderDate    time.Time  `json:"order_date"`
-	ExpectedDate *time.Time `json:"expected_date"`
+	OrderDate    string `json:"order_date"`
+	ExpectedDate *string `json:"expected_date"`
 	SubTotal     float64    `json:"sub_total"`
 	CGST         float64    `json:"cgst"`
 	SGST         float64    `json:"sgst"`
@@ -192,8 +190,8 @@ type PurchaseOrder struct {
 	Discount     float64    `json:"discount"`
 	Total        float64    `json:"total"`
 	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 }
 
 type PurchaseItem struct {
@@ -209,7 +207,7 @@ type PurchaseItem struct {
 	SGST        float64   `json:"sgst"`
 	IGST        float64   `json:"igst"`
 	Total       float64   `json:"total"`
-	CreatedAt   time.Time `json:"created_at"`
+	CreatedAt   string`json:"created_at"`
 }
 
 type CreditEntry struct {
@@ -218,11 +216,11 @@ type CreditEntry struct {
 	InvoiceID  *uuid.UUID `json:"invoice_id"`
 	Amount     float64    `json:"amount"`
 	Type       string     `json:"type"`
-	DueDate    *time.Time `json:"due_date"`
+	DueDate    *string `json:"due_date"`
 	PaidAmount float64    `json:"paid_amount"`
 	Status     string     `json:"status"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
 }
 
 type SyncRecord struct {
@@ -232,8 +230,8 @@ type SyncRecord struct {
 	Operation string     `json:"operation"`
 	StoreID   uuid.UUID  `json:"store_id"`
 	Status    string     `json:"status"`
-	CreatedAt time.Time  `json:"created_at"`
-	SyncedAt  *time.Time `json:"synced_at"`
+	CreatedAt string `json:"created_at"`
+	SyncedAt  *string `json:"synced_at"`
 }
 
 type AuditLog struct {
@@ -245,7 +243,7 @@ type AuditLog struct {
 	RecordID  uuid.UUID `json:"record_id"`
 	OldValue  string    `json:"old_value"`
 	NewValue  string    `json:"new_value"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt string`json:"created_at"`
 }
 
 type InvoicePayment struct {
@@ -254,7 +252,7 @@ type InvoicePayment struct {
 	PaymentMode string    `json:"payment_mode"`
 	Amount      float64   `json:"amount"`
 	Reference   string    `json:"reference"`
-	CreatedAt   time.Time `json:"created_at"`
+	CreatedAt   string`json:"created_at"`
 }
 
 type Return struct {
@@ -266,7 +264,7 @@ type Return struct {
 	Reason     string     `json:"reason"`
 	RefundMode string     `json:"refund_mode"`
 	Status     string     `json:"status"`
-	CreatedAt  time.Time  `json:"created_at"`
+	CreatedAt  string `json:"created_at"`
 }
 
 type InventoryLoss struct {
@@ -278,16 +276,16 @@ type InventoryLoss struct {
 	LossType  string    `json:"loss_type"`
 	Reason    string    `json:"reason"`
 	UserID    uuid.UUID `json:"user_id"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt string`json:"created_at"`
 }
 
 type GoodsReceipt struct {
 	ID           uuid.UUID `json:"id"`
 	POID         uuid.UUID `json:"po_id"`
-	ReceivedDate time.Time `json:"received_date"`
+	ReceivedDate string`json:"received_date"`
 	ReceivedBy   string    `json:"received_by"`
 	Notes        string    `json:"notes"`
-	CreatedAt    time.Time `json:"created_at"`
+	CreatedAt    string`json:"created_at"`
 }
 
 type GoodsReceiptItem struct {
@@ -305,7 +303,7 @@ type ExpenseCategory struct {
 	ID        uuid.UUID `json:"id"`
 	Name      string    `json:"name"`
 	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt string`json:"created_at"`
 }
 
 type Expense struct {
@@ -314,7 +312,7 @@ type Expense struct {
 	CategoryID  uuid.UUID `json:"category_id"`
 	Amount      float64   `json:"amount"`
 	Description string    `json:"description"`
-	ExpenseDate time.Time `json:"expense_date"`
+	ExpenseDate string`json:"expense_date"`
 	UserID      uuid.UUID `json:"user_id"`
-	CreatedAt   time.Time `json:"created_at"`
+	CreatedAt   string`json:"created_at"`
 }

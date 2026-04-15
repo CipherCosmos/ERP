@@ -3,7 +3,6 @@ package handlers
 import (
 	"database/sql"
 	"net/http"
-	"time"
 
 	"gbos/internal/db"
 	"gbos/internal/middleware"
@@ -212,7 +211,7 @@ func (h *GRNHandler) List(c *gin.Context) {
 	var grns []map[string]interface{}
 	for rows.Next() {
 		var id, rowPOID, receivedBy, notes string
-		var receivedDate, createdAt time.Time
+		var receivedDate, createdAt string
 
 		rows.Scan(&id, &rowPOID, &receivedDate, &receivedBy, &notes, &createdAt)
 
