@@ -97,8 +97,12 @@ func (h *StoreHandler) Update(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if !sessionMayAccessStore(c, id) {
+		abortStoreMismatch(c)
+		return
+	}
 
-	_, err := db.DB.Exec(`UPDATE stores SET 
+	res, err := db.DB.Exec(`UPDATE stores SET
 		name = COALESCE(NULLIF(?, ''), name),
 		address = COALESCE(NULLIF(?, ''), address),
 		phone = COALESCE(NULLIF(?, ''), phone),
@@ -109,7 +113,11 @@ func (h *StoreHandler) Update(c *gin.Context) {
 		req.Name, req.Address, req.Phone, req.GSTIN,
 		req.LocationType, req.LocationType, id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update store"})
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "store not found"})
 		return
 	}
 

@@ -187,7 +187,7 @@ func (h *GRNHandler) List(c *gin.Context) {
 		return
 	}
 	poID := c.Query("po_id")
-	limit := c.DefaultQuery("limit", "50")
+	limit := clampLimit(c.DefaultQuery("limit", "50"), 50, 500)
 
 	query := `SELECT gr.id, gr.po_id, gr.received_date, gr.received_by, gr.notes, gr.created_at 
 		FROM goods_receipts gr

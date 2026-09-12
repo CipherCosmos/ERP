@@ -64,7 +64,7 @@ func (h *ExpenseHandler) List(c *gin.Context) {
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
 	categoryID := c.Query("category_id")
-	limit := c.DefaultQuery("limit", "50")
+	limit := clampLimit(c.DefaultQuery("limit", "50"), 50, 500)
 
 	query := `SELECT e.id, e.store_id, e.category_id, ec.name as category_name, e.amount, e.description, e.expense_date, e.user_id, e.created_at
 		FROM expenses e

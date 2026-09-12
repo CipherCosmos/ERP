@@ -122,6 +122,10 @@ func (h *CustomerHandler) Create(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, req.StoreID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	iw := 0
 	if req.IsWholesale {
@@ -152,6 +156,22 @@ func (h *CustomerHandler) Update(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var customerStore sql.NullString
+	if err := db.DB.QueryRow(`SELECT store_id FROM customers WHERE id = ?`, id).Scan(&customerStore); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load customer"})
+		return
+	}
+	// 404 rather than 403: a caller outside this store should not learn the
+	// customer exists.
+	if !sessionMayAccessStore(c, customerStore.String) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
 		return
 	}
 
@@ -204,8 +224,12 @@ func (h *CreditHandler) List(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
-	query := `SELECT ce.id, ce.customer_id, c.name as customer_name, ce.invoice_id, 
+	query := `SELECT ce.id, ce.customer_id, c.name as customer_name, ce.invoice_id,
 		ce.amount, ce.type, ce.due_date, ce.paid_amount, ce.status, ce.created_at
 		FROM credit_entries ce
 		JOIN customers c ON ce.customer_id = c.id
@@ -250,16 +274,27 @@ func (h *CreditHandler) Get(c *gin.Context) {
 
 	var entry models.CreditEntry
 	var customerName string
+	var customerStore sql.NullString
 	err := db.DB.QueryRow(`
-		SELECT ce.id, ce.customer_id, c.name, ce.invoice_id, ce.amount, ce.type,
+		SELECT ce.id, ce.customer_id, c.name, c.store_id, ce.invoice_id, ce.amount, ce.type,
 		       ce.due_date, ce.paid_amount, ce.status, ce.created_at
 		FROM credit_entries ce
 		JOIN customers c ON ce.customer_id = c.id
 		WHERE ce.id = ?`, id).Scan(
-		&entry.ID, &entry.CustomerID, &customerName,
+		&entry.ID, &entry.CustomerID, &customerName, &customerStore,
 		&entry.InvoiceID, &entry.Amount, &entry.Type,
 		&entry.DueDate, &entry.PaidAmount, &entry.Status, &entry.CreatedAt)
 	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "credit entry not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not load credit entry"})
+		return
+	}
+	// 404 rather than 403: a caller outside this store should not learn the
+	// entry exists.
+	if !sessionMayAccessStore(c, customerStore.String) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "credit entry not found"})
 		return
 	}
@@ -391,9 +426,13 @@ func (h *CreditHandler) Overdue(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "store_id required"})
 		return
 	}
+	if !sessionMayAccessStore(c, storeID) {
+		abortStoreMismatch(c)
+		return
+	}
 
 	query := `
-		SELECT c.id, c.name, c.phone, c.credit_limit, 
+		SELECT c.id, c.name, c.phone, c.credit_limit,
 		       COALESCE(SUM(ce.amount - ce.paid_amount), 0) as outstanding,
 		       COUNT(ce.id) as due_count,
 		       MIN(ce.due_date) as earliest_due

@@ -77,7 +77,7 @@ func (h *VendorPaymentHandler) List(c *gin.Context) {
 		return
 	}
 	vendorID := c.Query("vendor_id")
-	limit := c.DefaultQuery("limit", "50")
+	limit := clampLimit(c.DefaultQuery("limit", "50"), 50, 500)
 
 	query := `SELECT vp.id, vp.vendor_id, v.name as vendor_name, vp.po_id, vp.amount, vp.payment_mode,
 		vp.reference, vp.payment_date, vp.notes, vp.user_id, vp.created_at

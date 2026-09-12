@@ -74,7 +74,7 @@ func (h *ReturnHandler) List(c *gin.Context) {
 		abortStoreMismatch(c)
 		return
 	}
-	limit := c.DefaultQuery("limit", "50")
+	limit := clampLimit(c.DefaultQuery("limit", "50"), 50, 500)
 
 	query := `SELECT id, invoice_id, product_id, store_id, quantity, amount, reason, refund_mode, status, created_at 
 		FROM returns WHERE store_id = ?`
@@ -253,7 +253,7 @@ func (h *LossHandler) List(c *gin.Context) {
 		return
 	}
 	lossType := c.Query("loss_type")
-	limit := c.DefaultQuery("limit", "50")
+	limit := clampLimit(c.DefaultQuery("limit", "50"), 50, 500)
 
 	query := `SELECT l.id, l.product_id, l.store_id, l.batch_no, l.quantity, l.loss_type, l.reason, l.user_id, l.created_at
 		FROM inventory_losses l WHERE l.store_id = ?`

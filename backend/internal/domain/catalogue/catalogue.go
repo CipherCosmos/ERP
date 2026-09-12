@@ -1,0 +1,340 @@
+// Package catalogue holds the product catalogue entities: categories, units of
+// measure, products and their per-store prices.
+//
+// Nothing here talks to a database or to HTTP. The types carry their own
+// validation so that an invalid product cannot be constructed in the first
+// place, rather than being caught by whichever handler happened to remember.
+package catalogue
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+
+	"gbos/internal/domain/money"
+
+	"github.com/google/uuid"
+)
+
+// ErrValidation is the sentinel for a rejected value. Callers test with
+// errors.Is; the message carries the detail worth showing a user.
+var ErrValidation = errors.New("validation failed")
+
+func invalid(format string, args ...any) error {
+	return fmt.Errorf("%w: "+format, append([]any{ErrValidation}, args...)...)
+}
+
+// Category groups products for reporting and for the POS keypad. Names carry
+// Hindi and Kannada translations because the shop floor is multilingual.
+type Category struct {
+	ID       uuid.UUID  `json:"id"`
+	Name     string     `json:"name"`
+	NameHi   string     `json:"name_hi"`
+	NameKn   string     `json:"name_kn"`
+	ParentID *uuid.UUID `json:"parent_id"`
+	HSNCode  string     `json:"hsn_code"`
+	IsActive bool       `json:"is_active"`
+}
+
+// NewCategory validates and returns a category ready to persist.
+func NewCategory(name, nameHi, nameKn, hsnCode string, parentID *uuid.UUID) (Category, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return Category{}, invalid("category name is required")
+	}
+	if len(name) > 200 {
+		return Category{}, invalid("category name is longer than 200 characters")
+	}
+	return Category{
+		ID:       uuid.New(),
+		Name:     name,
+		NameHi:   strings.TrimSpace(nameHi),
+		NameKn:   strings.TrimSpace(nameKn),
+		ParentID: parentID,
+		HSNCode:  strings.TrimSpace(hsnCode),
+		IsActive: true,
+	}, nil
+}
+
+// UnitOfMeasure is how a quantity is measured. DecimalPlaces is what makes
+// "2.5 kg" expressible and "2.5 boxes" not.
+type UnitOfMeasure struct {
+	ID   uuid.UUID `json:"id"`
+	Code string    `json:"code"`
+	Name string    `json:"name"`
+	// FamilyID is what a unit can be converted with. Units convert only within
+	// a family, so rice held in kilograms can never be sold in litres by
+	// arithmetic accident — the conversion does not exist to be got wrong.
+	FamilyID uuid.UUID `json:"family_id"`
+	// FactorToBase is how many of the family's canonical unit one of these is:
+	// a gram is 0.001 kg, a quintal 100.
+	//
+	// money.Rate rather than a bare decimal.Decimal because it serialises as an
+	// exact JSON number with no fixed scale, which is what a factor needs: a
+	// milligram is 0.000001 and a square foot 0.09290304, and both must survive
+	// a round trip whole. A bare decimal would arrive at the client quoted.
+	FactorToBase  money.Rate `json:"factor_to_base"`
+	DecimalPlaces int        `json:"decimal_places"`
+	IsActive      bool       `json:"is_active"`
+}
+
+// NewUnitOfMeasure validates and returns a unit ready to persist.
+func NewUnitOfMeasure(code, name string, decimalPlaces int, familyID uuid.UUID, factorToBase money.Rate) (UnitOfMeasure, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	name = strings.TrimSpace(name)
+	if code == "" {
+		return UnitOfMeasure{}, invalid("unit code is required")
+	}
+	if name == "" {
+		return UnitOfMeasure{}, invalid("unit name is required")
+	}
+	if familyID == uuid.Nil {
+		return UnitOfMeasure{}, invalid("unit %s must belong to a family, or nothing can convert it", code)
+	}
+	// A zero or negative factor is a division by zero waiting in the conversion
+	// path, and a unit that converts to nothing is not a unit.
+	if !factorToBase.IsPositive() {
+		return UnitOfMeasure{}, invalid("unit %s needs a conversion factor greater than zero", code)
+	}
+	if decimalPlaces < 0 || decimalPlaces > money.QuantityScale {
+		return UnitOfMeasure{}, invalid("decimal places must be between 0 and %d", money.QuantityScale)
+	}
+	return UnitOfMeasure{
+		ID:            uuid.New(),
+		Code:          code,
+		Name:          name,
+		FamilyID:      familyID,
+		FactorToBase:  factorToBase,
+		DecimalPlaces: decimalPlaces,
+		IsActive:      true,
+	}, nil
+}
+
+// Product is an item the shop sells. Prices are deliberately not here: the same
+// product carries a different price in each store, so price lives on Price.
+type Product struct {
+	ID          uuid.UUID      `json:"id"`
+	Name        string         `json:"name"`
+	NameHi      string         `json:"name_hi"`
+	NameKn      string         `json:"name_kn"`
+	CategoryID  uuid.UUID      `json:"category_id"`
+	HSNCode     string         `json:"hsn_code"`
+	SACCode     string         `json:"sac_code"`
+	Barcode     string         `json:"barcode"`
+	UOMID       uuid.UUID      `json:"uom_id"`
+	BaseUnitQty money.Quantity `json:"base_unit_qty"`
+	// GSTRate is a percentage, so it is a money.Rate and reaches the client as
+	// a JSON number. A bare decimal.Decimal serialises quoted, and the products
+	// screen renders the value straight into `{p.gst_rate}%`.
+	GSTRate      money.Rate     `json:"gst_rate"`
+	IsFree       bool           `json:"is_free"`
+	IsActive     bool           `json:"is_active"`
+	AllowDecimal bool           `json:"allow_decimal"`
+	MinStock     money.Quantity `json:"min_stock"`
+	ImageURL     string         `json:"image_url"`
+	Brand        string         `json:"brand"`
+	Description  string         `json:"description"`
+}
+
+// NewProductInput is the caller-supplied shape for creating a product.
+type NewProductInput struct {
+	Name         string
+	NameHi       string
+	NameKn       string
+	CategoryID   uuid.UUID
+	HSNCode      string
+	SACCode      string
+	Barcode      string
+	UOMID        uuid.UUID
+	BaseUnitQty  money.Quantity
+	GSTRate      money.Rate
+	IsFree       bool
+	AllowDecimal bool
+	MinStock     money.Quantity
+	ImageURL     string
+	Brand        string
+	Description  string
+}
+
+// NewProduct validates and returns a product ready to persist.
+func NewProduct(in NewProductInput) (Product, error) {
+	name := strings.TrimSpace(in.Name)
+	if name == "" {
+		return Product{}, invalid("product name is required")
+	}
+	if in.CategoryID == uuid.Nil {
+		return Product{}, invalid("product category is required")
+	}
+	if in.UOMID == uuid.Nil {
+		return Product{}, invalid("unit of measure is required")
+	}
+	if err := ValidateGSTRate(in.GSTRate); err != nil {
+		return Product{}, err
+	}
+	if in.BaseUnitQty.IsNegative() || in.BaseUnitQty.IsZero() {
+		return Product{}, invalid("base unit quantity must be greater than zero")
+	}
+	if in.MinStock.IsNegative() {
+		return Product{}, invalid("minimum stock cannot be negative")
+	}
+	return Product{
+		ID:           uuid.New(),
+		Name:         name,
+		NameHi:       strings.TrimSpace(in.NameHi),
+		NameKn:       strings.TrimSpace(in.NameKn),
+		CategoryID:   in.CategoryID,
+		HSNCode:      strings.TrimSpace(in.HSNCode),
+		SACCode:      strings.TrimSpace(in.SACCode),
+		Barcode:      strings.TrimSpace(in.Barcode),
+		UOMID:        in.UOMID,
+		BaseUnitQty:  in.BaseUnitQty,
+		GSTRate:      in.GSTRate,
+		IsFree:       in.IsFree,
+		IsActive:     true,
+		AllowDecimal: in.AllowDecimal,
+		MinStock:     in.MinStock,
+		ImageURL:     strings.TrimSpace(in.ImageURL),
+		Brand:        strings.TrimSpace(in.Brand),
+		Description:  strings.TrimSpace(in.Description),
+	}, nil
+}
+
+// Packing units used to live here, as a tree: a case held cartons and a carton
+// held pieces, each row carrying only its size in its parent. ProductUnit in
+// units.go replaces it with a flat list whose every entry states its size in
+// the product's own stocking unit. See the comment on that type for why flat is
+// a correction rather than a simplification.
+
+// ValidateGSTRate rejects rates outside the statutory range. The database
+// carries the same CHECK, so this exists to produce a usable message rather
+// than a constraint violation.
+func ValidateGSTRate(rate money.Rate) error {
+	if rate.IsNegative() || rate.GreaterThan(money.RateFromInt(100)) {
+		return invalid("GST rate must be between 0 and 100, got %s", rate.String())
+	}
+	return nil
+}
+
+// The store-wide Price type that used to sit here is gone. A price is now
+// always the price of one product UNIT — see UnitPrice in units.go — because
+// one price per product forces a 25 kg sack to cost exactly 25 times the loose
+// kilo, and a wholesaler's whole trade is that it does not.
+
+// UnitFilter narrows a listing of units of measure. A zero filter lists every
+// active unit in every family, which is what the product form's unit picker
+// wants; the management screen sets IncludeInactive so a retired unit can be
+// brought back.
+type UnitFilter struct {
+	FamilyID        *uuid.UUID
+	IncludeInactive bool
+}
+
+// ProductFilter narrows a product listing. A zero filter lists the active
+// catalogue.
+type ProductFilter struct {
+	StoreID    uuid.UUID
+	CategoryID *uuid.UUID
+	Barcode    string
+	Search     string
+	Limit      int
+	// IncludeInactive lists deactivated products too, for the management
+	// screens that need to reactivate one.
+	IncludeInactive bool
+}
+
+// PricedProduct is the read model the POS and the products screen use: a
+// product together with everything those screens show about it in the store
+// being served - its price, its category's name, and how much of it is on the
+// shelf.
+//
+// Category name and stock are here for the same reason the price is: the
+// screen renders one row per product and would otherwise fetch them per row.
+// Both are properties of the product *in a store* rather than of the product
+// itself, which is why they belong on this type and not on Product.
+type PricedProduct struct {
+	Product
+	// CategoryName is the display name of CategoryID, blank when the product
+	// has no category. The products screen has a Category column and no other
+	// way to fill it.
+	CategoryName string      `json:"category_name"`
+	MRP          money.Money `json:"mrp"`
+	// CostPrice is what the shop pays for the product in this store.
+	//
+	// It was deliberately absent from this read model, on the argument that a
+	// cashier screen should not carry the shop's margin. That argument does not
+	// survive contact with the Set Price dialog, which is on this same screen,
+	// is reached from this same listing, and pre-filled a cost of zero on every
+	// product because the only figure it had was the one this model withheld -
+	// so saving the dialog silently wrote the cost away. The endpoint is behind
+	// authentication and a store scope, and GET /products/:id already returned
+	// the sell price and MRP; the cost is no more sensitive than those.
+	CostPrice          money.Money `json:"cost_price"`
+	SellPrice          money.Money `json:"sell_price"`
+	WholesaleSellPrice money.Money `json:"wholesale_sell_price"`
+	// Stock is the total quantity of this product on hand in the store, summed
+	// across batches. A product with no stock row reads zero rather than
+	// dropping out of the listing.
+	//
+	// It is read fresh on every listing and never cached. A stock figure is the
+	// one number on this screen that changes with every sale, and a stale one
+	// is worse than none: it reads as authoritative while telling a shopkeeper
+	// they can sell something they cannot.
+	//
+	// Stock is in the product's BASE unit and there is only ever one pool of it.
+	// Ten sacks received is 250 kg here, and selling 250 g takes 0.25 away, so
+	// the shop cannot be out of loose rice while sacks sit on the shelf.
+	Stock money.Quantity `json:"stock"`
+
+	// DefaultProductUnitID identifies the unit the four price fields above
+	// belong to, and the one a bare quantity means. It is uuid.Nil only for a
+	// product with no units at all, which the migration and CreateProduct
+	// between them make unreachable.
+	DefaultProductUnitID uuid.UUID `json:"default_product_unit_id"`
+
+	// Units are the ways this product may be sold, each with its own price in
+	// this store, default first and then smallest to largest. This is what lets
+	// the till offer "loose / 5 kg bag / 25 kg sack" and charge the sack's own
+	// price rather than twenty-five times the kilo.
+	//
+	// A unit with no price row is still listed, marked has_price false. Hiding
+	// it would look to a cashier like a missing product; showing it unpriced
+	// says exactly what to go and fix.
+	Units []SellableUnitsWithPrice `json:"units"`
+}
+
+// PriceFor returns the price to charge this customer for one of the DEFAULT
+// unit. A wholesale customer pays the wholesale price when one is set;
+// everyone else pays the shelf price.
+//
+// A till selling anything other than the default unit must price it from the
+// matching entry in Units, not from here.
+func (p PricedProduct) PriceFor(wholesale bool) money.Money {
+	if wholesale && !p.WholesaleSellPrice.IsZero() {
+		return p.WholesaleSellPrice
+	}
+	return p.SellPrice
+}
+
+// ScannedProduct is what a barcode resolves to.
+//
+// A scan identifies a UNIT, not just a product: the 25 kg sack and the 250 g
+// pouch of one rice carry different barcodes precisely so the till can tell
+// them apart and charge the sack's own price. The product's four headline price
+// fields still describe its default unit, so a client that ignores everything
+// below goes on behaving exactly as it did.
+type ScannedProduct struct {
+	PricedProduct
+
+	// ScannedUnit is the unit the barcode identified. When the scan matched the
+	// product's own barcode rather than a unit's, it is the default unit.
+	ScannedUnit ProductUnit `json:"scanned_unit"`
+	// ScannedPrice is that unit's price in this store, zero-valued when none is
+	// on file. ScannedHasPrice, not a zero total, is what says so: a free item
+	// and an unpriced one are different things.
+	ScannedPrice    UnitPrice `json:"scanned_price"`
+	ScannedHasPrice bool      `json:"scanned_has_price"`
+	// MatchedUnitBarcode distinguishes a scan of the sack's own barcode from a
+	// scan of the product's, which fell back to the default unit. A counter that
+	// meant to scan the sack and got the loose kilo can be told why.
+	MatchedUnitBarcode bool `json:"matched_unit_barcode"`
+}

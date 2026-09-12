@@ -123,7 +123,7 @@ func (h *InvoiceHandler) List(c *gin.Context) {
 
 	startDate := c.Query("start_date")
 	endDate := c.Query("end_date")
-	limit := c.DefaultQuery("limit", "100")
+	limit := clampLimit(c.DefaultQuery("limit", "100"), 100, 500)
 
 	query := `
 		SELECT id, invoice_no, store_id, user_id, customer_id, invoice_date, 
@@ -218,17 +218,21 @@ func (h *InvoiceHandler) Get(c *gin.Context) {
 }
 
 type InvoiceRequest struct {
-	StoreID     string           `json:"store_id" binding:"required"`
-	CustomerID  *string          `json:"customer_id"`
-	InvoiceDate string           `json:"invoice_date" binding:"required"`
-	SubTotal    float64          `json:"sub_total" binding:"required"`
-	CGST        float64          `json:"cgst"`
-	SGST        float64          `json:"sgst"`
-	IGST        float64          `json:"igst"`
-	Discount    float64          `json:"discount"`
-	RoundOff    float64          `json:"round_off"`
-	Total       float64          `json:"total" binding:"required"`
-	Status      string           `json:"status" binding:"required"`
+	StoreID     string  `json:"store_id" binding:"required"`
+	CustomerID  *string `json:"customer_id"`
+	InvoiceDate string  `json:"invoice_date" binding:"required"`
+	SubTotal    float64 `json:"sub_total" binding:"required"`
+	CGST        float64 `json:"cgst"`
+	SGST        float64 `json:"sgst"`
+	IGST        float64 `json:"igst"`
+	Discount    float64 `json:"discount"`
+	RoundOff    float64 `json:"round_off"`
+	Total       float64 `json:"total" binding:"required"`
+	// Status is accepted for wire compatibility but ignored: a new sale is
+	// always created as completed. Honouring it let a caller post a
+	// pre-voided invoice that still deducted stock while staying out of
+	// every status-filtered report.
+	Status      string           `json:"status"`
 	PaymentMode string           `json:"payment_mode" binding:"required"`
 	Items       []InvoiceItemReq `json:"items" binding:"required"`
 }
@@ -392,10 +396,10 @@ func (h *InvoiceHandler) Create(c *gin.Context) {
 	_, err = tx.Exec(`INSERT INTO invoices 
 		(id, invoice_no, store_id, user_id, customer_id, invoice_date, sub_total, 
 		 cgst, sgst, igst, discount, round_off, total, status, payment_mode)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)`,
 		invoiceID, invoiceNo, req.StoreID, uid, req.CustomerID,
 		req.InvoiceDate, req.SubTotal, req.CGST, req.SGST, req.IGST,
-		req.Discount, req.RoundOff, req.Total, req.Status, req.PaymentMode)
+		req.Discount, req.RoundOff, req.Total, req.PaymentMode)
 	if err != nil {
 		tx.Rollback()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

@@ -113,7 +113,7 @@ func (h *PurchaseReturnHandler) List(c *gin.Context) {
 		return
 	}
 	vendorID := c.Query("vendor_id")
-	limit := c.DefaultQuery("limit", "50")
+	limit := clampLimit(c.DefaultQuery("limit", "50"), 50, 500)
 
 	query := `SELECT pr.id, pr.po_id, pr.vendor_id, v.name as vendor_name, pr.store_id,
 		pr.return_date, pr.total, pr.status, pr.reason, pr.user_id, pr.created_at

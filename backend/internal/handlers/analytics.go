@@ -11,6 +11,7 @@ import (
 	"gbos/internal/db"
 	"gbos/internal/middleware"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type AnalyticsHandler struct{}
@@ -322,7 +323,7 @@ func (h *AuditHandler) List(c *gin.Context) {
 	}
 	userID := c.Query("user_id")
 	tableName := c.Query("table")
-	limit := c.DefaultQuery("limit", "100")
+	limit := clampLimit(c.DefaultQuery("limit", "100"), 100, 500)
 
 	query := `SELECT al.id, al.user_id, u.username, al.store_id, al.action, 
 		al.table_name, al.record_id, al.old_value, al.new_value, al.created_at
@@ -388,7 +389,7 @@ func (h *AuditHandler) Log(c *gin.Context) {
 
 	_, err := db.DB.Exec(`INSERT INTO audit_logs (id, user_id, store_id, action, table_name, record_id, old_value, new_value)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		fmt.Sprintf("AUD-%d", time.Now().UnixNano()), uid, storeID,
+		uuid.New().String(), uid, storeID,
 		req.Action, req.TableName, req.RecordID, req.OldValue, req.NewValue)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

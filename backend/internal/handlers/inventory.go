@@ -644,7 +644,7 @@ func (h *StockHandler) GetAdjustments(c *gin.Context) {
 		return
 	}
 	productID := c.Query("product_id")
-	limit := c.DefaultQuery("limit", "100")
+	limit := clampLimit(c.DefaultQuery("limit", "100"), 100, 500)
 
 	query := `SELECT sa.id, sa.product_id, p.name, sa.store_id, sa.batch_no, sa.quantity, 
 		sa.adjustment_type, sa.reason, sa.user_id, sa.created_at

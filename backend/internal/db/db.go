@@ -1,7 +1,9 @@
 package db
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -446,7 +448,11 @@ func seedDefaults() error {
 		return err
 	}
 
-	passwordHash, _ := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
+	adminPassword, adminGenerated := resolveAdminPassword()
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash admin password: %w", err)
+	}
 	adminID := uuid.New().String()
 	_, err = DB.Exec(`INSERT INTO users (id, username, password_hash, role, store_id) VALUES (?, 'admin', ?, 'owner', ?)`,
 		adminID, string(passwordHash), storeID)
@@ -560,22 +566,6 @@ func seedDefaults() error {
 		}
 	}
 
-	cashHash, _ := bcrypt.GenerateFromPassword([]byte("cashier123"), bcrypt.DefaultCost)
-	cashID := uuid.New().String()
-	_, err = DB.Exec(`INSERT INTO users (id, username, password_hash, role, store_id) VALUES (?, 'cashier', ?, 'cashier', ?)`,
-		cashID, string(cashHash), storeID)
-	if err != nil {
-		return err
-	}
-
-	helperHash, _ := bcrypt.GenerateFromPassword([]byte("helper123"), bcrypt.DefaultCost)
-	helperID := uuid.New().String()
-	_, err = DB.Exec(`INSERT INTO users (id, username, password_hash, role, store_id) VALUES (?, 'helper', ?, 'helper', ?)`,
-		helperID, string(helperHash), storeID)
-	if err != nil {
-		return err
-	}
-
 	custID := uuid.New().String()
 	_, err = DB.Exec(`INSERT INTO customers (id, name, phone, credit_limit, is_wholesale, store_id) VALUES (?, 'Wholesale Account', '9990001111', 50000, 1, ?)`,
 		custID, storeID)
@@ -590,8 +580,30 @@ func seedDefaults() error {
 		return err
 	}
 
-	log.Println("gbos: first-run seed — store + catalog + 3 products (barcodes 8901001100001–003), Wholesale Account, Default Supplier; logins admin/admin123, cashier/cashier123, helper/helper123")
+	log.Println("gbos: first-run seed — store + catalog + 3 products (barcodes 8901001100001–003), Wholesale Account, Default Supplier")
+	if adminGenerated {
+		log.Printf("gbos: admin password (generated, shown once): %s", adminPassword)
+		log.Println("gbos: log in as 'admin' and change it now — this is the only time it is printed")
+	} else {
+		log.Println("gbos: admin password taken from GBOS_ADMIN_PASSWORD")
+	}
 	return nil
+}
+
+// resolveAdminPassword returns the bootstrap password for the seeded admin
+// account. It comes from GBOS_ADMIN_PASSWORD when set; otherwise a random one
+// is generated and printed once, so that no installation starts life with a
+// password that is published in this repository.
+func resolveAdminPassword() (password string, generated bool) {
+	if fromEnv := os.Getenv("GBOS_ADMIN_PASSWORD"); fromEnv != "" {
+		return fromEnv, false
+	}
+	buf := make([]byte, 18)
+	if _, err := rand.Read(buf); err != nil {
+		// A predictable bootstrap password is not an acceptable fallback.
+		log.Fatalf("gbos: cannot generate an admin password: %v", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), true
 }
 
 func Close() {
