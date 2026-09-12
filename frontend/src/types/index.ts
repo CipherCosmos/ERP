@@ -40,6 +40,22 @@ export interface Category {
   parent_id: string | null;
   hsn_code: string;
   is_active: boolean;
+  /** Name of the parent, sent by the server so a tree renders in one request. */
+  parent_name?: string;
+  /** Active products filed here. A retired product is not counted. */
+  product_count?: number;
+  /** Discontinued products filed here. They still move when it is merged. */
+  retired_product_count?: number;
+  child_count?: number;
+}
+
+/** What a merge actually moved, so the screen can say so instead of "done". */
+export interface CategoryMergeResult {
+  from: string;
+  into: string;
+  products_moved: number;
+  categories_moved: number;
+  target_was_inside_it: boolean;
 }
 
 export interface Product {

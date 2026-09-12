@@ -1,5 +1,5 @@
 import axios, { AxiosResponse } from 'axios';
-import { Product, Store, Customer, Invoice, Terminal } from '../types';
+import { Category, CategoryMergeResult, Product, Store, Customer, Invoice, Terminal } from '../types';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || '/api/v1',
@@ -192,10 +192,35 @@ export const authApi = {
     api.post('/auth/change-password', { old_password: oldPassword, new_password: newPassword }),
 };
 
+export interface CategoryPayload {
+  name: string;
+  name_hi?: string;
+  name_kn?: string;
+  hsn_code?: string;
+  /** null puts the category at the top level. */
+  parent_id?: string | null;
+}
+
 export const categoryApi = {
-  list: (storeId: string) => list<any>(api.get('/categories', { params: { store_id: storeId } }), 'categories'),
-  create: (data: { name: string; name_hi?: string; name_kn?: string; hsn_code?: string }) =>
-    api.post('/categories', data),
+  list: (storeId: string, includeInactive = false) =>
+    list<Category>(
+      api.get('/categories', {
+        params: { store_id: storeId, ...(includeInactive ? { include_inactive: 'true' } : {}) },
+      }),
+      'categories'
+    ),
+  get: (id: string) => api.get<Category>(`/categories/${id}`),
+  create: (data: CategoryPayload) => api.post<Category>('/categories', data),
+  update: (id: string, data: CategoryPayload) => api.put<Category>(`/categories/${id}`, data),
+  /**
+   * Folds `id` into `intoId`: products and sub-categories move, then `id` is
+   * retired. The direction matters — the first argument is the one that goes
+   * away.
+   */
+  merge: (id: string, intoId: string) =>
+    api.post<CategoryMergeResult>(`/categories/${id}/merge`, { into_id: intoId }),
+  deactivate: (id: string) => api.post(`/categories/${id}/deactivate`),
+  activate: (id: string) => api.post(`/categories/${id}/activate`),
 };
 
 export const productApi = {

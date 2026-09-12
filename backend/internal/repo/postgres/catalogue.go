@@ -37,13 +37,46 @@ type Catalogue struct{}
 // NewCatalogue returns a catalogue repository.
 func NewCatalogue() *Catalogue { return &Catalogue{} }
 
-const categoryColumns = `id, name, COALESCE(name_hi, ''), COALESCE(name_kn, ''),
-	parent_id, COALESCE(hsn_code, ''), is_active`
+const categoryColumns = `c.id, c.name, COALESCE(c.name_hi, ''), COALESCE(c.name_kn, ''),
+	c.parent_id, COALESCE(c.hsn_code, ''), c.is_active,
+	COALESCE(parent.name, ''),
+	-- The two product counts are separate on purpose. The first decides whether
+	-- a category is in use: a discontinued product is not something the shop is
+	-- still selling, and counting it would refuse to retire a category whose
+	-- only contents were withdrawn last year. The second exists because a merge
+	-- moves discontinued products too — it has to, or they would be left
+	-- pointing at a category that no longer appears — so the screen that offers
+	-- the merge has to be able to say so before it happens.
+	(SELECT count(*) FROM products p WHERE p.category_id = c.id AND p.is_active),
+	(SELECT count(*) FROM products p WHERE p.category_id = c.id AND NOT p.is_active),
+	(SELECT count(*) FROM categories child WHERE child.parent_id = c.id AND child.is_active)`
 
-// ListCategories returns the active categories in display order.
-func (r *Catalogue) ListCategories(ctx context.Context, q platform.Querier) ([]catalogue.Category, error) {
+const categoryFrom = `
+	FROM categories c
+	LEFT JOIN categories parent ON parent.id = c.parent_id`
+
+func scanCategory(sc interface{ Scan(...any) error }) (catalogue.Category, error) {
+	var c catalogue.Category
+	err := sc.Scan(&c.ID, &c.Name, &c.NameHi, &c.NameKn,
+		&c.ParentID, &c.HSNCode, &c.IsActive,
+		&c.ParentName, &c.ProductCount, &c.RetiredProductCount, &c.ChildCount)
+	return c, err
+}
+
+// ListCategories returns categories in display order, active ones unless the
+// caller asks for the rest.
+//
+// Ordered by the parent's name then its own, so a tree renders without the
+// caller sorting it again: every child sits under the heading it belongs to, and
+// the roots — whose parent name is blank — come first.
+func (r *Catalogue) ListCategories(ctx context.Context, q platform.Querier, includeInactive bool) ([]catalogue.Category, error) {
+	where := `WHERE c.is_active`
+	if includeInactive {
+		where = `WHERE true`
+	}
 	rows, err := q.QueryContext(ctx,
-		`SELECT `+categoryColumns+` FROM categories WHERE is_active ORDER BY name`)
+		`SELECT `+categoryColumns+categoryFrom+` `+where+
+			` ORDER BY COALESCE(parent.name, ''), c.name`)
 	if err != nil {
 		return nil, platform.MapError(err)
 	}
@@ -51,9 +84,8 @@ func (r *Catalogue) ListCategories(ctx context.Context, q platform.Querier) ([]c
 
 	categories := make([]catalogue.Category, 0)
 	for rows.Next() {
-		var c catalogue.Category
-		if err := rows.Scan(&c.ID, &c.Name, &c.NameHi, &c.NameKn,
-			&c.ParentID, &c.HSNCode, &c.IsActive); err != nil {
+		c, err := scanCategory(rows)
+		if err != nil {
 			// Never skip a row that failed to scan. The implementation this
 			// replaces logged and continued, silently returning a short list
 			// that looked like a complete one.
@@ -65,6 +97,122 @@ func (r *Catalogue) ListCategories(ctx context.Context, q platform.Querier) ([]c
 		return nil, platform.MapError(err)
 	}
 	return categories, nil
+}
+
+// GetCategory returns one category with its counts.
+func (r *Catalogue) GetCategory(ctx context.Context, q platform.Querier, id uuid.UUID) (catalogue.Category, error) {
+	c, err := scanCategory(q.QueryRowContext(ctx,
+		`SELECT `+categoryColumns+categoryFrom+` WHERE c.id = $1`, id))
+	if err != nil {
+		return catalogue.Category{}, platform.MapError(err)
+	}
+	return c, nil
+}
+
+// UpdateCategory replaces the editable fields and reports whether it existed.
+func (r *Catalogue) UpdateCategory(ctx context.Context, q platform.Querier, c catalogue.Category) (bool, error) {
+	res, err := q.ExecContext(ctx,
+		`UPDATE categories SET name = $2, name_hi = $3, name_kn = $4,
+			parent_id = $5, hsn_code = $6, updated_at = now()
+		  WHERE id = $1`,
+		c.ID, c.Name, c.NameHi, c.NameKn, c.ParentID, c.HSNCode)
+	if err != nil {
+		return false, platform.MapError(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, platform.MapError(err)
+	}
+	return n > 0, nil
+}
+
+// maxCategoryDepth bounds the ancestor walk. Nothing should ever approach it —
+// the deepest real catalogue is three or four levels — but a recursive query
+// against a table that somehow holds a cycle does not return, and a hung query
+// on the shop's database at four in the afternoon is far worse than a reparent
+// that is refused.
+const maxCategoryDepth = "32"
+
+// categoryTreeLock is an arbitrary constant naming one lock. Every reparent and
+// merge takes it, so those operations run one at a time.
+const categoryTreeLock = 4820_1001
+
+// LockCategoryTree serialises the operations that reshape the tree.
+//
+// The cycle check reads the tree and then writes to it, and READ COMMITTED does
+// not hold those together: two people reparenting different categories at the
+// same moment can each read a tree in which their own move is fine, and commit
+// a pair of moves that closes a loop. Row locks cannot help, because the rows
+// that would have to be locked are exactly the ones the other transaction is
+// about to create a path through.
+//
+// The lock is released when the transaction ends, whichever way it ends.
+// Reparenting happens a handful of times in a shop's life, so serialising it
+// costs nothing worth measuring.
+func (r *Catalogue) LockCategoryTree(ctx context.Context, q platform.Querier) error {
+	_, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(categoryTreeLock))
+	return platform.MapError(err)
+}
+
+// CategoryWouldLoop reports whether making parentID the parent of id puts the
+// category inside its own subtree.
+//
+// It is one recursive query rather than a walk in Go, and it runs inside the
+// transaction that does the write. Two people reparenting different categories
+// at once can each read a tree that is perfectly fine and, between them, make a
+// loop — and a loop in this table is not a display problem: the listing orders
+// by parent, the product form walks it, and a cycle makes both of those run
+// until something gives up.
+//
+// The recursion walks UP from the proposed parent. If it reaches the category
+// being moved, the category is an ancestor of its own proposed parent.
+func (r *Catalogue) CategoryWouldLoop(ctx context.Context, q platform.Querier, id, parentID uuid.UUID) (bool, error) {
+	var loops bool
+	err := q.QueryRowContext(ctx,
+		`WITH RECURSIVE ancestors AS (
+			SELECT id, parent_id, 1 AS depth FROM categories WHERE id = $2
+			UNION ALL
+			SELECT c.id, c.parent_id, a.depth + 1
+			  FROM categories c
+			  JOIN ancestors a ON c.id = a.parent_id
+			 WHERE a.depth < `+maxCategoryDepth+`
+		 )
+		 SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = $1)`,
+		id, parentID).Scan(&loops)
+	if err != nil {
+		return false, platform.MapError(err)
+	}
+	return loops, nil
+}
+
+// MoveProductsToCategory reassigns every product in one category to another and
+// returns how many moved. It is how a category is retired without orphaning what
+// was in it.
+func (r *Catalogue) MoveProductsToCategory(ctx context.Context, q platform.Querier, from, to uuid.UUID) (int64, error) {
+	res, err := q.ExecContext(ctx,
+		`UPDATE products SET category_id = $2, updated_at = now() WHERE category_id = $1`, from, to)
+	if err != nil {
+		return 0, platform.MapError(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, platform.MapError(err)
+	}
+	return n, nil
+}
+
+// MoveChildCategories reparents every child of one category onto another.
+func (r *Catalogue) MoveChildCategories(ctx context.Context, q platform.Querier, from, to uuid.UUID) (int64, error) {
+	res, err := q.ExecContext(ctx,
+		`UPDATE categories SET parent_id = $2, updated_at = now() WHERE parent_id = $1`, from, to)
+	if err != nil {
+		return 0, platform.MapError(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, platform.MapError(err)
+	}
+	return n, nil
 }
 
 // CreateCategory inserts a category.

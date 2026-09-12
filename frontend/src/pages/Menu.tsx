@@ -62,6 +62,7 @@ export default function Menu() {
       blurb: 'Products, packs and prices',
       items: [
         { key: 'products', labelKey: 'products', icon: '🏷️', path: '/products', permission: 'catalog.read' },
+        { key: 'categories', labelKey: 'categories', icon: '🗂️', path: '/categories', permission: 'catalog.read' },
       ],
     },
     {

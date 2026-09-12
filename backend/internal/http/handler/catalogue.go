@@ -33,8 +33,12 @@ func NewCatalogue(svc *service.Service) *Catalogue {
 // see a store id that has not been authorised.
 func (h *Catalogue) Register(r gin.IRoutes) {
 	r.GET("/categories", mw.RequirePermission(rbac.PermCatalogRead), h.ListCategories)
+	r.GET("/categories/:id", mw.RequirePermission(rbac.PermCatalogRead), h.GetCategory)
 	r.POST("/categories", mw.RequirePermission(rbac.PermCategoryWrite), h.CreateCategory)
+	r.PUT("/categories/:id", mw.RequirePermission(rbac.PermCategoryWrite), h.UpdateCategory)
+	r.POST("/categories/:id/merge", mw.RequirePermission(rbac.PermCategoryWrite), h.MergeCategory)
 	r.POST("/categories/:id/deactivate", mw.RequirePermission(rbac.PermCategoryWrite), h.DeactivateCategory)
+	r.POST("/categories/:id/activate", mw.RequirePermission(rbac.PermCategoryWrite), h.ActivateCategory)
 
 	// Unit families and units of measure are catalogue reference data. They are
 	// rows rather than an enum precisely so a trade the shop takes up next year
@@ -173,12 +177,25 @@ func (h *Catalogue) setFamilyActive(c *gin.Context, active bool) {
 }
 
 func (h *Catalogue) ListCategories(c *gin.Context) {
-	categories, err := h.svc.ListCategories(c.Request.Context())
+	categories, err := h.svc.ListCategories(c.Request.Context(), c.Query("include_inactive") == "true")
 	if err != nil {
 		respond(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"categories": categories})
+}
+
+func (h *Catalogue) GetCategory(c *gin.Context) {
+	id, ok := pathUUID(c, "id")
+	if !ok {
+		return
+	}
+	category, err := h.svc.GetCategory(c.Request.Context(), id)
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, category)
 }
 
 type createCategoryRequest struct {
@@ -209,16 +226,88 @@ func (h *Catalogue) CreateCategory(c *gin.Context) {
 	c.JSON(http.StatusCreated, created)
 }
 
-func (h *Catalogue) DeactivateCategory(c *gin.Context) {
+// updateCategoryRequest carries the whole editable row, not a patch. parent_id
+// is a pointer so that sending null means "make this a top-level category" and
+// omitting it means the same thing — there is no third state to get wrong.
+type updateCategoryRequest struct {
+	Name     string  `json:"name" binding:"required"`
+	NameHi   string  `json:"name_hi"`
+	NameKn   string  `json:"name_kn"`
+	HSNCode  string  `json:"hsn_code"`
+	ParentID *string `json:"parent_id"`
+}
+
+func (h *Catalogue) UpdateCategory(c *gin.Context) {
 	id, ok := pathUUID(c, "id")
 	if !ok {
 		return
 	}
-	if err := h.svc.SetCategoryActive(c.Request.Context(), id, false); err != nil {
+	var req updateCategoryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httperr.Respond(c, httperr.FromBinding(err))
+		return
+	}
+	parentID, err := optionalUUID(req.ParentID)
+	if err != nil {
+		httperr.Respond(c, httperr.BadRequest("parent_id is not a valid identifier"))
+		return
+	}
+	updated, err := h.svc.UpdateCategory(c.Request.Context(), id, domain.CategoryUpdate{
+		Name:     req.Name,
+		NameHi:   req.NameHi,
+		NameKn:   req.NameKn,
+		HSNCode:  req.HSNCode,
+		ParentID: parentID,
+	})
+	if err != nil {
 		respond(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"id": id, "is_active": false})
+	c.JSON(http.StatusOK, updated)
+}
+
+type mergeCategoryRequest struct {
+	IntoID string `json:"into_id" binding:"required"`
+}
+
+// MergeCategory folds the category in the path into the one in the body. The
+// direction is worth being sure of: :id is the one that goes away.
+func (h *Catalogue) MergeCategory(c *gin.Context) {
+	id, ok := pathUUID(c, "id")
+	if !ok {
+		return
+	}
+	var req mergeCategoryRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		httperr.Respond(c, httperr.FromBinding(err))
+		return
+	}
+	into, err := uuid.Parse(req.IntoID)
+	if err != nil {
+		httperr.Respond(c, httperr.BadRequest("into_id is not a valid identifier"))
+		return
+	}
+	result, err := h.svc.MergeCategory(c.Request.Context(), id, into)
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Catalogue) DeactivateCategory(c *gin.Context) { h.setCategoryActive(c, false) }
+func (h *Catalogue) ActivateCategory(c *gin.Context)   { h.setCategoryActive(c, true) }
+
+func (h *Catalogue) setCategoryActive(c *gin.Context, active bool) {
+	id, ok := pathUUID(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.SetCategoryActive(c.Request.Context(), id, active); err != nil {
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"id": id, "is_active": active})
 }
 
 func (h *Catalogue) ListUnits(c *gin.Context) {

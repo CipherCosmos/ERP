@@ -7,6 +7,7 @@ import Login from './pages/Login';
 import Billing from './pages/Billing';
 import Inventory from './pages/Inventory';
 import Products from './pages/Products';
+import Categories from './pages/Categories';
 import Dashboard from './pages/Dashboard';
 import Menu from './pages/Menu';
 import Customers from './pages/Customers';
@@ -96,6 +97,7 @@ function App() {
         <Route path="/billing" element={<Billing />} />
         <Route path="/inventory" element={<Inventory />} />
         <Route path="/products" element={<Products />} />
+        <Route path="/categories" element={<Categories />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/customers" element={<Customers />} />
         <Route path="/credit" element={<Credit />} />

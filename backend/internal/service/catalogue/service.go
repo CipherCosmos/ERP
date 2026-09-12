@@ -26,9 +26,15 @@ var ErrStoreRequired = errors.New("store is required")
 // Repository is the persistence this service needs. Every method takes a
 // Querier so the service decides whether it runs in a transaction.
 type Repository interface {
-	ListCategories(ctx context.Context, q platform.Querier) ([]domain.Category, error)
+	ListCategories(ctx context.Context, q platform.Querier, includeInactive bool) ([]domain.Category, error)
+	GetCategory(ctx context.Context, q platform.Querier, id uuid.UUID) (domain.Category, error)
 	CreateCategory(ctx context.Context, q platform.Querier, c domain.Category) error
+	UpdateCategory(ctx context.Context, q platform.Querier, c domain.Category) (bool, error)
 	SetCategoryActive(ctx context.Context, q platform.Querier, id uuid.UUID, active bool) (bool, error)
+	LockCategoryTree(ctx context.Context, q platform.Querier) error
+	CategoryWouldLoop(ctx context.Context, q platform.Querier, id, parentID uuid.UUID) (bool, error)
+	MoveProductsToCategory(ctx context.Context, q platform.Querier, from, to uuid.UUID) (int64, error)
+	MoveChildCategories(ctx context.Context, q platform.Querier, from, to uuid.UUID) (int64, error)
 
 	ListFamilies(ctx context.Context, q platform.Querier, includeInactive bool) ([]domain.Family, error)
 	GetFamily(ctx context.Context, q platform.Querier, id uuid.UUID) (domain.Family, error)
@@ -86,16 +92,30 @@ func New(db DB, repo Repository) *Service {
 // Categories
 // ---------------------------------------------------------------------------
 
-// ListCategories returns the active categories.
-func (s *Service) ListCategories(ctx context.Context) ([]domain.Category, error) {
-	return s.repo.ListCategories(ctx, s.db)
+// ListCategories returns categories in display order.
+func (s *Service) ListCategories(ctx context.Context, includeInactive bool) ([]domain.Category, error) {
+	return s.repo.ListCategories(ctx, s.db, includeInactive)
+}
+
+// GetCategory returns one category with its product and child counts.
+func (s *Service) GetCategory(ctx context.Context, id uuid.UUID) (domain.Category, error) {
+	return s.repo.GetCategory(ctx, s.db, id)
 }
 
 // CreateCategory validates and stores a new category.
+//
+// A category that names a parent inherits that parent's fate, so a retired
+// parent is refused: the new category would be invisible from the moment it was
+// made, and the person who made it would have no way of telling why.
 func (s *Service) CreateCategory(ctx context.Context, name, nameHi, nameKn, hsnCode string, parentID *uuid.UUID) (domain.Category, error) {
 	c, err := domain.NewCategory(name, nameHi, nameKn, hsnCode, parentID)
 	if err != nil {
 		return domain.Category{}, err
+	}
+	if parentID != nil {
+		if err := s.requireLiveParent(ctx, s.db, *parentID); err != nil {
+			return domain.Category{}, err
+		}
 	}
 	if err := s.repo.CreateCategory(ctx, s.db, c); err != nil {
 		return domain.Category{}, fmt.Errorf("create category: %w", err)
@@ -103,16 +123,225 @@ func (s *Service) CreateCategory(ctx context.Context, name, nameHi, nameKn, hsnC
 	return c, nil
 }
 
-// SetCategoryActive deactivates or reactivates a category.
-func (s *Service) SetCategoryActive(ctx context.Context, id uuid.UUID, active bool) error {
-	found, err := s.repo.SetCategoryActive(ctx, s.db, id, active)
+// UpdateCategory renames a category and, where asked, moves it elsewhere in the
+// tree.
+//
+// The move is the part that needs the transaction. Checking that a category is
+// not being put inside its own subtree is a question about the whole tree, not
+// about the row being written, so it is asked and answered under the tree lock
+// with the write that depends on it.
+func (s *Service) UpdateCategory(ctx context.Context, id uuid.UUID, in domain.CategoryUpdate) (domain.Category, error) {
+	var updated domain.Category
+	err := s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		if err := s.repo.LockCategoryTree(ctx, tx); err != nil {
+			return err
+		}
+		existing, err := s.repo.GetCategory(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		next, err := existing.ApplyUpdate(in)
+		if err != nil {
+			return err
+		}
+		if next.ParentID != nil && !sameParent(existing.ParentID, next.ParentID) {
+			if err := s.requireLiveParent(ctx, tx, *next.ParentID); err != nil {
+				return err
+			}
+			loops, err := s.repo.CategoryWouldLoop(ctx, tx, id, *next.ParentID)
+			if err != nil {
+				return fmt.Errorf("check category tree: %w", err)
+			}
+			if loops {
+				return fmt.Errorf("%w: %s cannot be moved inside itself", domain.ErrValidation, existing.Name)
+			}
+		}
+		found, err := s.repo.UpdateCategory(ctx, tx, next)
+		if err != nil {
+			return fmt.Errorf("update category: %w", err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		refreshed, err := s.repo.GetCategory(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		updated = refreshed
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("set category active: %w", err)
+		return domain.Category{}, err
 	}
-	if !found {
-		return platform.ErrNotFound
+	return updated, nil
+}
+
+// SetCategoryActive retires a category or brings it back.
+//
+// Retiring one that still holds products is refused rather than done quietly.
+// Deactivating a category does not deactivate what is in it, so the products
+// would stay on sale under a heading nobody can see or pick — findable only by
+// barcode, and missing from every report that groups by category. MergeCategory
+// is the way to retire a category that is still in use: it says where the
+// contents go.
+func (s *Service) SetCategoryActive(ctx context.Context, id uuid.UUID, active bool) error {
+	return s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		c, err := s.repo.GetCategory(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if c.IsActive == active {
+			return nil
+		}
+		if !active {
+			if c.ProductCount > 0 {
+				return fmt.Errorf("%w: %s still holds %s — move them to another category first",
+					domain.ErrValidation, c.Name, plural(c.ProductCount, "product", "products"))
+			}
+			if c.ChildCount > 0 {
+				return fmt.Errorf("%w: %s still has %s under it — move or retire %s first",
+					domain.ErrValidation, c.Name,
+					plural(c.ChildCount, "category", "categories"),
+					map[bool]string{true: "it", false: "them"}[c.ChildCount == 1])
+			}
+		} else if c.ParentID != nil {
+			// Bringing a child back under a retired parent puts it somewhere
+			// that does not appear in the tree, which looks from the outside
+			// exactly like the reactivation having failed.
+			if err := s.requireLiveParent(ctx, tx, *c.ParentID); err != nil {
+				return err
+			}
+		}
+		found, err := s.repo.SetCategoryActive(ctx, tx, id, active)
+		if err != nil {
+			return fmt.Errorf("set category active: %w", err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		return nil
+	})
+}
+
+// MergeCategory moves everything in one category into another and retires the
+// first. It is how a duplicate created at the till ("Biscuit" beside
+// "Biscuits") is cleaned up without touching a single product by hand.
+//
+// Merging a category into one of its own children is allowed and is a real
+// case: a shop that made Beverages > Soft Drinks and only ever used the second
+// one wants the first to go away. That merge is what needs the extra step —
+// the child is lifted out of the subtree first, so that when the remaining
+// children move onto it none of them is its own ancestor.
+func (s *Service) MergeCategory(ctx context.Context, from, into uuid.UUID) (MergeResult, error) {
+	if from == into {
+		return MergeResult{}, fmt.Errorf("%w: a category cannot be merged into itself", domain.ErrValidation)
+	}
+
+	var result MergeResult
+	err := s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		if err := s.repo.LockCategoryTree(ctx, tx); err != nil {
+			return err
+		}
+		source, err := s.repo.GetCategory(ctx, tx, from)
+		if err != nil {
+			return err
+		}
+		target, err := s.repo.GetCategory(ctx, tx, into)
+		if err != nil {
+			return err
+		}
+		if !target.IsActive {
+			return fmt.Errorf("%w: %s has been retired, so nothing can be moved into it",
+				domain.ErrValidation, target.Name)
+		}
+
+		// Is the target inside the source's subtree? Lift it out before
+		// anything else moves, onto whatever the source's own parent is —
+		// which may be nothing, making it a root.
+		insideSource, err := s.repo.CategoryWouldLoop(ctx, tx, from, into)
+		if err != nil {
+			return fmt.Errorf("check category tree: %w", err)
+		}
+		if insideSource {
+			lifted := target
+			lifted.ParentID = source.ParentID
+			if _, err := s.repo.UpdateCategory(ctx, tx, lifted); err != nil {
+				return fmt.Errorf("move %s out of %s: %w", target.Name, source.Name, err)
+			}
+		}
+
+		products, err := s.repo.MoveProductsToCategory(ctx, tx, from, into)
+		if err != nil {
+			return fmt.Errorf("move products: %w", err)
+		}
+		children, err := s.repo.MoveChildCategories(ctx, tx, from, into)
+		if err != nil {
+			return fmt.Errorf("move sub-categories: %w", err)
+		}
+		found, err := s.repo.SetCategoryActive(ctx, tx, from, false)
+		if err != nil {
+			return fmt.Errorf("retire %s: %w", source.Name, err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		result = MergeResult{
+			From:              source.Name,
+			Into:              target.Name,
+			ProductsMoved:     int(products),
+			CategoriesMoved:   int(children),
+			TargetWasInsideIt: insideSource,
+		}
+		return nil
+	})
+	if err != nil {
+		return MergeResult{}, err
+	}
+	return result, nil
+}
+
+// MergeResult says what a merge actually did, so the screen can report it
+// instead of saying "done".
+type MergeResult struct {
+	From              string `json:"from"`
+	Into              string `json:"into"`
+	ProductsMoved     int    `json:"products_moved"`
+	CategoriesMoved   int    `json:"categories_moved"`
+	TargetWasInsideIt bool   `json:"target_was_inside_it"`
+}
+
+// requireLiveParent refuses a parent that does not exist or has been retired.
+func (s *Service) requireLiveParent(ctx context.Context, q platform.Querier, parentID uuid.UUID) error {
+	parent, err := s.repo.GetCategory(ctx, q, parentID)
+	if err != nil {
+		if errors.Is(err, platform.ErrNotFound) {
+			return fmt.Errorf("%w: no such parent category", domain.ErrValidation)
+		}
+		return err
+	}
+	if !parent.IsActive {
+		return fmt.Errorf("%w: %s has been retired and cannot hold categories",
+			domain.ErrValidation, parent.Name)
 	}
 	return nil
+}
+
+func sameParent(a, b *uuid.UUID) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return *a == *b
+	}
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
+	}
+	return fmt.Sprintf("%d %s", n, many)
 }
 
 // ---------------------------------------------------------------------------

@@ -34,6 +34,32 @@ type Category struct {
 	ParentID *uuid.UUID `json:"parent_id"`
 	HSNCode  string     `json:"hsn_code"`
 	IsActive bool       `json:"is_active"`
+
+	// ParentName, ProductCount and ChildCount ride along on the read path. The
+	// screen shows a tree with a count on each row, and fetching either per row
+	// is a query per category on a page that exists to be scanned.
+	//
+	// ProductCount counts active products only. An inactive one is not
+	// something a shop is still selling, and including it would make a category
+	// look in use when the only thing in it was retired last year.
+	ParentName   string `json:"parent_name,omitempty"`
+	ProductCount int    `json:"product_count"`
+	// Discontinued products filed here. They do not keep a category in use, but
+	// they do move when it is merged.
+	RetiredProductCount int `json:"retired_product_count"`
+	ChildCount          int `json:"child_count"`
+}
+
+// CategoryUpdate is what may be changed about an existing category.
+//
+// The id is not in it: a category's identity is not editable, and taking it as
+// a field invites a handler that lets the body decide which row it writes.
+type CategoryUpdate struct {
+	Name     string
+	NameHi   string
+	NameKn   string
+	ParentID *uuid.UUID
+	HSNCode  string
 }
 
 // NewCategory validates and returns a category ready to persist.
@@ -54,6 +80,27 @@ func NewCategory(name, nameHi, nameKn, hsnCode string, parentID *uuid.UUID) (Cat
 		HSNCode:  strings.TrimSpace(hsnCode),
 		IsActive: true,
 	}, nil
+}
+
+// ApplyUpdate returns the category with the editable fields replaced, validated
+// the same way creating one is.
+//
+// It does NOT check the parent: whether a proposed parent would make the
+// category its own ancestor is a question about the rest of the tree, and this
+// package cannot see it. The service asks the database, inside the transaction
+// that does the write, because two people reparenting at once can each see a
+// tree that is fine and together make a loop.
+func (c Category) ApplyUpdate(in CategoryUpdate) (Category, error) {
+	fresh, err := NewCategory(in.Name, in.NameHi, in.NameKn, in.HSNCode, in.ParentID)
+	if err != nil {
+		return Category{}, err
+	}
+	if in.ParentID != nil && *in.ParentID == c.ID {
+		return Category{}, invalid("a category cannot be inside itself")
+	}
+	fresh.ID = c.ID
+	fresh.IsActive = c.IsActive
+	return fresh, nil
 }
 
 // UnitOfMeasure is how a quantity is measured. DecimalPlaces is what makes
