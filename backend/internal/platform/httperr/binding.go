@@ -5,10 +5,42 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
+	"unicode"
 
+	"github.com/gin-gonic/gin/binding"
 	"github.com/go-playground/validator/v10"
 )
+
+// UseJSONFieldNames makes validation errors name the JSON key the client
+// actually sent.
+//
+// By default validator reports the Go struct field, so a missing "family_id"
+// came back as "familyID" — a name that appears nowhere in the request and
+// that no client can map back to an input. A form could only show "something
+// went wrong" instead of marking the empty box.
+//
+// Call this once, before anything binds. It mutates the validator Gin shares,
+// so it belongs at router construction rather than in an init().
+func UseJSONFieldNames() {
+	v, ok := binding.Validator.Engine().(*validator.Validate)
+	if !ok {
+		return
+	}
+	v.RegisterTagNameFunc(func(fld reflect.StructField) string {
+		name := strings.SplitN(fld.Tag.Get("json"), ",", 2)[0]
+		switch name {
+		case "-":
+			// Deliberately not on the wire; there is no JSON name to report.
+			return ""
+		case "":
+			return snakeCase(fld.Name)
+		default:
+			return name
+		}
+	})
+}
 
 // FromBinding converts the error c.ShouldBindJSON returns into a 400 with
 // per-field reasons, so handlers stop returning the raw binding message.
@@ -20,7 +52,7 @@ import (
 // which names Go types to an end user. This produces
 //
 //	{"error":{"code":"validation_failed","message":"The request contains invalid fields.",
-//	          "fields":{"sku":"this field is required"}}}
+//	          "fields":{"sku":"is required"}}}
 //
 // It handles the three shapes Gin actually emits: validator.ValidationErrors,
 // json.UnmarshalTypeError (wrong JSON type for a field), and an empty body.
@@ -61,20 +93,54 @@ func FromBinding(err error) *Error {
 	return BadRequest("The request could not be processed.").Wrap(err)
 }
 
-// fieldName prefers the JSON name from the struct tag, falling back to the Go
-// field name lowercased. Clients send JSON; they should be told about JSON.
+// fieldName reports the JSON name of the field that failed.
+//
+// With UseJSONFieldNames registered, fe.Field() is already the json tag. The
+// snakeCase fallback covers a validator that has not been configured — a unit
+// test binding directly, say — so the name is still something a client sent
+// rather than a Go identifier.
 func fieldName(fe validator.FieldError) string {
-	if name := fe.Field(); name != "" {
-		return strings.ToLower(name[:1]) + name[1:]
+	name := fe.Field()
+	if name == "" {
+		name = fe.StructField()
 	}
-	return fe.StructField()
+	if strings.ContainsRune(name, '_') || name == strings.ToLower(name) {
+		return name
+	}
+	return snakeCase(name)
 }
 
-// reasonFor renders a validator tag as a sentence an end user can act on.
+// snakeCase converts a Go field name to the lower_snake_case form this API
+// uses on the wire. Runs of capitals stay together, so HSNCode becomes
+// hsn_code rather than h_s_n_code.
+func snakeCase(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	runes := []rune(s)
+	for i, r := range runes {
+		if unicode.IsUpper(r) {
+			prevLower := i > 0 && !unicode.IsUpper(runes[i-1])
+			nextLower := i+1 < len(runes) && !unicode.IsUpper(runes[i+1])
+			if i > 0 && (prevLower || nextLower) {
+				b.WriteByte('_')
+			}
+			b.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// reasonFor renders a validator tag as a predicate that reads after the field
+// label, so a client can print "Family is required" by joining the two, or show
+// the reason alone beside the input it belongs to. Every arm must therefore
+// start with a verb; "this field is required" reads as a non-sentence once a
+// label is prepended.
 func reasonFor(fe validator.FieldError) string {
 	switch fe.Tag() {
 	case "required":
-		return "this field is required"
+		return "is required"
 	case "email":
 		return "must be a valid email address"
 	case "min":
@@ -97,6 +163,8 @@ func reasonFor(fe validator.FieldError) string {
 		return "must be a valid identifier"
 	case "numeric":
 		return "must be a number"
+	case "e164":
+		return "must be a phone number in international form"
 	case "alphanum":
 		return "must contain only letters and numbers"
 	default:

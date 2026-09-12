@@ -70,6 +70,11 @@ func NewRouter(svcs app.Services, cfg Config) (*gin.Engine, func(), error) {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	// Validation errors must name the JSON key the client sent, not the Go
+	// field. Registered here because this is the one place that runs before
+	// any handler binds a body.
+	httperr.UseJSONFieldNames()
+
 	// Client IP decides who a rate limit applies to, so forwarding headers
 	// must only be honoured from proxies we name. Gin's default is to trust
 	// every proxy, which makes the limiter bypassable by anyone who can set a

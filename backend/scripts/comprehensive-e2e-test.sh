@@ -6,7 +6,12 @@
 
 set -e
 
-BASE_URL="http://localhost:8080/api/v1"
+# This suite writes: it creates stores, products, invoices and payments, and
+# Phase 2 clears data. Point it only at a server you are willing to have
+# rewritten. GBOS_API overrides the target; anything off the loopback needs
+# GBOS_E2E_ALLOW_REMOTE=1 as well, so a stray shell variable cannot aim 100
+# mutating assertions at a shop that is trading.
+BASE_URL="${GBOS_API:-http://127.0.0.1:8080/api/v1}"
 STORE_ID=""
 USER_ID=""
 AUTH_TOKEN=""
@@ -154,6 +159,33 @@ api_delete() {
 
 print_header "Phase 1: System Initialization & Authentication"
 
+print_section "1.0 Confirm the target"
+echo "  target: $BASE_URL"
+case "$BASE_URL" in
+    http://127.0.0.1:*|http://localhost:*|http://[::1]:*) ;;
+    *)
+        if [ "${GBOS_E2E_ALLOW_REMOTE:-}" != "1" ]; then
+            print_error "refusing to run against a non-loopback target without GBOS_E2E_ALLOW_REMOTE=1"
+            echo "  This suite creates and deletes records. $BASE_URL is not loopback."
+            exit 1
+        fi
+        echo "  GBOS_E2E_ALLOW_REMOTE=1 — proceeding against a remote target"
+        ;;
+esac
+
+# Prove GBOS is what is answering. A reverse proxy or an unrelated service on
+# the port returns its own 200, and every assertion after this would then be
+# measuring the wrong program.
+health=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/health" 2>/dev/null || echo 000)
+health_body=$(curl -s "$BASE_URL/health" 2>/dev/null || true)
+if [ "$health" != "200" ] || ! echo "$health_body" | jq -e '.status and .database' >/dev/null 2>&1; then
+    print_error "no GBOS server at $BASE_URL (HTTP $health)"
+    echo "  body: ${health_body:0:200}"
+    echo "  Start one, or set GBOS_API to the right base URL."
+    exit 1
+fi
+print_success "GBOS is answering at $BASE_URL"
+
 print_section "1.1 Login as Admin"
 # Must match the password the server was seeded with. Start the server with
 # GBOS_ADMIN_PASSWORD set, or export the same value before running this script.
@@ -170,7 +202,9 @@ AUTH_TOKEN=$(echo "$login_response" | head -n -1 | jq -r '.token')
 USER_ID=$(echo "$login_response" | head -n -1 | jq -r '.user.id')
 STORE_ID=$(echo "$login_response" | head -n -1 | jq -r '.user.store_id')
 
-print_info "Auth Token: $AUTH_TOKEN"
+# The token is a bearer credential; printing it puts a working login into
+# whatever captures this output, CI logs included.
+print_info "Auth Token: (obtained, not printed)"
 print_info "User ID: $USER_ID"
 print_info "Store ID: $STORE_ID"
 

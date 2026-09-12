@@ -6,7 +6,10 @@ set -euo pipefail
 # Tests every API endpoint with data correctness verification
 ###############################################################################
 
-BASE="http://localhost:8080/api/v1"
+# Set by PHASE 0 once it knows which port it picked. The script starts and owns
+# its own server on an ephemeral port: it must never adopt, and must never kill,
+# a server it did not start.
+BASE=""
 PASS=0; FAIL=0; SKIP=0
 ERRORS=()
 
@@ -123,14 +126,49 @@ header "PHASE 0: Setup — Fresh DB + Server"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TEST_DB_DIR=$(mktemp -d)
-TEST_DB="$TEST_DB_DIR/test-gbos.db"
+REPO_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
+WORK_DIR=$(mktemp -d)
 SERVER_PID=""
+
+# A throwaway database per run, named so a crashed run is obvious and can be
+# dropped by hand. It is NOT gbos_dev: this suite writes ~350 tests worth of
+# rows and must never land them in the database someone is developing against.
+SMOKE_DB="gbos_smoke_$$"
+
+# Seeds the owner account for this run only, in a database dropped at the end.
+# Must satisfy the server's own password policy, which is the point of having
+# the policy rather than a constant the scripts quietly fall behind.
+SMOKE_ADMIN_PASSWORD="smoke-run-$$-only"
+DEV_DB_URL="${DEV_DB_URL:-postgres://gbos:gbos_dev_password@localhost:5434/gbos_dev?sslmode=disable}"
+# Swap whatever database name DEV_DB_URL names for the throwaway one, keeping
+# host, credentials and query string. Substituting on the literal "gbos_dev"
+# would silently produce the *original* URL if someone pointed DEV_DB_URL
+# elsewhere, and this suite would then write its rows into that database.
+SMOKE_DB_URL=$(printf '%s' "$DEV_DB_URL" | sed -E "s#/[^/?]+(\?|$)#/$SMOKE_DB\1#")
+case "$SMOKE_DB_URL" in
+  *"/$SMOKE_DB"*) : ;;
+  *) echo "FATAL: could not derive a throwaway database URL from DEV_DB_URL"; exit 1 ;;
+esac
+
+# No host psql is assumed. Maintenance statements go through the dev compose
+# Postgres the same way `make db-up` issues them.
+pg_admin() {
+  docker compose -f "$REPO_DIR/docker-compose.dev.yml" exec -T postgres \
+    psql -U gbos -d postgres -v ON_ERROR_STOP=1 -tAc "$1"
+}
 
 cleanup() {
   echo -e "\n${YELLOW}Cleaning up...${NC}"
-  [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
-  rm -rf "$TEST_DB_DIR"
+  # Only ever the server this script started, by the PID it captured.
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+  if [ -n "${SMOKE_DB_CREATED:-}" ]; then
+    pg_admin "DROP DATABASE IF EXISTS \"$SMOKE_DB\" WITH (FORCE)" >/dev/null 2>&1 \
+      || echo -e "  ${YELLOW}could not drop $SMOKE_DB — drop it by hand${NC}"
+  fi
+  rm -rf "$WORK_DIR"
   echo -e "\n${BLUE}═══════════════════════════════════════${NC}"
   echo -e "${BLUE}  TEST RESULTS${NC}"
   echo -e "${BLUE}═══════════════════════════════════════${NC}"
@@ -146,30 +184,62 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Kill any stale server on 8080
-lsof -ti:8080 2>/dev/null | xargs kill -9 2>/dev/null || true
-sleep 1
+# An ephemeral port the kernel hands out, so this never contends with — let
+# alone terminate — whatever already owns a well-known port on this machine.
+PORT=$(/usr/bin/env python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+BASE="http://127.0.0.1:$PORT/api/v1"
+echo "Server will listen on 127.0.0.1:$PORT"
+
+echo "Creating throwaway database $SMOKE_DB..."
+pg_admin "CREATE DATABASE \"$SMOKE_DB\"" >/dev/null || {
+  echo -e "${RED}FATAL: could not create $SMOKE_DB. Is the dev Postgres up? Run: make db-up${NC}"
+  exit 1
+}
+SMOKE_DB_CREATED=1
 
 echo "Building server..."
 cd "$BACKEND_DIR"
-go build -o "$TEST_DB_DIR/server" ./cmd/server/
+go build -o "$WORK_DIR/server" ./cmd/server/
 
-echo "Starting server with fresh DB at $TEST_DB..."
-DATABASE_PATH="$TEST_DB" SERVER_PORT=8080 JWT_SECRET=test-secret GBOS_ADMIN_PASSWORD=admin123 "$TEST_DB_DIR/server" &
+# The server migrates on start, so the schema comes from migrations/ and not
+# from anything this script knows about.
+echo "Starting server against $SMOKE_DB..."
+DATABASE_URL="$SMOKE_DB_URL" SERVER_PORT="$PORT" TZ=Asia/Kolkata \
+  GBOS_ADMIN_PASSWORD="$SMOKE_ADMIN_PASSWORD" "$WORK_DIR/server" >"$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-sleep 2
 
-# Health check
+# Wait for it rather than sleeping a guess, and fail loudly with the log if it
+# never comes up — a timed sleep turns a crashed server into 350 confusing
+# assertion failures.
+for _ in $(seq 1 40); do
+  if curl -fsS "$BASE/health" >/dev/null 2>&1; then break; fi
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo -e "${RED}FATAL: server exited during startup${NC}"
+    tail -20 "$WORK_DIR/server.log"
+    exit 1
+  fi
+  sleep 0.25
+done
+
+# Health check — and proof that the thing answering is GBOS. Without this a
+# reverse proxy or unrelated service on the port would happily return 200 and
+# every later assertion would be measuring the wrong program.
 RESP=$(curl -s -w "\n%{http_code}" "$BASE/health" 2>/dev/null || echo -e "\n000")
 split_response "$RESP"
 assert_status "Health check" "200" "$STATUS"
+assert_contains "Health check: answered by GBOS" "$BODY" '"database"'
+if [ "$STATUS" != "200" ]; then
+  echo -e "${RED}FATAL: server never became healthy${NC}"
+  tail -20 "$WORK_DIR/server.log"
+  exit 1
+fi
 
 ###############################################################################
 header "PHASE 0b: Admin Login"
 ###############################################################################
 
 RESP=$(curl -s -w "\n%{http_code}" -X POST -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin123"}' "$BASE/auth/login" 2>/dev/null || echo -e "\n000")
+  -d "{\"username\":\"admin\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" "$BASE/auth/login" 2>/dev/null || echo -e "\n000")
 split_response "$RESP"
 assert_status "Admin login" "200" "$STATUS"
 
@@ -181,7 +251,7 @@ if [ "$TOKEN" = "PARSE_ERROR" ] || [ -z "$TOKEN" ]; then
   echo "Response: $BODY"
   exit 1
 fi
-echo -e "  Token: ${TOKEN:0:20}..."
+echo -e "  Token: obtained (${#TOKEN} chars, not printed)"
 echo -e "  Store ID: $STORE_ID"
 
 # Verify login response structure

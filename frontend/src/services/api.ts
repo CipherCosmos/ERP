@@ -33,6 +33,34 @@ api.interceptors.request.use((config) => {
  * Flattening it once here fixes all six call sites, and keeps the field-level
  * detail: a caller that wants the structure still has it on `error.details`.
  */
+// Words the trade spells in capitals. Title-casing them would produce "Gst
+// rate", which reads as a typo to anyone who files a return.
+const ACRONYMS = new Set([
+  'gst', 'cgst', 'sgst', 'igst', 'hsn', 'sac', 'uom', 'mrp', 'sku',
+  'gstin', 'upi', 'po', 'grn', 'qty', 'id',
+]);
+
+/**
+ * Turns a wire field name into something that reads like a form label:
+ * `family_id` becomes "Family", `gst_rate` becomes "GST rate". A trailing
+ * `_id` is dropped because the person filling the form picks a category, not
+ * a category's identifier.
+ */
+export function humanizeField(name: string): string {
+  const words = name
+    .replace(/_id$/, '')
+    .split(/[_.]/)
+    .filter(Boolean);
+  if (words.length === 0) return name;
+  return words
+    .map((word, i) => {
+      if (ACRONYMS.has(word.toLowerCase())) return word.toUpperCase();
+      if (i === 0) return word.charAt(0).toUpperCase() + word.slice(1);
+      return word;
+    })
+    .join(' ');
+}
+
 function describeError(payload: any): string {
   if (typeof payload === 'string') return payload;
   if (!payload || typeof payload !== 'object') return '';
@@ -41,12 +69,12 @@ function describeError(payload: any): string {
   if (typeof payload.message === 'string' && payload.message) {
     parts.push(payload.message);
   }
-  // Field errors are the actionable half — "name is required" is what the user
+  // Field errors are the actionable half — "Name is required" is what the user
   // has to act on, and the generic message above never carries it.
   const fields = payload.fields;
   if (fields && typeof fields === 'object') {
     const detail = Object.entries(fields)
-      .map(([name, problem]) => `${name}: ${problem}`)
+      .map(([name, problem]) => `${humanizeField(name)} ${problem}`)
       .join(', ');
     if (detail) parts.push(detail);
   }

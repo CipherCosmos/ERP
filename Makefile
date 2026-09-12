@@ -1,4 +1,4 @@
-.PHONY: backend frontend smoke verify-security clean-testdb migrate-down-all backup restore-drill \
+.PHONY: backend frontend smoke e2e verify-security migrate-down-all backup restore-drill \
         db-up db-down db-reset db-psql test test-unit migrate-up migrate-down migrate-status \
         ops-check caddy-check restore install-timers logs ps health
 
@@ -10,9 +10,10 @@ MIGRATIONS_DIR := backend/migrations/postgres
 
 # --- application ------------------------------------------------------------
 
-# API (creates ./backend/data/ if needed; seeds on first run)
+# API. Migrates the dev database on start and seeds the owner account on first
+# run, printing its generated password once.
 backend:
-	cd backend && mkdir -p data && go run ./cmd/server
+	cd backend && go run ./cmd/server
 
 frontend:
 	cd frontend && npm start
@@ -129,13 +130,17 @@ test: db-up
 test-unit:
 	cd backend && go test ./internal/domain/... ./internal/rbac/... -race
 
-# Requires backend on 8080 (or set GBOS_API, e.g. http://127.0.0.1:18081/api/v1)
-smoke:
-	bash scripts/smoke-test.sh
+# Starts its own server on an ephemeral port against a throwaway database, and
+# drops it afterwards. Needs the dev Postgres: make db-up.
+smoke: db-up
+	bash backend/scripts/smoke-test.sh
 
-# Security regressions from the Phase 0 hardening. Starts its own server.
-verify-security:
+# Mutating end-to-end pass against an already-running server. Defaults to
+# 127.0.0.1:8080; set GBOS_API to point it elsewhere.
+e2e:
+	bash backend/scripts/comprehensive-e2e-test.sh
+
+# Security regressions from the hardening pass. Starts its own server on an
+# ephemeral port against a throwaway database.
+verify-security: db-up
 	bash backend/scripts/verify-security.sh
-
-clean-testdb:
-	rm -f backend/data/test-seed.db

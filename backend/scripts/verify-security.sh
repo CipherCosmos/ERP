@@ -10,22 +10,51 @@
 set -uo pipefail
 
 REPO_BACKEND="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$REPO_BACKEND/.." && pwd)"
 WORK="$(mktemp -d)"
 BIN="$WORK/gbos-verify"
-DB="$WORK/data/gbos.db"
-PORT="${VERIFY_PORT:-8099}"
+
+# A throwaway database. Several checks below assert what does NOT exist — that
+# the seeded demo accounts are gone, for one — so they have to run against a
+# database this script created, not against whatever the developer has been
+# working in.
+VERIFY_DB="gbos_verify_$$"
+DEV_DB_URL="${DEV_DB_URL:-postgres://gbos:gbos_dev_password@localhost:5434/gbos_dev?sslmode=disable}"
+VERIFY_DB_URL=$(printf '%s' "$DEV_DB_URL" | sed -E "s#/[^/?]+(\?|$)#/$VERIFY_DB\1#")
+
+# An ephemeral port by default, so this never contends with anything already
+# listening on this machine.
+PORT="${VERIFY_PORT:-$(/usr/bin/env python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')}"
 BASE="http://127.0.0.1:$PORT/api/v1"
 PASS=0
 FAIL=0
 
 ok()  { echo "  PASS  $1"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL  $1"; echo "        got: $2"; FAIL=$((FAIL + 1)); }
-cleanup() { [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null; rm -rf "$WORK"; }
+
+pg_admin() {
+  docker compose -f "$REPO_ROOT/docker-compose.dev.yml" exec -T postgres \
+    psql -U gbos -d postgres -v ON_ERROR_STOP=1 -tAc "$1"
+}
+
+cleanup() {
+  [ -n "${SRV:-}" ] && kill "$SRV" 2>/dev/null
+  if [ -n "${VERIFY_DB_CREATED:-}" ]; then
+    pg_admin "DROP DATABASE IF EXISTS \"$VERIFY_DB\" WITH (FORCE)" >/dev/null 2>&1 \
+      || echo "  note: could not drop $VERIFY_DB — drop it by hand"
+  fi
+  rm -rf "$WORK"
+}
 trap cleanup EXIT
 
 cd "$REPO_BACKEND"
-mkdir -p "$WORK/data"
 go build -o "$BIN" ./cmd/server || { echo "build failed"; exit 1; }
+
+pg_admin "CREATE DATABASE \"$VERIFY_DB\"" >/dev/null || {
+  echo "could not create $VERIFY_DB. Is the dev Postgres up? Run: make db-up"
+  exit 1
+}
+VERIFY_DB_CREATED=1
 
 echo
 echo "== 1. Configuration fails closed =="
@@ -33,7 +62,7 @@ echo "== 1. Configuration fails closed =="
 expect_refusal() {
   local desc="$1" expected="$2"; shift 2
   local out
-  out=$(env "$@" DATABASE_PATH="$DB" "$BIN" 2>&1 | head -3)
+  out=$(env "$@" DATABASE_URL="$VERIFY_DB_URL" "$BIN" 2>&1 | head -3)
   case "$out" in
     *"$expected"*) ok "$desc" ;;
     *) bad "$desc" "$out" ;;
@@ -53,7 +82,8 @@ expect_refusal "wildcard CORS is rejected in release" "CORS_ORIGIN must name an 
 
 echo
 echo "== 2. Seeded credentials =="
-GBOS_ADMIN_PASSWORD=verifypass123 DATABASE_PATH="$DB" SERVER_PORT="$PORT" "$BIN" >"$WORK/server.log" 2>&1 &
+GBOS_ADMIN_PASSWORD=verifypass123 DATABASE_URL="$VERIFY_DB_URL" SERVER_PORT="$PORT" \
+  TZ=Asia/Kolkata "$BIN" >"$WORK/server.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 40); do curl -sf "$BASE/health" >/dev/null 2>&1 && break; sleep 0.25; done
 curl -sf "$BASE/health" >/dev/null || { echo "server did not start"; cat "$WORK/server.log"; exit 1; }
@@ -84,7 +114,7 @@ echo "== 3. SQL injection through the limit parameter =="
 PAYLOAD='(SELECT 1 WHERE (SELECT substr(password_hash,1,1) FROM users)=char(36))'
 code=$(curl -s -o "$WORK/inj.json" -w '%{http_code}' -G "${AUTH[@]}" \
   --data-urlencode "store_id=$STORE" --data-urlencode "limit=$PAYLOAD" "$BASE/invoices")
-if [ "$code" = "200" ] && ! grep -qi 'syntax error\|sqlite' "$WORK/inj.json"; then
+if [ "$code" = "200" ] && ! grep -qi 'syntax error\|SQLSTATE\|pq:\|pgx' "$WORK/inj.json"; then
   ok "an injected subquery in limit is neutralised"
 else
   bad "limit injection should be neutralised" "HTTP $code $(head -c 200 "$WORK/inj.json")"

@@ -312,7 +312,7 @@ func TestRespondNilIsNoOp(t *testing.T) {
 func TestValidationFields(t *testing.T) {
 	c, rec := newTestContext(t)
 	Respond(c, Validation("", map[string]string{
-		"sku":   "this field is required",
+		"sku":   "is required",
 		"price": "must be greater than 0",
 	}))
 
@@ -323,7 +323,7 @@ func TestValidationFields(t *testing.T) {
 	if body.Error.Code != CodeValidation {
 		t.Errorf("code = %q, want %q", body.Error.Code, CodeValidation)
 	}
-	if body.Error.Fields["sku"] != "this field is required" {
+	if body.Error.Fields["sku"] != "is required" {
 		t.Errorf("fields = %v", body.Error.Fields)
 	}
 }
