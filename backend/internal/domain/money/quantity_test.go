@@ -144,6 +144,11 @@ func TestQuantityComparisonsAreExact(t *testing.T) {
 	}
 }
 
+// TestQuantityRound exercises Round on values built through QuantityFromDecimal.
+// The string constructor refuses anything finer than QuantityScale, so these
+// figures can only arise the way the billing domain makes them: as the exact
+// product of a unit quantity and a pack size, held unrounded so it can be asked
+// whether it would survive storage.
 func TestQuantityRound(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"1.2345", "1.235"}, // half away from zero
@@ -153,7 +158,8 @@ func TestQuantityRound(t *testing.T) {
 		{"2.5", "2.500"},
 	}
 	for _, tt := range tests {
-		if got := MustQuantityFromString(tt.in).Round().StringFixed(); got != tt.want {
+		exact := QuantityFromDecimal(decimal.RequireFromString(tt.in))
+		if got := exact.Round().StringFixed(); got != tt.want {
 			t.Errorf("Round(%s) = %s, want %s", tt.in, got, tt.want)
 		}
 	}

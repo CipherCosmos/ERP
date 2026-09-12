@@ -245,10 +245,11 @@ func (r *Payment) RefundsForDay(ctx context.Context, q platform.Querier, storeID
 
 // FindProcessedPayment returns a previously recorded response for an
 // idempotency key.
-func (r *Payment) FindProcessedPayment(ctx context.Context, q platform.Querier, key string) ([]byte, bool, error) {
+func (r *Payment) FindProcessedPayment(ctx context.Context, q platform.Querier, storeID uuid.UUID, key string) ([]byte, bool, error) {
 	var body []byte
 	err := q.QueryRowContext(ctx,
-		`SELECT response_body FROM processed_requests WHERE key = $1`, key).Scan(&body)
+		`SELECT response_body FROM processed_requests WHERE store_id = $1 AND key = $2`,
+		storeID, key).Scan(&body)
 	if err != nil {
 		mapped := platform.MapError(err)
 		if errors.Is(mapped, platform.ErrNotFound) {
@@ -261,13 +262,13 @@ func (r *Payment) FindProcessedPayment(ctx context.Context, q platform.Querier, 
 
 // RecordProcessedPayment stores the response for an idempotency key, inside
 // the same transaction as the payments themselves.
-func (r *Payment) RecordProcessedPayment(ctx context.Context, q platform.Querier, key, path string, status int, response any) error {
+func (r *Payment) RecordProcessedPayment(ctx context.Context, q platform.Querier, storeID uuid.UUID, key, path string, status int, response any) error {
 	body, err := json.Marshal(response)
 	if err != nil {
 		return fmt.Errorf("encode idempotent response: %w", err)
 	}
 	_, err = q.ExecContext(ctx,
-		`INSERT INTO processed_requests (key, request_path, response_status, response_body)
-		 VALUES ($1, $2, $3, $4)`, key, path, status, body)
+		`INSERT INTO processed_requests (store_id, key, request_path, response_status, response_body)
+		 VALUES ($1, $2, $3, $4, $5)`, storeID, key, path, status, body)
 	return platform.MapError(err)
 }

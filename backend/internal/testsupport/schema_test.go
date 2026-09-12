@@ -288,23 +288,46 @@ func TestDocumentSequenceAllocatesWithoutGaps(t *testing.T) {
 	}
 }
 
-func TestIdempotencyKeyRejectsReplay(t *testing.T) {
+// TestIdempotencyKeyRejectsReplayWithinAStore checks both halves of the key's
+// scope at the schema level: the same key twice in one shop is refused, and the
+// same key in two shops is not.
+//
+// The key is only unique to whoever generates it. A till numbers its requests
+// from its own counter, so "till-1-0001" is the first key every shop ever sends,
+// and a globally unique index would refuse the second shop's first sale.
+func TestIdempotencyKeyRejectsReplayWithinAStore(t *testing.T) {
 	t.Parallel()
 	pool := testsupport.Pool(t)
 	ctx := context.Background()
 
-	const key = "1f1cbb4e-2c3f-4d1a-9f9b-2c9e1a1d0001"
-	insert := `INSERT INTO processed_requests (key, request_path, response_status) VALUES ($1, '/api/v1/invoices', 201)`
+	first, _ := seedCatalogue(t, pool)
+	var second string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO stores (name) VALUES ('Second Shop') RETURNING id`).Scan(&second); err != nil {
+		t.Fatalf("seed the second store: %v", err)
+	}
 
-	if _, err := pool.Exec(ctx, insert, key); err != nil {
-		t.Fatalf("first write: %v", err)
+	const key = "till-1-0001"
+	insert := `INSERT INTO processed_requests (store_id, key, request_path, response_status)
+	           VALUES ($1, $2, '/api/v1/invoices', 201)`
+
+	if _, err := pool.Exec(ctx, insert, first, key); err != nil {
+		t.Fatalf("the first shop's write: %v", err)
 	}
-	_, err := pool.Exec(ctx, insert, key)
-	if err == nil {
-		t.Fatal("expected a replayed idempotency key to be rejected")
-	}
-	if !strings.Contains(err.Error(), "duplicate key value") {
+	if _, err := pool.Exec(ctx, insert, first, key); err == nil {
+		t.Error("the same key twice in one shop must be refused")
+	} else if !strings.Contains(err.Error(), "duplicate key value") {
 		t.Errorf("expected a unique violation, got: %v", err)
+	}
+	if _, err := pool.Exec(ctx, insert, second, key); err != nil {
+		t.Errorf("the second shop's identical key must be allowed, got: %v", err)
+	}
+
+	// And a row that names no shop is not a row, because every request names one.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO processed_requests (key, request_path, response_status)
+		 VALUES ('unattributed', '/api/v1/invoices', 201)`); err == nil {
+		t.Error("a processed request with no store must be refused")
 	}
 }
 

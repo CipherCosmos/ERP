@@ -11,10 +11,10 @@ import (
 	domain "gbos/internal/domain/billing"
 	"gbos/internal/domain/money"
 	stockdomain "gbos/internal/domain/stock"
-	platform "gbos/internal/platform/postgres"
 	service "gbos/internal/service/billing"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 // This file is about a shop on a busy day rather than about one operation at a
@@ -283,22 +283,23 @@ func TestARetryBesideTheFirstRequestGetsTheOriginalBill(t *testing.T) {
 	}
 }
 
-// TestAnIdempotencyKeyCannotReplayAnotherShopsBill guards the replay across a
-// store boundary.
+// TestAnIdempotencyKeyNeverCrossesAShopBoundary is the narrow half of the rule.
 //
-// processed_requests is keyed on the client's string alone — text, primary key,
-// nothing about who sent it — so the keys have to be globally unique for the
-// table to mean what it says. Nothing enforces that. A till sending a
+// processed_requests used to be keyed on the client's string alone — text,
+// primary key, nothing about who sent it — so the keys had to be globally unique
+// for the table to mean what it said, and nothing made them so. A till sending a
 // per-terminal counter, or two shops running the same build of the same client,
-// both land on one row; the second shop is then handed the first shop's invoice
-// with a 200 and raises no sale of its own, which loses the sale and hands over
-// another business's figures at the same time.
+// landed on one row. The second shop was handed the first shop's invoice with a
+// 200 and raised no sale of its own: a lost sale and another business's figures,
+// in one response.
 //
-// The replay is refused when it does not belong to the store asking. The other
-// store's counter and shelf never come into it: the check runs before anything
-// else, which is the point — there is no path from another shop's key to this
-// shop's answer.
-func TestAnIdempotencyKeyCannotReplayAnotherShopsBill(t *testing.T) {
+// The key is now part of a composite primary key with the store, so there is no
+// path from one shop's key to another shop's row. The wide half of the rule —
+// that the second shop still gets to make its own sale — is
+// TestTwoShopsMayUseTheSameIdempotencyKey; this one asserts only that nothing
+// leaks, using a store whose catalogue is empty so a successful sale is
+// impossible for any reason other than a replay.
+func TestAnIdempotencyKeyNeverCrossesAShopBoundary(t *testing.T) {
 	t.Parallel()
 	x := newTill(t)
 	rice := x.stockProduct("Rice", "100.00", "75.00", "50", 5, false)
@@ -311,6 +312,8 @@ func TestAnIdempotencyKeyCannotReplayAnotherShopsBill(t *testing.T) {
 		t.Fatalf("first shop's sale: %v", err)
 	}
 
+	// A second shop that has never priced this product. Whatever happens next,
+	// it must not be handed a bill.
 	var otherStore uuid.UUID
 	mustScan(t, x.db, `INSERT INTO stores (name) VALUES ('Second Shop') RETURNING id`, &otherStore)
 
@@ -320,13 +323,26 @@ func TestAnIdempotencyKeyCannotReplayAnotherShopsBill(t *testing.T) {
 		IdempotencyKey: key,
 	})
 	if err == nil {
-		t.Fatalf("the second shop was handed invoice %s", got.Invoice.InvoiceNo)
-	}
-	if !errors.Is(err, platform.ErrConflict) {
-		t.Errorf("expected a conflict telling the caller to use its own key, got %v", err)
+		t.Fatalf("the second shop was handed invoice %s for goods it does not price",
+			got.Invoice.InvoiceNo)
 	}
 	if got.Invoice.ID == first.Invoice.ID {
 		t.Error("the second shop received the first shop's invoice")
+	}
+	if got.Replayed {
+		t.Error("the second shop's request was answered as a replay")
+	}
+
+	// The first shop's sale is untouched and still replays for its owner.
+	again, err := x.sale(service.CreateInput{
+		Lines: []domain.LineInput{line(rice, "2")}, IdempotencyKey: key,
+	})
+	if err != nil {
+		t.Fatalf("the first shop's own retry: %v", err)
+	}
+	if again.Invoice.ID != first.Invoice.ID || !again.Replayed {
+		t.Errorf("the first shop's retry raised a second sale: %s then %s",
+			first.Invoice.ID, again.Invoice.ID)
 	}
 }
 
@@ -478,23 +494,32 @@ func TestAZeroQuantityLineIsRefused(t *testing.T) {
 // TestAQuantityFinerThanTheShopCanStoreIsRefused covers a quantity with more
 // decimal places than a quantity column holds.
 //
-// Quantities are numeric(14,3) — grams within a kilogram, which is as fine as
-// any stocked unit of measure is sold in. A request for 0.0006 kg is not a
-// smaller sale, it is a number the shop cannot record: the bill would be
-// computed from 0.0006 and stored as 0.001, so the line's own total would not
-// equal its rate times its printed quantity, and the two figures would disagree
-// for ever afterwards.
+// Quantities are numeric(14,3) — grams within a kilogram, which is as fine as any
+// stocked unit of measure is sold in. A request for 0.0006 kg is not a smaller
+// sale, it is a number the shop cannot record: the bill would be computed from
+// 0.0006 and stored as 0.001, so the line's own total would not equal its rate
+// times its printed quantity, and the two would disagree for ever afterwards.
 //
-// stock.ValidateMovement already refuses this on the movement side. The sale
-// has to refuse it on the way in, by name, rather than let it through to a
-// confusing failure deeper down or to a rounded line nobody asked for.
+// There are two guards and this checks both. A quantity arriving from outside is
+// refused when it is parsed, which is why the figure has to be built through
+// QuantityFromDecimal to get this far at all. The billing domain refuses it again
+// on the way in, which is what catches a figure computed rather than received —
+// and the multiplication of a unit quantity by a pack size is exactly that.
 func TestAQuantityFinerThanTheShopCanStoreIsRefused(t *testing.T) {
 	t.Parallel()
 	x := newTill(t)
 	rice := x.stockProduct("Rice", "100.00", "75.00", "50", 5, true)
 
+	// The outer guard: a client cannot even send it.
+	if _, err := money.QuantityFromString("0.0006"); err == nil {
+		t.Error("0.0006 parsed as a quantity; it cannot be stored as written")
+	}
+
+	// The inner guard, reached the only way it can be: a figure constructed
+	// without the parse check, as the pack-size multiplication produces.
+	tooFine := money.QuantityFromDecimal(decimal.RequireFromString("0.0006"))
 	if _, err := x.sale(service.CreateInput{
-		Lines: []domain.LineInput{line(rice, "0.0006")},
+		Lines: []domain.LineInput{{ProductID: rice, UnitQty: tooFine}},
 	}); !errors.Is(err, domain.ErrValidation) {
 		t.Errorf("a quantity of 0.0006 should be a validation error, got %v", err)
 	}
@@ -506,7 +531,11 @@ func TestAQuantityFinerThanTheShopCanStoreIsRefused(t *testing.T) {
 	pouchUnit := x.sellingUnit(pouch, "250 g pouch", "0.25", "40.00", true)
 	x.stockOnHand(pouch, "50", "30.00")
 	if _, err := x.sale(service.CreateInput{
-		Lines: []domain.LineInput{unitLine(pouch, pouchUnit, "1.0006")},
+		Lines: []domain.LineInput{{
+			ProductID:     pouch,
+			ProductUnitID: pouchUnit,
+			UnitQty:       money.QuantityFromDecimal(decimal.RequireFromString("1.0006")),
+		}},
 	}); !errors.Is(err, domain.ErrValidation) {
 		t.Errorf("1.0006 pouches should be a validation error, got %v", err)
 	}

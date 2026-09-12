@@ -81,6 +81,16 @@ func FromBinding(err error) *Error {
 		}).Wrap(err)
 	}
 
+	// A domain type whose UnmarshalJSON refuses a value can say why. Without
+	// this arm the reason is flattened to "the request could not be processed",
+	// which tells a shopkeeper entering a 0.5 g pack size nothing they can act
+	// on. The interface is declared here rather than imported, so the domain
+	// does not depend on the HTTP layer to be understood by it.
+	var describable interface{ ClientMessage() string }
+	if errors.As(err, &describable) {
+		return BadRequest(describable.ClientMessage()).Wrap(err)
+	}
+
 	var syntaxErr *json.SyntaxError
 	if errors.As(err, &syntaxErr) {
 		return BadRequest("The request body is not valid JSON.").Wrap(err)

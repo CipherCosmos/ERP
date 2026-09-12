@@ -38,6 +38,13 @@ type Quantity struct {
 func ZeroQuantity() Quantity { return Quantity{} }
 
 // QuantityFromString parses a plain decimal string such as "2.5" or "0.750".
+//
+// A value finer than QuantityScale is refused, not rounded. Every quantity column
+// is NUMERIC(_, 3) and Value renders three places, so a fourth decimal does not
+// survive the round trip: a 0.5 g pack size entered as 0.0005 was stored as
+// 0.001, doubling every sale of it with no error anywhere. Refusing is the only
+// answer that tells somebody, and the remedy is a finer base unit of measure —
+// grams instead of kilograms — which is an INSERT, because units are rows.
 func QuantityFromString(s string) (Quantity, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -47,7 +54,42 @@ func QuantityFromString(s string) (Quantity, error) {
 	if err != nil {
 		return Quantity{}, fmt.Errorf("money: cannot parse %q as a quantity: %w", s, err)
 	}
+	return quantityWithinScale(d, s)
+}
+
+// quantityWithinScale wraps a decimal, refusing one that carries more decimal
+// places than a quantity can hold. literal is what the caller wrote, so the error
+// can quote it back.
+func quantityWithinScale(d decimal.Decimal, literal string) (Quantity, error) {
+	if d.Exponent() < -QuantityScale && !d.Equal(d.Round(QuantityScale)) {
+		return Quantity{}, scaleError{literal: literal, places: int(-d.Exponent())}
+	}
 	return Quantity{d: d}, nil
+}
+
+// scaleError is returned when a value arrives finer than it can be stored.
+//
+// It carries a client message of its own because the alternative is what the HTTP
+// layer does with an unrecognised binding error: flatten it to "the request could
+// not be processed", which tells a shopkeeper entering a 0.5 g sachet nothing at
+// all. The ClientMessage method is the whole point; httperr looks for it.
+type scaleError struct {
+	literal string
+	places  int
+}
+
+func (e scaleError) Error() string {
+	return fmt.Sprintf("money: %s has %d decimal places and a quantity holds %d",
+		e.literal, e.places, QuantityScale)
+}
+
+// ClientMessage renders the problem for whoever typed the value.
+func (e scaleError) ClientMessage() string {
+	return fmt.Sprintf(
+		"%s is finer than a quantity can be recorded to: %d decimal places, and stock is counted to %d. "+
+			"Storing it would round it silently. Use a smaller unit of measure — grams rather than kilograms — "+
+			"so the figure is a whole number of them.",
+		e.literal, e.places, QuantityScale)
 }
 
 // MustQuantityFromString is QuantityFromString for values known good at compile
@@ -63,7 +105,14 @@ func MustQuantityFromString(s string) Quantity {
 // QuantityFromInt returns a whole-unit quantity.
 func QuantityFromInt(units int64) Quantity { return Quantity{d: decimal.NewFromInt(units)} }
 
-// QuantityFromDecimal wraps a decimal.Decimal without rounding it.
+// QuantityFromDecimal wraps a decimal.Decimal without rounding it, and without
+// the scale check the string and JSON constructors apply.
+//
+// It is the deliberate door for a figure computed rather than received: the exact
+// product of a unit quantity and a pack size, held unrounded precisely so the
+// caller can ask whether it would survive being stored. See validateLine in the
+// billing domain, which is what it exists for. Do not use it for anything
+// arriving from outside.
 func QuantityFromDecimal(d decimal.Decimal) Quantity { return Quantity{d: d} }
 
 // SumQuantity adds any number of quantities exactly.
@@ -246,13 +295,21 @@ func (q *Quantity) UnmarshalJSON(data []byte) error {
 		if err != nil {
 			return fmt.Errorf("money: cannot parse %q as a quantity: %w", str, err)
 		}
-		*q = Quantity{d: d}
+		parsed, err := quantityWithinScale(d, str)
+		if err != nil {
+			return err
+		}
+		*q = parsed
 		return nil
 	}
 	d, err := decimal.NewFromString(s)
 	if err != nil {
 		return fmt.Errorf("money: cannot parse %s as a quantity: %w", s, err)
 	}
-	*q = Quantity{d: d}
+	parsed, err := quantityWithinScale(d, s)
+	if err != nil {
+		return err
+	}
+	*q = parsed
 	return nil
 }

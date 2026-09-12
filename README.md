@@ -234,20 +234,14 @@ bash scripts/restore-drill.sh            # prove a backup restores. Safe; never 
 
 ## Known judgement calls
 
-Three decisions deliberately left open rather than made quietly:
+One decision deliberately left as it is, rather than changed quietly:
 
-1. **Idempotency keys are scoped by check, not by key.** A mismatched store now
-   gets a 409 rather than another shop's invoice, but the primary key is still
-   the raw client string. The clean fix is a composite `(store_id, key)`, which
-   is a migration that has to decide what happens to retries in flight across
-   the deploy.
-2. **A unit size with a fourth decimal is refused**, not rounded. `qty_in_base`
-   is `numeric(14,4)` while quantities are `numeric(14,3)`. Refusing is
-   consistent with the rule against silent tolerances, but it makes such a pack
-   unsellable rather than slightly wrong. The alternative is widening quantities.
-3. **Rejected goods close a purchase order.** The goods came, they were refused,
-   nothing more is coming — which is the documented convention and is pinned by
-   a test. Some trades expect a short receipt to leave the order open.
+**Rejected goods close a purchase order.** The goods came, they were refused,
+nothing more is coming. The remedy is a debit note or a purchase return, not a
+line left open waiting for a replacement nobody promised. This is the documented
+convention and a test pins it. Some trades instead expect a short receipt to
+leave the order open; changing it would mean deciding what happens to the orders
+already closed under the current rule, so it stays until somebody needs it.
 
 ## Licence
 

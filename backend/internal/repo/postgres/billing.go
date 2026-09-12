@@ -458,10 +458,15 @@ func (r *Billing) GetCustomerForSale(ctx context.Context, q platform.Querier, st
 }
 
 // FindProcessed returns a previously recorded response for an idempotency key.
-func (r *Billing) FindProcessed(ctx context.Context, q platform.Querier, key string) ([]byte, bool, error) {
+//
+// The store is part of the lookup because it is part of the key. A client only
+// has to make its keys unique to itself, and the keys a till generates are
+// per-terminal counters, so two shops both produce "till-1-0001".
+func (r *Billing) FindProcessed(ctx context.Context, q platform.Querier, storeID uuid.UUID, key string) ([]byte, bool, error) {
 	var body []byte
 	err := q.QueryRowContext(ctx,
-		`SELECT response_body FROM processed_requests WHERE key = $1`, key).Scan(&body)
+		`SELECT response_body FROM processed_requests WHERE store_id = $1 AND key = $2`,
+		storeID, key).Scan(&body)
 	if err != nil {
 		mapped := platform.MapError(err)
 		if errors.Is(mapped, platform.ErrNotFound) {
@@ -478,13 +483,13 @@ func (r *Billing) FindProcessed(ctx context.Context, q platform.Querier, key str
 // the guarantee real: a replayed request cannot be applied twice, because
 // applying it and recording that it was applied either both happen or neither
 // does. A cache outside the transaction could not promise that.
-func (r *Billing) RecordProcessed(ctx context.Context, q platform.Querier, key, path string, status int, response any) error {
+func (r *Billing) RecordProcessed(ctx context.Context, q platform.Querier, storeID uuid.UUID, key, path string, status int, response any) error {
 	body, err := json.Marshal(response)
 	if err != nil {
 		return fmt.Errorf("encode idempotent response: %w", err)
 	}
 	_, err = q.ExecContext(ctx,
-		`INSERT INTO processed_requests (key, request_path, response_status, response_body)
-		 VALUES ($1, $2, $3, $4)`, key, path, status, body)
+		`INSERT INTO processed_requests (store_id, key, request_path, response_status, response_body)
+		 VALUES ($1, $2, $3, $4, $5)`, storeID, key, path, status, body)
 	return platform.MapError(err)
 }

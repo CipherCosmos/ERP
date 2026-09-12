@@ -59,8 +59,8 @@ type Repository interface {
 	SalesForDay(ctx context.Context, q platform.Querier, storeID uuid.UUID, day string) (repo.DaySales, error)
 	TendersForDay(ctx context.Context, q platform.Querier, storeID uuid.UUID, day string) ([]domain.TenderGroup, error)
 
-	FindProcessedPayment(ctx context.Context, q platform.Querier, key string) ([]byte, bool, error)
-	RecordProcessedPayment(ctx context.Context, q platform.Querier, key, path string, status int, response any) error
+	FindProcessedPayment(ctx context.Context, q platform.Querier, storeID uuid.UUID, key string) ([]byte, bool, error)
+	RecordProcessedPayment(ctx context.Context, q platform.Querier, storeID uuid.UUID, key, path string, status int, response any) error
 }
 
 // RefundReader is the part of the returns aggregate the settlement report
@@ -167,7 +167,7 @@ func (s *Service) Settle(ctx context.Context, in SettleInput) (Result, error) {
 	}
 
 	if in.IdempotencyKey != "" {
-		if replayed, found, err := s.replay(ctx, in.InvoiceID, in.IdempotencyKey); err != nil {
+		if replayed, found, err := s.replay(ctx, in.StoreID, in.InvoiceID, in.IdempotencyKey); err != nil {
 			return Result{}, err
 		} else if found {
 			return replayed, nil
@@ -223,7 +223,7 @@ func (s *Service) settle(ctx context.Context, tx platform.Tx, in SettleInput) (R
 	// processed_requests row is committed and visible by the time the loser
 	// reaches this line.
 	if in.IdempotencyKey != "" {
-		replayed, found, err := s.replayIn(ctx, tx, in.InvoiceID, in.IdempotencyKey)
+		replayed, found, err := s.replayIn(ctx, tx, in.StoreID, in.InvoiceID, in.IdempotencyKey)
 		if err != nil {
 			return Result{}, err
 		}
@@ -250,7 +250,7 @@ func (s *Service) settle(ctx context.Context, tx platform.Tx, in SettleInput) (R
 
 	out := Result{InvoiceID: inv.ID, Total: inv.Total, Payments: payments}
 	if in.IdempotencyKey != "" {
-		if err := s.repo.RecordProcessedPayment(ctx, tx, in.IdempotencyKey, "/api/v1/payments/split", 201, out); err != nil {
+		if err := s.repo.RecordProcessedPayment(ctx, tx, in.StoreID, in.IdempotencyKey, "/api/v1/payments/split", 201, out); err != nil {
 			if errors.Is(err, platform.ErrConflict) {
 				// Another request with this key committed first. Its
 				// settlement stands and this one must not.
@@ -264,16 +264,16 @@ func (s *Service) settle(ctx context.Context, tx platform.Tx, in SettleInput) (R
 
 // replay looks a key up through the pool, before any transaction is open. It
 // answers the retry that arrives after the original committed.
-func (s *Service) replay(ctx context.Context, invoiceID uuid.UUID, key string) (Result, bool, error) {
-	return s.replayIn(ctx, s.db, invoiceID, key)
+func (s *Service) replay(ctx context.Context, storeID, invoiceID uuid.UUID, key string) (Result, bool, error) {
+	return s.replayIn(ctx, s.db, storeID, invoiceID, key)
 }
 
 // replayIn is replay against a caller-chosen querier, so the same lookup can be
 // made inside the settling transaction where the invoice lock has already
 // serialised the competing attempt. See settle for why that second lookup
 // exists.
-func (s *Service) replayIn(ctx context.Context, q platform.Querier, invoiceID uuid.UUID, key string) (Result, bool, error) {
-	body, found, err := s.repo.FindProcessedPayment(ctx, q, key)
+func (s *Service) replayIn(ctx context.Context, q platform.Querier, storeID, invoiceID uuid.UUID, key string) (Result, bool, error) {
+	body, found, err := s.repo.FindProcessedPayment(ctx, q, storeID, key)
 	if err != nil {
 		return Result{}, false, fmt.Errorf("check idempotency key: %w", err)
 	}
@@ -285,12 +285,11 @@ func (s *Service) replayIn(ctx context.Context, q platform.Querier, invoiceID uu
 		return Result{}, false, fmt.Errorf("decode replayed response: %w", err)
 	}
 	if out.InvoiceID != invoiceID {
-		// processed_requests is keyed on the client's string alone, so a till
-		// that reuses a key — or two shops whose keys are not globally unique —
-		// lands on a row belonging to a different bill. Answering with it would
-		// report somebody else's settlement as this one's and silently leave
-		// this invoice unpaid. Refuse, so the caller retries under a key of its
-		// own.
+		// The key is scoped to the store, so this can no longer be another
+		// shop's row — but it can still be another *bill* of this shop's, from a
+		// till that reused its own key. Answering with it would report one
+		// settlement as another's and silently leave this invoice unpaid, so
+		// refuse and let the caller retry under a key it has not spent.
 		return Result{}, false, fmt.Errorf(
 			"%w: idempotency key %q was already used to settle another invoice", platform.ErrConflict, key)
 	}

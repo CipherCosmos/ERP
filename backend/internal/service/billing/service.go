@@ -55,8 +55,8 @@ type Repository interface {
 	ProductsForSale(ctx context.Context, q platform.Querier, storeID uuid.UUID, ids []uuid.UUID) (map[uuid.UUID]repo.SaleProduct, error)
 	GetCustomerForSale(ctx context.Context, q platform.Querier, storeID, customerID uuid.UUID) (repo.CustomerForSale, error)
 
-	FindProcessed(ctx context.Context, q platform.Querier, key string) ([]byte, bool, error)
-	RecordProcessed(ctx context.Context, q platform.Querier, key, path string, status int, response any) error
+	FindProcessed(ctx context.Context, q platform.Querier, storeID uuid.UUID, key string) ([]byte, bool, error)
+	RecordProcessed(ctx context.Context, q platform.Querier, storeID uuid.UUID, key, path string, status int, response any) error
 }
 
 // StockMover is the part of the stock aggregate a sale needs: take goods out
@@ -203,14 +203,17 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Result, error) {
 
 // replay returns the sale a previous request with this key raised.
 //
-// The store is checked rather than assumed. processed_requests is keyed on the
-// client's string alone, so two shops whose tills both send "1" — or any key
-// that is not globally unique — land on the same row. Replaying it across the
-// boundary would hand one shop a copy of another's invoice and silently drop
-// the sale that was actually asked for; refusing tells the caller to use a key
-// of its own, which is the only thing it can act on.
+// The key is scoped to the store, in the primary key of processed_requests, so
+// there is nothing to check here: another shop's "till-1-0001" is a different
+// row and this lookup cannot reach it.
+//
+// That scoping replaced a check. The key space used to be global, and a shop
+// whose key another shop had already used was refused — at the till, with a
+// customer waiting, for a collision it could neither see nor avoid. A till
+// numbering its requests has no other key to offer. Making the two rows distinct
+// is the only answer that lets both sales happen.
 func (s *Service) replay(ctx context.Context, storeID uuid.UUID, key string) (Result, bool, error) {
-	body, found, err := s.repo.FindProcessed(ctx, s.db, key)
+	body, found, err := s.repo.FindProcessed(ctx, s.db, storeID, key)
 	if err != nil {
 		return Result{}, false, fmt.Errorf("check idempotency key: %w", err)
 	}
@@ -220,10 +223,6 @@ func (s *Service) replay(ctx context.Context, storeID uuid.UUID, key string) (Re
 	var out Result
 	if err := json.Unmarshal(body, &out); err != nil {
 		return Result{}, false, fmt.Errorf("decode replayed response: %w", err)
-	}
-	if out.Invoice.StoreID != storeID {
-		return Result{}, false, fmt.Errorf(
-			"%w: idempotency key %q was already used by another store's request", platform.ErrConflict, key)
 	}
 	out.Replayed = true
 	return out, true, nil
@@ -325,7 +324,7 @@ func (s *Service) create(ctx context.Context, tx platform.Tx, in CreateInput) (R
 
 	out := Result{Invoice: inv, Items: items}
 	if in.IdempotencyKey != "" {
-		if err := s.repo.RecordProcessed(ctx, tx, in.IdempotencyKey, "/api/v1/invoices", 201, out); err != nil {
+		if err := s.repo.RecordProcessed(ctx, tx, in.StoreID, in.IdempotencyKey, "/api/v1/invoices", 201, out); err != nil {
 			if errors.Is(err, platform.ErrConflict) {
 				// Another request with this key committed first. Its sale
 				// stands and this one must not, so the whole transaction goes
