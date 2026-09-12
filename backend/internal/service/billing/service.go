@@ -385,7 +385,14 @@ func (s *Service) priceLines(ctx context.Context, tx platform.Tx, in CreateInput
 				ErrPriceChanged, p.Name, unit.Label, rate, *l.Rate)
 		}
 
-		priced[i] = domain.PricedLine{LineInput: l, Unit: unit, Rate: rate, GSTRate: p.GSTRate}
+		priced[i] = domain.PricedLine{
+			LineInput:   l,
+			Unit:        unit,
+			Rate:        rate,
+			Description: p.Name,
+			HSNCode:     p.HSNCode,
+			GSTRate:     p.GSTRate,
+		}
 	}
 	return priced, nil
 }
@@ -503,6 +510,9 @@ func (s *Service) deductStock(ctx context.Context, tx platform.Tx, in CreateInpu
 			ID:            uuid.New(),
 			InvoiceID:     invoiceID,
 			ProductID:     l.ProductID,
+			ProductName:   l.Description,
+			HSNCode:       l.HSNCode,
+			GSTRate:       l.GSTRate,
 			BatchNo:       batch,
 			ProductUnitID: l.Unit.ID,
 			UnitQty:       l.UnitQty,

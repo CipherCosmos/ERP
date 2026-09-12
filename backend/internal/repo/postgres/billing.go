@@ -69,6 +69,10 @@ func (r *Billing) InsertInvoice(ctx context.Context, q platform.Querier, inv bil
 
 // InsertItems writes the invoice lines.
 //
+// The description, HSN code and tax rate are written onto the line rather than
+// left to a join, so a reprint is a copy of the document that was issued and
+// not a rendering of today's catalogue.
+//
 // Both quantities are written. unit_qty and product_unit_id are what the
 // customer asked for and what the bill prints; quantity is the same amount in
 // the product's base stocking unit, which is what stock, COGS and every
@@ -78,10 +82,12 @@ func (r *Billing) InsertInvoice(ctx context.Context, q platform.Querier, inv bil
 func (r *Billing) InsertItems(ctx context.Context, q platform.Querier, items []billing.Item) error {
 	for _, it := range items {
 		if _, err := q.ExecContext(ctx,
-			`INSERT INTO invoice_items (id, invoice_id, product_id, batch_no, product_unit_id,
+			`INSERT INTO invoice_items (id, invoice_id, product_id, description, hsn_code,
+				gst_rate, batch_no, product_unit_id,
 				unit_qty, quantity, rate, discount, cgst, sgst, igst, total, unit_cost_at_sale)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			it.ID, it.InvoiceID, it.ProductID, it.BatchNo, nullIfNilUUID(it.ProductUnitID),
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+			it.ID, it.InvoiceID, it.ProductID, it.ProductName, it.HSNCode,
+			it.GSTRate, it.BatchNo, nullIfNilUUID(it.ProductUnitID),
 			it.UnitQty, it.Quantity, it.Rate,
 			it.Discount, it.CGST, it.SGST, it.IGST, it.Total, it.UnitCostAtSale); err != nil {
 			return platform.MapError(err)
@@ -113,22 +119,24 @@ func (r *Billing) LockInvoice(ctx context.Context, q platform.Querier, storeID, 
 
 // ItemsForInvoice returns an invoice's lines.
 //
-// The unit is joined in so a bill can print "2 x 25 kg sack" rather than "50".
-// The join is a LEFT one and product_unit_id is read as a nullable: the column
-// was added by migration to a table that already had rows, and although the
-// backfill set every one of them to the product's default unit, a LEFT JOIN is
-// what keeps a line with no unit readable rather than invisible.
+// Description, HSN code and tax rate come off the line, not from the catalogue:
+// they are what the document said, and the catalogue has moved on since.
+//
+// The unit label is joined in so a bill can print "2 x 25 kg sack" rather than
+// "50". That one is deliberately not snapshotted — renaming "sack" to "gunny"
+// renames it everywhere rather than forking it per bill, and no figure moves
+// with it. The join is a LEFT one and product_unit_id is read as a nullable:
+// the column was added by migration to a table that already had rows, and
+// although the backfill set every one of them to the product's default unit, a
+// LEFT JOIN is what keeps a line with no unit readable rather than invisible.
 func (r *Billing) ItemsForInvoice(ctx context.Context, q platform.Querier, invoiceID uuid.UUID) ([]billing.Item, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT ii.id, ii.invoice_id, ii.product_id, COALESCE(p.name, ''), COALESCE(ii.batch_no, ''),
+		`SELECT ii.id, ii.invoice_id, ii.product_id, ii.description, ii.hsn_code, ii.gst_rate,
+			COALESCE(ii.batch_no, ''),
 			ii.product_unit_id, COALESCE(pu.label, ''), ii.unit_qty, ii.quantity, ii.rate,
 			ii.discount, ii.cgst, ii.sgst, ii.igst, ii.total, ii.unit_cost_at_sale
 		   FROM invoice_items ii
 		   LEFT JOIN product_units pu ON pu.id = ii.product_unit_id
-		   -- LEFT JOIN, not JOIN: product_id is ON DELETE RESTRICT so a row
-		   -- should always match, but a line that somehow lost its product must
-		   -- still appear on the bill it was charged on.
-		   LEFT JOIN products p ON p.id = ii.product_id
 		  WHERE ii.invoice_id = $1 ORDER BY ii.created_at, ii.id`, invoiceID)
 	if err != nil {
 		return nil, platform.MapError(err)
@@ -139,7 +147,8 @@ func (r *Billing) ItemsForInvoice(ctx context.Context, q platform.Querier, invoi
 	for rows.Next() {
 		var it billing.Item
 		var unitID uuid.NullUUID
-		if err := rows.Scan(&it.ID, &it.InvoiceID, &it.ProductID, &it.ProductName, &it.BatchNo,
+		if err := rows.Scan(&it.ID, &it.InvoiceID, &it.ProductID, &it.ProductName,
+			&it.HSNCode, &it.GSTRate, &it.BatchNo,
 			&unitID, &it.UnitLabel, &it.UnitQty, &it.Quantity,
 			&it.Rate, &it.Discount, &it.CGST, &it.SGST, &it.IGST, &it.Total, &it.UnitCostAtSale); err != nil {
 			return nil, fmt.Errorf("scan invoice item: %w", platform.MapError(err))
@@ -329,8 +338,11 @@ func (r *Billing) StoreGSTINForBilling(ctx context.Context, q platform.Querier, 
 // because one price per product forces a 25 kg sack to cost exactly 25 times
 // the loose kilo — and a wholesaler's entire trade is that it does not.
 type SaleProduct struct {
-	ID           uuid.UUID
-	Name         string
+	ID   uuid.UUID
+	Name string
+	// HSNCode and GSTRate are copied onto each invoice line, so the document
+	// keeps the classification and rate it was issued under.
+	HSNCode      string
 	GSTRate      money.Rate
 	AllowDecimal bool
 	IsActive     bool
@@ -376,7 +388,7 @@ func (r *Billing) ProductsForSale(ctx context.Context, q platform.Querier, store
 	// up still comes back — as a product with no units, which the caller
 	// refuses by name rather than reporting as an unknown product.
 	rows, err := q.QueryContext(ctx,
-		`SELECT p.id, p.name, p.gst_rate, p.allow_decimal, p.is_active,
+		`SELECT p.id, p.name, COALESCE(p.hsn_code, ''), p.gst_rate, p.allow_decimal, p.is_active,
 		        pu.id, COALESCE(pu.label, ''), COALESCE(pu.qty_in_base, 0),
 		        COALESCE(pu.is_default, false), COALESCE(pu.is_sellable, false),
 		        COALESCE(pu.is_active, false),
@@ -398,7 +410,7 @@ func (r *Billing) ProductsForSale(ctx context.Context, q platform.Querier, store
 		var p SaleProduct
 		var u SaleUnit
 		var unitID uuid.NullUUID
-		if err := rows.Scan(&p.ID, &p.Name, &p.GSTRate, &p.AllowDecimal, &p.IsActive,
+		if err := rows.Scan(&p.ID, &p.Name, &p.HSNCode, &p.GSTRate, &p.AllowDecimal, &p.IsActive,
 			&unitID, &u.Label, &u.QtyInBase, &u.IsDefault, &u.IsSellable, &u.IsActive,
 			&u.HasPrice, &u.SellPrice, &u.WholesalePrice); err != nil {
 			return nil, fmt.Errorf("scan sale product: %w", platform.MapError(err))

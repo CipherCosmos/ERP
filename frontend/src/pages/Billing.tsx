@@ -508,22 +508,11 @@ export default function Billing() {
 
       checkoutKey.current = '';
 
-      // Print receipt
       // The server's lines, not the cart: the paper the customer holds has to
-      // match the books. HSN is not on the line, so it comes from the product
-      // the counter already has loaded.
-      const printed = ((data as any).items ?? []).map((l: any) => {
-        const p = products.find((x) => x.id === l.product_id);
-        return {
-          ...l,
-          // POST /invoices returns product_name empty — only the GET path joins
-          // it — and HSN is not on the line at all. Both come from the
-          // catalogue already in hand so the paper is complete either way.
-          product_name: l.product_name || p?.name || '',
-          hsn_code: (p as any)?.hsn_code ?? '',
-        };
-      });
-      printReceipt(invoice, printed);
+      // match the books. Each line carries its own description, HSN code and
+      // tax rate, snapshotted when the sale was written, so the receipt needs
+      // no lookup against a catalogue that may since have changed.
+      printReceipt(invoice, (data as any).items ?? []);
 
       clearCart();
       setPaymentMode('cash');

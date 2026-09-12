@@ -99,11 +99,18 @@ type Item struct {
 	ID        uuid.UUID `json:"id"`
 	InvoiceID uuid.UUID `json:"invoice_id"`
 	ProductID uuid.UUID `json:"product_id"`
-	// ProductName rides along on the read paths, as UnitLabel does. Without it
-	// a bill prints a uuid where the goods should be named, which is no use to
-	// the customer holding it or to anyone answering a query about it later.
+	// ProductName is the description of the goods as it appeared on the
+	// document, snapshotted when the line was written. It is NOT read back
+	// from the catalogue: renaming a product must not rewrite the bills it
+	// was already sold on, and CGST Rule 46 wants the description on the
+	// invoice rather than derivable from it.
 	ProductName string `json:"product_name"`
-	BatchNo     string `json:"batch_no"`
+	// HSNCode and GSTRate are snapshotted for the same reason, and GSTRate
+	// more urgently: rates change by notification, and a reprint at today's
+	// rate would understate tax the shop has already collected.
+	HSNCode string     `json:"hsn_code"`
+	GSTRate money.Rate `json:"gst_rate"`
+	BatchNo string     `json:"batch_no"`
 
 	// ProductUnitID and UnitQty are what the customer actually asked for, and
 	// what the bill prints: two 25 kg sacks rather than fifty of something.
@@ -195,8 +202,12 @@ type PricedLine struct {
 	// charged. It is per selling unit, never per base unit — a rate per kilo
 	// derived from a sack's price is 41.999... and a bill built on it is short.
 	Rate money.Money
-	// GSTRate comes from the product record, never from the request.
-	GSTRate money.Rate
+	// Description, HSNCode and GSTRate come from the product record, never from
+	// the request, and are copied onto the invoice line so the document keeps
+	// the particulars it was issued with.
+	Description string
+	HSNCode     string
+	GSTRate     money.Rate
 }
 
 // Quantity is what leaves the shelf, in the product's base stocking unit.

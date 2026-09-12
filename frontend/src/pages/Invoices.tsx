@@ -28,6 +28,10 @@ interface InvoiceLine {
   id: string;
   product_id: string;
   product_name: string;
+  // Snapshotted on the line when the bill was raised, so this view shows the
+  // document as issued rather than the catalogue as it stands now.
+  hsn_code: string;
+  gst_rate: number;
   batch_no: string;
   product_unit_id: string;
   unit_qty: number;
@@ -283,6 +287,7 @@ export default function Invoices() {
                   <th style={{ ...styles.lth, textAlign: 'right' }}>Qty</th>
                   <th style={{ ...styles.lth, textAlign: 'right' }}>Rate</th>
                   <th style={{ ...styles.lth, textAlign: 'right' }}>GST</th>
+                  <th style={{ ...styles.lth, textAlign: 'right' }}>Rate %</th>
                   <th style={{ ...styles.lth, textAlign: 'right' }}>Amount</th>
                 </tr>
               </thead>
@@ -291,6 +296,13 @@ export default function Invoices() {
                   <tr key={it.id} style={styles.ltr}>
                     <td style={styles.ltd}>
                       <div style={{ fontWeight: 600 }}>{it.product_name || it.product_id.slice(0, 8)}</div>
+                      {/* HSN belongs on a tax invoice, so it belongs on the
+                          copy of one. A line with none is flagged rather than
+                          left blank: the gap is in the product record, and
+                          somebody has to know to go and fill it in. */}
+                      <div style={styles.sub}>
+                        {it.hsn_code ? `HSN ${it.hsn_code}` : 'HSN missing'}
+                      </div>
                       {it.batch_no && <div style={styles.sub}>batch {it.batch_no}</div>}
                     </td>
                     <td style={{ ...styles.ltd, ...ui.numeric }}>
@@ -305,12 +317,15 @@ export default function Invoices() {
                     <td style={{ ...styles.ltd, ...ui.numeric }}>
                       {formatMoney((it.cgst || 0) + (it.sgst || 0) + (it.igst || 0))}
                     </td>
+                    {/* The rate charged on this document, not the product's
+                        rate today — GST rates move by notification. */}
+                    <td style={{ ...styles.ltd, ...ui.numeric }}>{it.gst_rate ?? 0}%</td>
                     <td style={{ ...styles.ltd, ...ui.numeric, fontWeight: 600 }}>{formatMoney(it.total)}</td>
                   </tr>
                 ))}
                 {!detailLoading && (detail?.items?.length ?? 0) === 0 && (
                   <tr>
-                    <td colSpan={5} style={{ padding: space.xl, textAlign: 'center', color: color.textMuted }}>
+                    <td colSpan={6} style={{ padding: space.xl, textAlign: 'center', color: color.textMuted }}>
                       This bill has no lines.
                     </td>
                   </tr>
