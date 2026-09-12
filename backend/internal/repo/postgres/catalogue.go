@@ -1291,6 +1291,17 @@ func (r *Catalogue) FindProductByBarcode(ctx context.Context, q platform.Querier
 		`SELECT `+plainProductColumns+` FROM products WHERE barcode = $1`, barcode))
 }
 
+// FindProductByID returns one product, active or not, without a store.
+//
+// GetProduct is the read model the screens use and needs a store to price and
+// count against. This is the bare row, for the rules that are about the product
+// itself: what it is called, which category it is in.
+func (r *Catalogue) FindProductByID(ctx context.Context, q platform.Querier,
+	id uuid.UUID) (catalogue.Product, bool, error) {
+	return oneProduct(q.QueryRowContext(ctx,
+		`SELECT `+plainProductColumns+` FROM products WHERE id = $1`, id))
+}
+
 // FindProductByName returns an active product with this name in this category.
 // It is how a row without a barcode is matched — which is most of them, because
 // a shop's own sheet rarely carries one.

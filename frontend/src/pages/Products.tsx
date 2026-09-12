@@ -94,6 +94,10 @@ export default function Products() {
   const [unitDraft, setUnitDraft] = useState<Partial<UnitRow> | null>(null);
   const [unitError, setUnitError] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState<{ unit: UnitRow; sell: string; wholesale: string; mrp: string; cost: string; note: string } | null>(null);
+  // Errors from the two actions that used to raise a blocking alert. At a
+  // counter a dialog nobody can dismiss without reading is a queue, and an
+  // alert also throws away the server's own sentence the moment it is closed.
+  const [priceError, setPriceError] = useState<string | null>(null);
 
   /**
    * How many rows the server will return at most.
@@ -406,7 +410,7 @@ export default function Products() {
       setHistory(null);
       await refreshEditing();
     } catch (err: any) {
-      window.alert(err?.response?.data?.error || 'Could not save this price.');
+      setPriceError(err?.response?.data?.error || 'Could not save this price.');
     } finally {
       setBusy(false);
     }
@@ -414,11 +418,14 @@ export default function Products() {
 
   const makeDefault = async (u: UnitRow) => {
     if (!editing) return;
+    setUnitError(null);
     try {
       await productApi.setDefaultUnit(editing.id, u.id);
       await refreshEditing();
     } catch (err: any) {
-      window.alert(err?.response?.data?.error || 'Could not change the default unit.');
+      // The server refuses a unit that is inactive or not sellable and says
+      // which, so this lands beside the units it is about.
+      setUnitError(err?.response?.data?.error || 'Could not change the default unit.');
     }
   };
 
@@ -871,7 +878,9 @@ export default function Products() {
                       <td style={{ ...styles.utd, textAlign: 'right', whiteSpace: 'nowrap' }}>
                         <button
                           style={{ ...ui.button, padding: '0.125rem 0.5rem', fontSize: font.size.xs }}
-                          onClick={() =>
+                          onClick={() => {
+                            setUnitError(null);
+                            setPriceError(null);
                             setPriceDraft({
                               note: '',
                               unit,
@@ -879,8 +888,8 @@ export default function Products() {
                               wholesale: String(price?.wholesale_sell_price ?? 0),
                               mrp: String(price?.mrp ?? 0),
                               cost: String(price?.cost_price ?? 0),
-                            })
-                          }
+                            });
+                          }}
                         >
                           Price
                         </button>{' '}
@@ -993,14 +1002,28 @@ export default function Products() {
             : undefined
         }
         width="34rem"
-        onClose={() => setPriceDraft(null)}
+        onClose={() => {
+          setPriceDraft(null);
+          setPriceError(null);
+        }}
         footer={
           <>
-            <button style={ui.button} onClick={() => setPriceDraft(null)} disabled={busy}>Cancel</button>
+            <button
+              style={ui.button}
+              onClick={() => {
+                setPriceDraft(null);
+                setPriceError(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
             <button style={ui.buttonPrimary} onClick={savePrice} disabled={busy}>{busy ? 'Saving…' : 'Save price'}</button>
           </>
         }
       >
+        <FormError error={priceError} />
+
         <FormGrid>
           <Field label="Selling price" required htmlFor="pr-sell">
             <NumberInput

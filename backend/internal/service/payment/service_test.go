@@ -3,6 +3,7 @@ package payment_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -91,8 +92,16 @@ func (x *counter) mustExec(query string, args ...any) {
 func (x *counter) stockProduct(s *shop, name, sell, onHand string, gstPercent int64) uuid.UUID {
 	x.t.Helper()
 	var productID uuid.UUID
+	// The catalogue is shared across stores — products carry no store_id, only
+	// their prices and stock do — and a name is unique inside its category. So
+	// two shops in one test cannot both stock a product called "Rice": that
+	// would be one product, not two, which is exactly what the index says.
+	// The store id disambiguates the row without changing what the case is
+	// about.
 	mustScan(x.t, x.db, `INSERT INTO products (name, category_id, uom_id, gst_rate, allow_decimal)
-		VALUES ($1, $2, $3, $4, false) RETURNING id`, &productID, name, x.categoryID, x.uomID, gstPercent)
+		VALUES ($1, $2, $3, $4, false) RETURNING id`,
+		&productID, fmt.Sprintf("%s %s", name, s.storeID.String()[:8]),
+		x.categoryID, x.uomID, gstPercent)
 
 	// One selling unit, worth one of the product's stocking unit, priced for
 	// this shop. Prices are per unit now — a sack is not 25 times the loose

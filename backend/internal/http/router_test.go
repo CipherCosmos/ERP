@@ -382,7 +382,16 @@ func TestErrorsDoNotLeakDriverDetail(t *testing.T) {
 	if first := h.request(http.MethodPost, "/api/v1/products", h.token, product); first.Code != http.StatusCreated {
 		t.Fatalf("first create: status %d body %s", first.Code, first.Body.String())
 	}
-	second := h.request(http.MethodPost, "/api/v1/products", h.token, product)
+	// A different name, because a name is unique inside its category too and a
+	// body colliding on both would be refused before the barcode index is
+	// reached — testing the wrong rule.
+	clashing := map[string]any{}
+	for k, v := range product {
+		clashing[k] = v
+	}
+	clashing["name"] = "Duplicate Two"
+
+	second := h.request(http.MethodPost, "/api/v1/products", h.token, clashing)
 	if second.Code != http.StatusConflict {
 		t.Errorf("duplicate barcode: status %d, want 409", second.Code)
 	}

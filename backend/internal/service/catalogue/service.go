@@ -73,6 +73,7 @@ type Repository interface {
 	FindCategoryByName(ctx context.Context, q platform.Querier, name string, parentID *uuid.UUID) (domain.Category, bool, error)
 	FindUnitByCodeOrName(ctx context.Context, q platform.Querier, text string) (domain.UnitOfMeasure, bool, error)
 	FindProductByBarcode(ctx context.Context, q platform.Querier, barcode string) (domain.Product, bool, error)
+	FindProductByID(ctx context.Context, q platform.Querier, id uuid.UUID) (domain.Product, bool, error)
 	FindProductByName(ctx context.Context, q platform.Querier, name string, categoryID uuid.UUID) (domain.Product, bool, error)
 	DefaultProductUnitID(ctx context.Context, q platform.Querier, productID uuid.UUID) (uuid.UUID, bool, error)
 	ExportProducts(ctx context.Context, q platform.Querier, storeID uuid.UUID, includeInactive bool, limit int) ([]domain.ImportRow, error)
@@ -751,10 +752,47 @@ func (s *Service) CreateProductTx(ctx context.Context, tx platform.Tx, in Create
 	return s.createProduct(ctx, tx, p, in)
 }
 
+// refuseDuplicateName rejects a product name already taken inside its category.
+//
+// The index enforces this; the check is here so the refusal is a sentence a
+// shopkeeper can act on rather than "idx_products_name_in_category". It reads
+// inside the caller's transaction, so it cannot answer about a moment other
+// than the one being written.
+//
+// exceptID is the product being edited, so renaming one to what it is already
+// called is not a collision with itself.
+func (s *Service) refuseDuplicateName(ctx context.Context, q platform.Querier,
+	name string, categoryID, exceptID uuid.UUID) error {
+	existing, found, err := s.repo.FindProductByName(ctx, q, name, categoryID)
+	if err != nil {
+		return fmt.Errorf("check for a product of the same name: %w", err)
+	}
+	if !found || existing.ID == exceptID {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: %s already has a product called %s — give this one a name that tells them apart, "+
+			"or add it as another unit of that product",
+		domain.ErrValidation, categoryName(ctx, s, q, categoryID), existing.Name)
+}
+
+// categoryName renders the category for a message, falling back to "this
+// category" rather than failing a write over a cosmetic lookup.
+func categoryName(ctx context.Context, s *Service, q platform.Querier, id uuid.UUID) string {
+	c, err := s.repo.GetCategory(ctx, q, id)
+	if err != nil || c.Name == "" {
+		return "this category"
+	}
+	return c.Name
+}
+
 // createProduct is the body both entry points share: the product, the default
 // unit it cannot be used without, and the opening price, all in the caller's
 // transaction.
 func (s *Service) createProduct(ctx context.Context, tx platform.Tx, p domain.Product, in CreateProductInput) (CreatedProduct, error) {
+	if err := s.refuseDuplicateName(ctx, tx, p.Name, p.CategoryID, uuid.Nil); err != nil {
+		return CreatedProduct{}, err
+	}
 	if err := s.repo.CreateProduct(ctx, tx, p); err != nil {
 		return CreatedProduct{}, err
 	}
@@ -812,6 +850,10 @@ func (s *Service) createProduct(ctx context.Context, tx platform.Tx, p domain.Pr
 }
 
 // UpdateProduct replaces a product's editable fields.
+//
+// The name check and the write are one transaction: a rename that collides is
+// refused with a sentence rather than with an index name, and the two cannot
+// see different moments.
 func (s *Service) UpdateProduct(ctx context.Context, id uuid.UUID, in domain.NewProductInput) (domain.Product, error) {
 	p, err := domain.NewProduct(in)
 	if err != nil {
@@ -819,12 +861,21 @@ func (s *Service) UpdateProduct(ctx context.Context, id uuid.UUID, in domain.New
 	}
 	p.ID = id
 
-	found, err := s.repo.UpdateProduct(ctx, s.db, p)
+	err = s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		if err := s.refuseDuplicateName(ctx, tx, p.Name, p.CategoryID, p.ID); err != nil {
+			return err
+		}
+		found, err := s.repo.UpdateProduct(ctx, tx, p)
+		if err != nil {
+			return fmt.Errorf("update product: %w", err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		return nil
+	})
 	if err != nil {
-		return domain.Product{}, fmt.Errorf("update product: %w", err)
-	}
-	if !found {
-		return domain.Product{}, platform.ErrNotFound
+		return domain.Product{}, err
 	}
 	return p, nil
 }
@@ -833,14 +884,32 @@ func (s *Service) UpdateProduct(ctx context.Context, id uuid.UUID, in domain.New
 // only removal the catalogue offers: a product that has been sold is
 // referenced by invoice history and must outlive its usefulness on the shelf.
 func (s *Service) SetProductActive(ctx context.Context, id uuid.UUID, active bool) error {
-	found, err := s.repo.SetProductActive(ctx, s.db, id, active)
-	if err != nil {
-		return fmt.Errorf("set product active: %w", err)
-	}
-	if !found {
-		return platform.ErrNotFound
-	}
-	return nil
+	return s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		if active {
+			// A retired product does not hold its name, so a shop can reuse one
+			// it stopped selling. That means the name may have been taken while
+			// this product was away, and bringing it back would otherwise fail
+			// on the index with nothing to say why.
+			p, found, err := s.repo.FindProductByID(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return platform.ErrNotFound
+			}
+			if err := s.refuseDuplicateName(ctx, tx, p.Name, p.CategoryID, p.ID); err != nil {
+				return err
+			}
+		}
+		found, err := s.repo.SetProductActive(ctx, tx, id, active)
+		if err != nil {
+			return fmt.Errorf("set product active: %w", err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		return nil
+	})
 }
 
 // ---------------------------------------------------------------------------

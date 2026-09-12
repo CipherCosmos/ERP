@@ -426,3 +426,129 @@ func TestRetiredCategoriesAreListedOnRequest(t *testing.T) {
 		}
 	}
 }
+
+// A product's name inside its category identifies it.
+//
+// This is not tidiness. The catalogue import matches a sheet row to a stored
+// product by name within category — which is how most rows match, because a
+// shop's own sheet rarely carries a barcode — and the lookup takes the first
+// row it finds. Two products sharing a name make that arbitrary: which of them
+// a price revision lands on is decided by the planner. The export-edit-import
+// loop a shop uses to revise prices is only sound if the pair names one thing.
+func TestTwoProductsCannotShareANameInOneCategory(t *testing.T) {
+	t.Parallel()
+	svc, _, storeID, uomID := newService(t)
+	ctx := context.Background()
+
+	grocery := namedCategory(t, svc, "Zz Dup Grocery", nil)
+	snacks := namedCategory(t, svc, "Zz Dup Snacks", nil)
+
+	if _, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(grocery.ID, uomID, "Marie Gold", "8901055100001"),
+		StoreID: storeID,
+	}); err != nil {
+		t.Fatalf("first product: %v", err)
+	}
+
+	// Case only. The easy one to make and the hard one to see.
+	_, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(grocery.ID, uomID, "marie gold", "8901055100002"),
+		StoreID: storeID,
+	})
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("a name differing only in case = %v, want a validation error", err)
+	}
+	if !strings.Contains(err.Error(), "Zz Dup Grocery") || !strings.Contains(err.Error(), "Marie Gold") {
+		t.Errorf("message = %q, want it to name the category and what is already there", err)
+	}
+
+	// The same name in a different category is a different product and is fine:
+	// the pair is the identity, not the name on its own.
+	if _, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(snacks.ID, uomID, "Marie Gold", "8901055100003"),
+		StoreID: storeID,
+	}); err != nil {
+		t.Fatalf("the same name in another category: %v", err)
+	}
+}
+
+func TestAProductCannotBeRenamedOntoAnother(t *testing.T) {
+	t.Parallel()
+	svc, _, storeID, uomID := newService(t)
+	ctx := context.Background()
+
+	category := namedCategory(t, svc, "Zz Rename", nil)
+	first, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(category.ID, uomID, "Zz Atta", "8901055100011"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	second, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(category.ID, uomID, "Zz Maida", "8901055100012"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("second: %v", err)
+	}
+
+	onto := productInput(category.ID, uomID, "Zz Atta", "8901055100012")
+	if _, err := svc.UpdateProduct(ctx, second.ID, onto); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("renaming onto another product = %v, want a validation error", err)
+	}
+
+	// Renaming a product to what it is already called is not a collision with
+	// itself.
+	same := productInput(category.ID, uomID, "Zz Atta", "8901055100011")
+	if _, err := svc.UpdateProduct(ctx, first.ID, same); err != nil {
+		t.Fatalf("saving a product under its own name: %v", err)
+	}
+}
+
+// A retired product does not hold its name, so a shop can reuse one it stopped
+// selling. That means bringing the old one back can collide, and the refusal
+// has to be a sentence rather than an index name.
+func TestBringingBackAProductWhoseNameWasReusedIsRefused(t *testing.T) {
+	t.Parallel()
+	svc, _, storeID, uomID := newService(t)
+	ctx := context.Background()
+
+	category := namedCategory(t, svc, "Zz Reuse", nil)
+	old, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(category.ID, uomID, "Zz Seasonal Item", "8901055100021"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.SetProductActive(ctx, old.ID, false); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+
+	// The name is free again.
+	replacement, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(category.ID, uomID, "Zz Seasonal Item", "8901055100022"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("reuse the name of a retired product: %v", err)
+	}
+
+	err = svc.SetProductActive(ctx, old.ID, true)
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("bring back a product whose name was reused = %v, want a validation error", err)
+	}
+	if !strings.Contains(err.Error(), "Zz Seasonal Item") {
+		t.Errorf("message = %q, want it to name what took the name", err)
+	}
+
+	// Rename the replacement and the original can come back.
+	if _, err := svc.UpdateProduct(ctx, replacement.ID,
+		productInput(category.ID, uomID, "Zz Seasonal Item 2024", "8901055100022")); err != nil {
+		t.Fatalf("rename the replacement: %v", err)
+	}
+	if err := svc.SetProductActive(ctx, old.ID, true); err != nil {
+		t.Fatalf("bring the original back: %v", err)
+	}
+}

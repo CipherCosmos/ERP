@@ -345,11 +345,16 @@ func TestCreateProductRollsBackPriceWhenProductFails(t *testing.T) {
 		t.Fatalf("first create: %v", err)
 	}
 
-	// Same barcode: the unique index rejects the product, and the price
-	// written earlier in the same transaction must go with it.
+	// Same barcode, different name: the name has its own unique index now, and
+	// a fixture that collides on both never reaches the one under test.
+	clashing := in
+	clashing.Name = in.Name + " (second)"
+
+	// The unique index rejects the product, and the price written earlier in
+	// the same transaction must go with it.
 	before := countPrices(t, db, storeID)
 	_, err := svc.CreateProduct(ctx, service.CreateProductInput{
-		Product: in, StoreID: storeID, Price: price,
+		Product: clashing, StoreID: storeID, Price: price,
 	})
 	if err == nil {
 		t.Fatal("expected a duplicate barcode to be rejected")
