@@ -1541,3 +1541,150 @@ func TestListingManyProductsDoesNotDuplicateRows(t *testing.T) {
 		t.Errorf("the sack in the listing costs %s, want 1050.00", got.Units[2].Price.SellPrice)
 	}
 }
+
+// Products that predate the HSN rule.
+//
+// A tax invoice has to print the classification of what it sells, so every bill
+// including one of these is a document the shop cannot file. The constructor
+// refuses to make one, which is why this test inserts a row directly: that is
+// exactly the situation the filter exists for, a product already on the shelf
+// from before the rule.
+//
+// Refusing to sell them would stop a shop trading over a missing field. The
+// filter is the alternative — somebody works through the list.
+func TestUnclassifiedProductsCanBeFound(t *testing.T) {
+	t.Parallel()
+	svc, db, storeID, uomID := newService(t)
+	ctx := context.Background()
+	categoryID := newCategory(t, svc)
+
+	classified, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(categoryID, uomID, "Zz Classified", "8901088100001"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("create the classified product: %v", err)
+	}
+
+	var oldID, retiredID uuid.UUID
+	for _, row := range []struct {
+		name   string
+		active bool
+		into   *uuid.UUID
+	}{
+		{"Zz Predates The Rule", true, &oldID},
+		{"Zz Retired And Unclassified", false, &retiredID},
+	} {
+		if err := db.QueryRowContext(ctx,
+			`INSERT INTO products (name, category_id, uom_id, base_unit_qty, gst_rate,
+				min_stock, is_active, hsn_code, sac_code)
+			 -- hsn_code is nullable and sac_code is NOT NULL with a '' default,
+			 -- so "no classification" is spelt two different ways in the same
+			 -- row. The filter COALESCEs both, and this covers the pair.
+			 VALUES ($1, $2, $3, 1, 5, 0, $4, NULL, '') RETURNING id`,
+			row.name, categoryID, uomID, row.active).Scan(row.into); err != nil {
+			t.Fatalf("insert %s: %v", row.name, err)
+		}
+	}
+
+	found, err := svc.ListProducts(ctx, domain.ProductFilter{
+		StoreID:      storeID,
+		Unclassified: true,
+	})
+	if err != nil {
+		t.Fatalf("list unclassified: %v", err)
+	}
+
+	ids := map[uuid.UUID]bool{}
+	for _, p := range found {
+		ids[p.ID] = true
+	}
+	if !ids[oldID] {
+		t.Error("a product with no HSN is missing from the unclassified list")
+	}
+	if ids[classified.ID] {
+		t.Error("a product with an HSN is in the unclassified list")
+	}
+	// A retired product cannot be sold, so it cannot produce an invoice that
+	// cannot be filed. Listing it would send somebody to fix something that
+	// does not matter, and on a shop with years of withdrawn lines that is most
+	// of the list.
+	if ids[retiredID] {
+		t.Error("a retired product is in the unclassified list")
+	}
+}
+
+// The three list filters are applied by the database, not by the caller.
+//
+// The products screen used to narrow the arrived rows in the browser, and two
+// of the three could not work that way: "show inactive" narrowed a list that
+// had never contained an inactive product, and the search box only ever saw
+// the first page the server sent.
+func TestProductFiltersAreAppliedByTheServer(t *testing.T) {
+	t.Parallel()
+	svc, _, storeID, uomID := newService(t)
+	ctx := context.Background()
+	categoryID := newCategory(t, svc)
+
+	live, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(categoryID, uomID, "Zz Filter Live", "8901088100002"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	retired, err := svc.CreateProduct(ctx, service.CreateProductInput{
+		Product: productInput(categoryID, uomID, "Zz Filter Retired", "8901088100003"),
+		StoreID: storeID,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := svc.SetProductActive(ctx, retired.ID, false); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+
+	has := func(f domain.ProductFilter, id uuid.UUID) bool {
+		t.Helper()
+		found, err := svc.ListProducts(ctx, f)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, p := range found {
+			if p.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	base := domain.ProductFilter{StoreID: storeID, CategoryID: &categoryID}
+	if has(base, retired.ID) {
+		t.Error("a retired product appears without being asked for")
+	}
+	withInactive := base
+	withInactive.IncludeInactive = true
+	if !has(withInactive, retired.ID) {
+		t.Error("include_inactive did not produce the retired product")
+	}
+	if !has(withInactive, live.ID) {
+		t.Error("include_inactive dropped the live product")
+	}
+
+	// Search runs in the database, so it reaches a product the caller never
+	// received a row for. ILIKE, not LIKE: Postgres's LIKE is case-sensitive
+	// where SQLite's was not, so a straight port would have made every product
+	// search silently miss.
+	search := domain.ProductFilter{StoreID: storeID, Search: "filter live"}
+	if !has(search, live.ID) {
+		t.Error("a lowercase search did not find a capitalised product name")
+	}
+	search.Search = "Filter Live"
+	if !has(search, live.ID) {
+		t.Error("search did not find the product by name")
+	}
+	search.Search = "8901088100002"
+	if !has(search, live.ID) {
+		t.Error("search did not find the product by barcode")
+	}
+}

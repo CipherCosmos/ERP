@@ -74,6 +74,12 @@ export default function Products() {
   const [loading, setLoading] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('');
   const [showInactive, setShowInactive] = useState(false);
+  const [onlyUnclassified, setOnlyUnclassified] = useState(false);
+  const [search, setSearch] = useState('');
+  // What the search box holds versus what has been asked for. They differ for
+  // a moment while somebody is still typing.
+  const [searchTerm, setSearchTerm] = useState('');
+  const [unclassifiedCount, setUnclassifiedCount] = useState<number | null>(null);
 
   const [editing, setEditing] = useState<ProductRow | null>(null);
   const [creating, setCreating] = useState(false);
@@ -89,16 +95,68 @@ export default function Products() {
   const [unitError, setUnitError] = useState<string | null>(null);
   const [priceDraft, setPriceDraft] = useState<{ unit: UnitRow; sell: string; wholesale: string; mrp: string; cost: string; note: string } | null>(null);
 
+  /**
+   * How many rows the server will return at most.
+   *
+   * It is the server's own ceiling, and the screen has to say when it is
+   * reached. A shop that has just imported two thousand items and sees a
+   * hundred of them, with a search box that only looks at those hundred, is
+   * being told its catalogue is smaller than it is.
+   */
+  const LIST_CAP = 500;
+
+  /**
+   * Every filter is applied by the server, not by this screen.
+   *
+   * It used to filter the arrived rows in the browser, and two of the three
+   * controls could not work that way. "Show inactive" narrowed a list that had
+   * never contained an inactive product, so ticking it did nothing at all. And
+   * the search box only ever saw the first hundred rows the server sent, which
+   * after a bulk import is a small fraction of the catalogue — a product that
+   * exists, searched for by name, came back "no products".
+   */
   const loadProducts = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
-      const { data } = await productApi.list({ store_id: store.id });
+      const { data } = await productApi.list({
+        store_id: store.id,
+        limit: LIST_CAP,
+        ...(categoryFilter ? { category_id: categoryFilter } : {}),
+        ...(searchTerm ? { search: searchTerm } : {}),
+        ...(showInactive ? { include_inactive: true } : {}),
+        ...(onlyUnclassified ? { unclassified: true } : {}),
+      });
       setProducts(data as unknown as ProductRow[]);
     } catch (err) {
       console.error('Failed to load products:', err);
     } finally {
       setLoading(false);
+    }
+  }, [store, categoryFilter, searchTerm, showInactive, onlyUnclassified]);
+
+  /**
+   * How many products carry no HSN or SAC code.
+   *
+   * Counted with its own request rather than off the listing, because the
+   * listing is filtered and capped: a screen showing one category would
+   * otherwise report that category's unclassified products as the shop's
+   * total. Every invoice selling one of these goes out without the
+   * classification a tax invoice has to print, so the number belongs on the
+   * screen whether or not anybody filtered for it.
+   */
+  const loadUnclassified = useCallback(async () => {
+    if (!store) return;
+    try {
+      const { data } = await productApi.list({
+        store_id: store.id,
+        unclassified: true,
+        limit: LIST_CAP,
+      });
+      setUnclassifiedCount((data as unknown as ProductRow[]).length);
+    } catch {
+      // A count nobody could fetch is shown as unknown rather than as zero.
+      setUnclassifiedCount(null);
     }
   }, [store]);
 
@@ -132,16 +190,29 @@ export default function Products() {
     }
   }, []);
 
+  // A request per keystroke would be one per letter of "sunflower". A quarter
+  // of a second is long enough to finish a word and short enough that nobody
+  // waits for it.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchTerm(search.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   useEffect(() => {
     if (!user || !store) {
       navigate('/login');
       return;
     }
     loadProducts();
+  }, [user, store, navigate, loadProducts]);
+
+  useEffect(() => {
+    if (!user || !store) return;
     loadCategories();
     loadUoms();
     loadVendors();
-  }, [user, store, navigate, loadProducts, loadCategories, loadUoms, loadVendors]);
+    loadUnclassified();
+  }, [user, store, loadCategories, loadUoms, loadVendors, loadUnclassified]);
 
   /** Refresh one product in place, so editing units does not reset the table. */
   const refreshEditing = useCallback(async () => {
@@ -351,15 +422,30 @@ export default function Products() {
     }
   };
 
-  const rows = useMemo(() => {
-    let r = products;
-    if (!showInactive) r = r.filter((p) => p.is_active);
-    if (categoryFilter) r = r.filter((p) => p.category_id === categoryFilter);
-    return r;
-  }, [products, categoryFilter, showInactive]);
+  // The server has already applied every filter, so the rows it sent are the
+  // rows to show. Filtering them again here is what made "Show inactive" a
+  // control that could only ever narrow.
+  const rows = products;
+  const capped = products.length >= LIST_CAP;
 
   const lowStock = useMemo(() => products.filter((p) => p.is_active && p.min_stock > 0 && p.stock <= p.min_stock), [products]);
   const multiUnit = useMemo(() => products.filter((p) => (p.units?.length ?? 0) > 1), [products]);
+
+  const filtered = !!(categoryFilter || searchTerm || showInactive || onlyUnclassified);
+
+  /**
+   * What to say when nothing is on screen.
+   *
+   * An empty result under a filter is not an empty catalogue, and dressing the
+   * first up as the second sends somebody off to add a product they already
+   * have.
+   */
+  const emptyMessage = () => {
+    if (onlyUnclassified) return 'Every product carries an HSN or SAC code. Nothing to fix.';
+    if (searchTerm) return `Nothing matches "${searchTerm}".`;
+    if (categoryFilter) return 'No products in this category.';
+    return 'No products yet. Add one, or import the list you already have.';
+  };
 
   const baseUnitCode = (p: ProductRow) => uoms.find((u) => u.id === p.uom_id)?.code ?? '';
 
@@ -463,10 +549,52 @@ export default function Products() {
       </div>
 
       <div style={styles.summary}>
-        <Stat label="Products" value={String(products.filter((p) => p.is_active).length)} />
+        <Stat
+          label="Products"
+          value={String(products.filter((p) => p.is_active).length)}
+          note={
+            capped
+              ? `first ${LIST_CAP} — search to reach the rest`
+              : filtered
+                ? 'matching the filters below'
+                : undefined
+          }
+        />
         <Stat label="Sold in more than one unit" value={String(multiUnit.length)} />
         <Stat label="At or below minimum" value={String(lowStock.length)} tone={lowStock.length ? 'danger' : undefined} />
+        <Stat
+          label="No HSN code"
+          value={unclassifiedCount === null ? 'n/a' : String(unclassifiedCount)}
+          tone={unclassifiedCount ? 'danger' : undefined}
+          note={
+            unclassifiedCount
+              ? 'invoices selling these cannot be filed'
+              : unclassifiedCount === null
+                ? 'could not be counted'
+                : undefined
+          }
+        />
       </div>
+
+      {!!unclassifiedCount && !onlyUnclassified && (
+        <div style={styles.alert} role="status">
+          <span>
+            <strong>
+              {unclassifiedCount} {unclassifiedCount === 1 ? 'product carries' : 'products carry'} no HSN or
+              SAC code.
+            </strong>{' '}
+            A tax invoice has to print the classification of what it sells, so every bill that includes one
+            of these is a document the shop cannot file. New products cannot be saved without one; these
+            predate the rule.
+          </span>
+          <button
+            style={{ ...ui.button, marginLeft: 'auto', whiteSpace: 'nowrap' }}
+            onClick={() => setOnlyUnclassified(true)}
+          >
+            Show them
+          </button>
+        </div>
+      )}
 
       <DataTable
         rows={rows}
@@ -474,11 +602,22 @@ export default function Products() {
         rowKey={(p) => p.id}
         loading={loading}
         onRowClick={openEdit}
-        searchPlaceholder="Search name, brand, category or barcode…"
-        empty={categoryFilter ? 'No products in this category.' : 'No products yet.'}
+        // The table's own search looks only at the rows it was given. That is
+        // the right tool for a list that arrived whole and the wrong one for a
+        // list the server capped, so the search box below goes to the server
+        // instead and this one is switched off.
+        searchable={false}
+        empty={emptyMessage()}
         rowTone={(p) => (p.min_stock > 0 && p.stock <= p.min_stock ? 'warning' : undefined)}
         toolbar={
           <>
+            <TextInput
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search name or barcode…"
+              style={{ width: '16rem' }}
+              aria-label="Search products"
+            />
             <Select
               value={categoryFilter}
               onChange={(e) => setCategoryFilter(e.target.value)}
@@ -489,6 +628,14 @@ export default function Products() {
             <label style={{ display: 'flex', alignItems: 'center', gap: space.xs, fontSize: font.size.sm, whiteSpace: 'nowrap' }}>
               <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
               Show inactive
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: space.xs, fontSize: font.size.sm, whiteSpace: 'nowrap' }}>
+              <input
+                type="checkbox"
+                checked={onlyUnclassified}
+                onChange={(e) => setOnlyUnclassified(e.target.checked)}
+              />
+              No HSN only
             </label>
             <button style={ui.buttonPrimary} onClick={openNew}>+ New product</button>
           </>
@@ -915,11 +1062,25 @@ export default function Products() {
   );
 }
 
-function Stat({ label, value, tone }: { label: string; value: string; tone?: 'danger' }) {
+function Stat({
+  label,
+  value,
+  tone,
+  note,
+}: {
+  label: string;
+  value: string;
+  tone?: 'danger';
+  note?: string;
+}) {
   return (
     <div style={{ ...ui.card, padding: space.lg, flex: '1 1 10rem' }}>
       <div style={styles.statLabel}>{label}</div>
       <div style={{ ...styles.statValue, color: tone === 'danger' ? color.danger : color.text }}>{value}</div>
+      {/* A figure that stands for something other than the whole shop has to
+          say so on the tile. "Products 500" over a capped listing is a lie the
+          reader has no way to detect. */}
+      {note && <div style={styles.historySub}>{note}</div>}
     </div>
   );
 }
@@ -1011,6 +1172,19 @@ function sourceLabel(source: PriceMovement['source']): string {
 
 
 const styles: Record<string, React.CSSProperties> = {
+  alert: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: space.md,
+    padding: space.lg,
+    marginBottom: space.lg,
+    background: color.dangerSoft,
+    border: `1px solid ${color.danger}33`,
+    color: color.danger,
+    borderRadius: '8px',
+    fontSize: font.size.md,
+    flexWrap: 'wrap',
+  },
   historyEmpty: { padding: space.lg, color: color.textMuted, fontSize: font.size.md },
   historySub: { fontSize: font.size.xs, color: color.textMuted },
   header: { display: 'flex', alignItems: 'center', gap: space.lg, marginBottom: space.lg },

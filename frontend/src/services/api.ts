@@ -224,8 +224,23 @@ export const categoryApi = {
 };
 
 export const productApi = {
-  list: (params: { store_id: string; category_id?: string; barcode?: string; search?: string }) =>
-    list<Product>(api.get('/products', { params }), 'products'),
+  list: (params: {
+    store_id: string;
+    category_id?: string;
+    barcode?: string;
+    search?: string;
+    limit?: number;
+    /** Deactivated products too, for the screens that reactivate one. */
+    include_inactive?: boolean;
+    /**
+     * Only products carrying neither an HSN nor a SAC code.
+     *
+     * New products cannot be saved without one, but a shop that has been
+     * trading since before that rule has them on the shelf, and every invoice
+     * selling one goes out without the classification Rule 46(g) requires.
+     */
+    unclassified?: boolean;
+  }) => list<Product>(api.get('/products', { params }), 'products'),
   /**
    * Uploads a catalogue spreadsheet.
    *
