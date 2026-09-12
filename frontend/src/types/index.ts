@@ -33,6 +33,32 @@ export interface Terminal {
 }
 
 /**
+ * One line of the reorder list: a product at or below its reorder level, with
+ * everything an order for it needs.
+ *
+ * The extra fields are not decoration. A list of names and numbers makes a
+ * buyer look up who supplies each line, what a pack holds and what one costs —
+ * three lookups per row, on a list that is forty rows long the morning after a
+ * good weekend.
+ */
+export interface ReorderItem {
+  product_id: string;
+  name: string;
+  min_stock: number;
+  current_stock: number;
+  preferred_vendor_id?: string;
+  preferred_vendor_name?: string;
+  /** The unit the shop buys in: the 25 kg sack, not the kilo. */
+  purchase_unit_id?: string;
+  purchase_unit_label?: string;
+  qty_in_base: number;
+  /** What one buying unit last cost in this store. Zero means unpriced. */
+  last_cost: number;
+  /** Whole buying units, rounded up, to bring stock back to twice the level. */
+  suggested_units: number;
+}
+
+/**
  * A group of units that convert between each other: weight, volume, count,
  * length, area, and whatever else a trade needs. Units convert only within a
  * family, which is what makes selling rice by the litre impossible rather than

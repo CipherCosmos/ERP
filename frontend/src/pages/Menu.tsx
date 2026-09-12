@@ -84,6 +84,7 @@ export default function Menu() {
       title: 'Buying',
       blurb: 'Vendors and deliveries',
       items: [
+        { key: 'reorder', labelKey: 'reorder', icon: '🔁', path: '/reorder', permission: 'purchase.write' },
         { key: 'purchases', labelKey: 'purchases', icon: '🛒', path: '/purchases', permission: 'purchase.read' },
         { key: 'grn', labelKey: 'grn', icon: '📥', path: '/grn', permission: 'grn.read' },
         { key: 'vendors', labelKey: 'vendors', icon: '🏭', path: '/vendors', permission: 'catalog.read' },

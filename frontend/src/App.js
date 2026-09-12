@@ -11,6 +11,7 @@ import Categories from './pages/Categories';
 import ProductImport from './pages/ProductImport';
 import PriceChanges from './pages/PriceChanges';
 import Units from './pages/Units';
+import Reorder from './pages/Reorder';
 import Dashboard from './pages/Dashboard';
 import Menu from './pages/Menu';
 import Customers from './pages/Customers';
@@ -104,6 +105,7 @@ function App() {
         <Route path="/products/import" element={<ProductImport />} />
         <Route path="/price-changes" element={<PriceChanges />} />
         <Route path="/units" element={<Units />} />
+        <Route path="/reorder" element={<Reorder />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/customers" element={<Customers />} />
         <Route path="/credit" element={<Credit />} />

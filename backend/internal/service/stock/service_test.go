@@ -78,6 +78,14 @@ func newFixture(t *testing.T) fixture {
 	return f
 }
 
+// mustExec runs a statement that has nothing to return.
+func mustExec(t *testing.T, db *platform.DB, query string, args ...any) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), query, args...); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+}
+
 // addUnit defines another way of transacting the fixture's product -- a sack,
 // a pouch -- and returns its id.
 func (f fixture) addUnit(t *testing.T, label, qtyInBase string) uuid.UUID {
@@ -1442,5 +1450,93 @@ func TestCatalogueCostIsReadFromTheDefaultUnit(t *testing.T) {
 	if want := money.MustRateFromString("37.50"); !result.Batch.CostPrice.Equal(want) {
 		t.Errorf("batch cost = %s, want the default unit's %s and not the sack's 950.00",
 			result.Batch.CostPrice, want)
+	}
+}
+
+// A reorder list has to be something a buyer can act on.
+//
+// Names and numbers are not: each line would otherwise need three lookups —
+// who supplies this, what does a pack hold, what does one cost — on a list that
+// is forty lines long the morning after a good weekend.
+func TestLowStockCarriesWhatAnOrderNeeds(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	var vendorID uuid.UUID
+	mustScan(t, f.db, `INSERT INTO vendors (name) VALUES ('Zz Mill') RETURNING id`, &vendorID)
+	mustExec(t, f.db, `UPDATE products SET preferred_vendor_id = $2 WHERE id = $1`, f.product, vendorID)
+
+	// The shop buys this in 25 kg sacks and sells it loose. The kilo is the
+	// default unit AND is purchasable — a shop can buy loose — but an order is
+	// still placed in sacks, because buying is done in bulk. This is the case
+	// that decides the rule: the default unit is what the shop SELLS in.
+	sack := f.addUnit(t, "25 kg sack", "25")
+	mustExec(t, f.db, `UPDATE product_units SET is_purchasable = true WHERE id = $1`, sack)
+	mustExec(t, f.db,
+		`INSERT INTO product_prices (product_id, store_id, product_unit_id, mrp, cost_price, sell_price, wholesale_sell_price)
+		 VALUES ($1, $2, $3, 0, 940.00, 1050.00, 0)`, f.product, f.store, sack)
+
+	// Minimum is 10 kg; 7 on the shelf.
+	f.seedBatch(t, f.store, "A", "4", "40.00", nil, 0)
+	f.seedBatch(t, f.store, "B", "3", "40.00", nil, 0)
+
+	low, err := f.svc.LowStock(ctx, f.store)
+	if err != nil {
+		t.Fatalf("low stock: %v", err)
+	}
+	if len(low) != 1 {
+		t.Fatalf("low stock returned %d products, want 1", len(low))
+	}
+	item := low[0]
+
+	if item.PreferredVendorID == nil || *item.PreferredVendorID != vendorID {
+		t.Errorf("supplier = %v, want the preferred vendor", item.PreferredVendorID)
+	}
+	if item.PreferredVendorName != "Zz Mill" {
+		t.Errorf("supplier name = %q, want Zz Mill", item.PreferredVendorName)
+	}
+	// The sack, not the kilo, even though the kilo is the default and can be
+	// bought: the largest purchasable unit is what an order is placed in.
+	if item.PurchaseUnitID != sack || item.PurchaseUnitLabel != "25 kg sack" {
+		t.Errorf("buying unit = %s %q, want the sack", item.PurchaseUnitID, item.PurchaseUnitLabel)
+	}
+	assertQty(t, "pack size", item.QtyInBase, "25")
+	if !item.LastCost.Equal(money.MustFromString("940.00")) {
+		t.Errorf("last cost = %s, want 940.00", item.LastCost)
+	}
+	// Twice the 10 kg minimum is 20; 13 kg are missing, which is 0.52 of a
+	// sack, which is one sack.
+	assertQty(t, "suggested order", item.SuggestedUnits, "1")
+	if !item.OrderValue().Equal(money.MustFromString("940.00")) {
+		t.Errorf("order value = %s, want one sack at 940.00", item.OrderValue())
+	}
+	assertQty(t, "shortfall", item.Shortfall(), "3")
+}
+
+// A product nobody has named a supplier for still belongs on the list. It is
+// the line somebody has to do something about, and dropping it would make the
+// list quietly incomplete.
+func TestLowStockKeepsProductsWithNoSupplier(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	f.seedBatch(t, f.store, "A", "2", "40.00", nil, 0)
+
+	low, err := f.svc.LowStock(ctx, f.store)
+	if err != nil {
+		t.Fatalf("low stock: %v", err)
+	}
+	if len(low) != 1 {
+		t.Fatalf("low stock returned %d products, want 1", len(low))
+	}
+	if low[0].PreferredVendorID != nil {
+		t.Errorf("supplier = %v, want none", *low[0].PreferredVendorID)
+	}
+	// The default unit is purchasable unless something says otherwise, so a
+	// product with no pack still has something to order in.
+	if low[0].PurchaseUnitID != f.baseUnit {
+		t.Errorf("buying unit = %s, want the default unit", low[0].PurchaseUnitID)
 	}
 }

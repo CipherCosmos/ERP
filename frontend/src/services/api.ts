@@ -8,6 +8,7 @@ import {
   Store,
   Customer,
   Invoice,
+  ReorderItem,
   Terminal,
   UnitFamily,
   UnitOfMeasure,
@@ -519,7 +520,12 @@ export const lossApi = {
 
 export const stockApi = {
   list: (storeId: string) => list<any>(api.get('/stock', { params: { store_id: storeId } }), 'stock'),
-  low: (storeId: string) => list<any>(api.get('/stock/low', { params: { store_id: storeId } }), 'low_stock'),
+  /**
+   * The reorder list: everything at or below its level, carrying its supplier,
+   * the unit the shop buys it in, what one last cost and how many to order.
+   */
+  low: (storeId: string) =>
+    list<ReorderItem>(api.get('/stock/low', { params: { store_id: storeId } }), 'low_stock'),
   adjustments: (storeId: string) => list<any>(api.get('/stock/adjustments', { params: { store_id: storeId } }), 'adjustments'),
   productStock: (productId: string, storeId: string) =>
     list<any>(api.get(`/stock/product/${productId}`, { params: { store_id: storeId } }), 'batches'),

@@ -130,6 +130,74 @@ type LowStockItem struct {
 	Name         string         `json:"name"`
 	MinStock     money.Quantity `json:"min_stock"`
 	CurrentStock money.Quantity `json:"current_stock"`
+
+	// Everything below turns a list of names into an order.
+	//
+	// A list saying "Sona Masoori Rice, 12 kg left, minimum 50" tells a buyer
+	// nothing they can act on without looking up who supplies it, what a sack
+	// holds and what one costs — three lookups per line, on a list that is
+	// forty lines long the morning after a good weekend.
+
+	// PreferredVendorID is who this is normally bought from. Nil means nobody
+	// has said, and those lines are grouped together so somebody can.
+	PreferredVendorID   *uuid.UUID `json:"preferred_vendor_id,omitempty"`
+	PreferredVendorName string     `json:"preferred_vendor_name,omitempty"`
+
+	// PurchaseUnitID is the unit the shop buys this in — the 25 kg sack, not
+	// the kilo. Zero when the product has no purchasable unit at all, which is
+	// a product nothing can be ordered for and is worth seeing.
+	PurchaseUnitID    uuid.UUID      `json:"purchase_unit_id,omitempty"`
+	PurchaseUnitLabel string         `json:"purchase_unit_label,omitempty"`
+	QtyInBase         money.Quantity `json:"qty_in_base"`
+	// LastCost is what one of that unit last cost in this store. Zero means
+	// unpriced, and the line has to say so rather than offer an order at nil.
+	LastCost money.Money `json:"last_cost"`
+
+	// SuggestedUnits is how many buying units to order, rounded up, to bring
+	// stock back to twice the reorder level. See SuggestOrder for why twice.
+	SuggestedUnits money.Quantity `json:"suggested_units"`
+}
+
+// Shortfall is how much stock is missing against the reorder level.
+func (i LowStockItem) Shortfall() money.Quantity {
+	if i.CurrentStock.GreaterThan(i.MinStock) {
+		return money.ZeroQuantity()
+	}
+	return i.MinStock.Sub(i.CurrentStock)
+}
+
+// OrderValue is what the suggested quantity would cost.
+func (i LowStockItem) OrderValue() money.Money { return i.LastCost.Mul(i.SuggestedUnits) }
+
+// reorderTarget is the level an order brings stock back to, as a multiple of
+// the reorder level.
+//
+// Ordering back to exactly the reorder level means tripping it again on the
+// next sale, so the list would be the same length tomorrow. Twice is the
+// smallest multiple that does not do that. It is a starting figure and every
+// line is editable — the shop knows its own turnover, and this only has to be
+// better than a blank box.
+const reorderTarget = 2
+
+// SuggestOrder returns how many buying units bring stock back to the target,
+// rounded UP to a whole unit.
+//
+// Up, not to nearest: a shop cannot order two thirds of a sack, and rounding
+// down leaves the product below its reorder level the moment the delivery is
+// put away — which is the one outcome the whole list exists to prevent.
+func SuggestOrder(minStock, currentStock, qtyInBase money.Quantity) money.Quantity {
+	if !qtyInBase.IsPositive() {
+		return money.ZeroQuantity()
+	}
+	target := minStock
+	for i := 1; i < reorderTarget; i++ {
+		target = target.Add(minStock)
+	}
+	if !target.GreaterThan(currentStock) {
+		return money.ZeroQuantity()
+	}
+	needed := target.Sub(currentStock)
+	return money.QuantityFromDecimal(needed.Decimal().Div(qtyInBase.Decimal()).Ceil())
 }
 
 // ExpiringBatch is a batch on one of the two expiry reports.

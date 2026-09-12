@@ -200,15 +200,48 @@ func (r *Stock) BatchesForDeduction(ctx context.Context, q platform.Querier, pro
 // Two SQLite-isms are corrected here. `p.is_active = 1` is a type error against
 // a boolean column, and the HAVING clause referenced the SELECT alias
 // `current_stock`, which SQLite tolerates and Postgres rejects.
+// It carries the supplier, the unit the shop buys in and what one last cost,
+// because a list of names and numbers is not something a buyer can act on: each
+// line would otherwise need three lookups, on a list that is forty lines long
+// the morning after a good weekend.
+//
+// The buying unit is the largest purchasable one. Buying is done in bulk: a
+// shop reordering rice orders sacks, and an order for 648 kilos is not
+// something anybody places. A shop that genuinely buys by the kilo has only the
+// kilo marked purchasable, so the same rule gives the kilo — which is why it
+// needs no special case for the product's default unit. Preferring the default
+// was tried and is wrong exactly when it matters: the default is the unit the
+// shop SELLS in, and a product sold loose and bought by the sack is the case
+// the whole units model exists for. The buyer can change the figure on the
+// line.
 func (r *Stock) LowStock(ctx context.Context, q platform.Querier, storeID uuid.UUID) ([]stock.LowStockItem, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT p.id, p.name, p.min_stock, COALESCE(SUM(s.quantity), 0) AS current_stock
+		`WITH on_hand AS (
+		    SELECT p.id AS product_id, COALESCE(SUM(s.quantity), 0) AS current_stock
+		      FROM products p
+		      LEFT JOIN stock s ON s.product_id = p.id AND s.store_id = $1
+		     WHERE p.is_active AND p.min_stock > 0
+		     GROUP BY p.id
+		), buying_unit AS (
+		    SELECT DISTINCT ON (pu.product_id)
+		           pu.product_id, pu.id, pu.label, pu.qty_in_base
+		      FROM product_units pu
+		     WHERE pu.is_active AND pu.is_purchasable
+		     ORDER BY pu.product_id, pu.qty_in_base DESC, pu.sort_order
+		)
+		 SELECT p.id, p.name, p.min_stock, h.current_stock,
+		        p.preferred_vendor_id, COALESCE(v.name, ''),
+		        COALESCE(bu.id, '00000000-0000-0000-0000-000000000000'::uuid),
+		        COALESCE(bu.label, ''), COALESCE(bu.qty_in_base, 0),
+		        COALESCE(pp.cost_price, 0)
 		   FROM products p
-		   LEFT JOIN stock s ON s.product_id = p.id AND s.store_id = $1
-		  WHERE p.is_active AND p.min_stock > 0
-		  GROUP BY p.id, p.name, p.min_stock
-		 HAVING COALESCE(SUM(s.quantity), 0) <= p.min_stock
-		  ORDER BY current_stock ASC, p.name`, storeID)
+		   JOIN on_hand h ON h.product_id = p.id
+		   LEFT JOIN vendors v ON v.id = p.preferred_vendor_id
+		   LEFT JOIN buying_unit bu ON bu.product_id = p.id
+		   LEFT JOIN product_prices pp
+		          ON pp.product_id = p.id AND pp.product_unit_id = bu.id AND pp.store_id = $1
+		  WHERE h.current_stock <= p.min_stock
+		  ORDER BY COALESCE(v.name, ''), h.current_stock ASC, p.name`, storeID)
 	if err != nil {
 		return nil, platform.MapError(err)
 	}
@@ -217,9 +250,16 @@ func (r *Stock) LowStock(ctx context.Context, q platform.Querier, storeID uuid.U
 	items := make([]stock.LowStockItem, 0)
 	for rows.Next() {
 		var it stock.LowStockItem
-		if err := rows.Scan(&it.ProductID, &it.Name, &it.MinStock, &it.CurrentStock); err != nil {
+		if err := rows.Scan(&it.ProductID, &it.Name, &it.MinStock, &it.CurrentStock,
+			&it.PreferredVendorID, &it.PreferredVendorName,
+			&it.PurchaseUnitID, &it.PurchaseUnitLabel, &it.QtyInBase,
+			&it.LastCost); err != nil {
 			return nil, fmt.Errorf("scan low stock item: %w", platform.MapError(err))
 		}
+		// Derived in Go rather than in SQL: rounding up to a whole buying unit
+		// is a rule about how a shop orders, and it belongs with the rule that
+		// says what level to order back to.
+		it.SuggestedUnits = stock.SuggestOrder(it.MinStock, it.CurrentStock, it.QtyInBase)
 		items = append(items, it)
 	}
 	if err := rows.Err(); err != nil {
