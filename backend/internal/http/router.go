@@ -168,6 +168,9 @@ func NewRouter(svcs app.Services, cfg Config) (*gin.Engine, func(), error) {
 	if svcs.Audit != nil {
 		handler.NewAudit(svcs.Audit).Register(scoped)
 	}
+	if svcs.Reconcile != nil {
+		handler.NewReconcile(svcs.Reconcile).Register(scoped)
+	}
 
 	return r, shutdown, nil
 }

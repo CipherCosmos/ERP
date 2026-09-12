@@ -16,6 +16,7 @@ import (
 	domain "gbos/internal/domain/billing"
 	"gbos/internal/domain/document"
 	"gbos/internal/domain/money"
+	"gbos/internal/domain/reconcile"
 	stockdomain "gbos/internal/domain/stock"
 	platform "gbos/internal/platform/postgres"
 	repo "gbos/internal/repo/postgres"
@@ -70,10 +71,20 @@ type StockMover interface {
 	ReturnToStock(ctx context.Context, q platform.Querier, in stockdomain.Receipt) error
 }
 
+// ExceptionRecorder records what the server could not verify about a sale it
+// had to accept anyway. See the reconcile package for why a completed sale is
+// flagged rather than refused.
+type ExceptionRecorder interface {
+	Insert(ctx context.Context, q platform.Querier, e reconcile.Exception) error
+}
+
 // CreditRecorder is the part of the credit aggregate a sale needs.
 type CreditRecorder interface {
 	EnsureWithinCreditLimit(ctx context.Context, tx platform.Tx, storeID, customerID uuid.UUID, additional money.Money) error
-	RecordCreditSale(ctx context.Context, tx platform.Tx, storeID, customerID, invoiceID uuid.UUID, amount money.Money) error
+	// RecordCreditSale writes the debt. alreadyIncurred says the shop has
+	// already extended it — an offline sale — so the limit check has nothing
+	// left to prevent.
+	RecordCreditSale(ctx context.Context, tx platform.Tx, storeID, customerID, invoiceID uuid.UUID, amount money.Money, alreadyIncurred bool) error
 	VoidInvoiceCredit(ctx context.Context, tx platform.Tx, invoiceID uuid.UUID) error
 }
 
@@ -89,12 +100,24 @@ type Service struct {
 	repo   Repository
 	stock  StockMover
 	credit CreditRecorder
-	now    func() time.Time
+	// exceptions may be nil, and a nil one records nothing. A sale must not
+	// fail because reconciliation is not wired up.
+	exceptions ExceptionRecorder
+	now        func() time.Time
 }
 
 // New returns a billing service.
 func New(db DB, r Repository, stock StockMover, credit CreditRecorder) *Service {
 	return &Service{db: db, repo: r, stock: stock, credit: credit, now: time.Now}
+}
+
+// WithExceptions attaches the recorder for what the server cannot verify about a
+// sale it accepts anyway. Without it an offline sale still lands; it just lands
+// unflagged, which is why wiring is not optional in production.
+func (s *Service) WithExceptions(rec ExceptionRecorder) *Service {
+	clone := *s
+	clone.exceptions = rec
+	return &clone
 }
 
 // WithClock replaces the clock, for tests that need a fixed financial year.
@@ -290,8 +313,20 @@ func (s *Service) create(ctx context.Context, tx platform.Tx, in CreateInput) (R
 	// The credit limit is checked inside this transaction, against a locked
 	// customer row, and before any stock moves. Checking it outside would let
 	// two simultaneous sales each see headroom that only one of them can use.
+	//
+	// An offline sale is a different question. The till could not check the
+	// limit, the goods have gone and the customer has left; the debt is real
+	// whatever the limit says. Refusing here would mean a receivable the shop
+	// cannot collect on because its own books deny the sale happened. So it is
+	// recorded, and flagged for somebody to ring the customer.
+	var overLimit error
 	if in.PaymentMode.OnCredit() {
-		if err := s.credit.EnsureWithinCreditLimit(ctx, tx, in.StoreID, customer.ID, computed.Total); err != nil {
+		err := s.credit.EnsureWithinCreditLimit(ctx, tx, in.StoreID, customer.ID, computed.Total)
+		switch {
+		case err == nil:
+		case in.BilledOffline:
+			overLimit = err
+		default:
 			return Result{}, err
 		}
 	}
@@ -353,9 +388,18 @@ func (s *Service) create(ctx context.Context, tx platform.Tx, in CreateInput) (R
 		// The error is returned, not discarded. The implementation this
 		// replaces used `_, _ = tx.Exec(...)` here, so a credit sale could
 		// commit with the goods gone and no receivable recorded.
-		if err := s.credit.RecordCreditSale(ctx, tx, in.StoreID, customer.ID, inv.ID, inv.Total); err != nil {
+		if err := s.credit.RecordCreditSale(ctx, tx, in.StoreID, customer.ID, inv.ID, inv.Total, in.BilledOffline); err != nil {
 			return Result{}, fmt.Errorf("record receivable: %w", err)
 		}
+	}
+
+	// Whatever the server could not verify about this sale, written in the same
+	// transaction as the sale itself. An exception written afterwards can be
+	// lost to a crash in between, and the sale would then stand with nothing
+	// saying it needs checking — worse than either outcome alone, because
+	// nobody would know to look.
+	if err := s.recordExceptions(ctx, tx, in, inv, items, overLimit); err != nil {
+		return Result{}, err
 	}
 
 	out := Result{Invoice: inv, Items: items}
@@ -532,6 +576,10 @@ func (s *Service) deductStock(ctx context.Context, tx platform.Tx, in CreateInpu
 			StoreID:   in.StoreID,
 			BatchHint: l.BatchHint,
 			Quantity:  base,
+			// Only for a sale that has already happened. At the counter, stock
+			// going short is something a cashier can act on; on sync the goods
+			// are gone and refusing would put the books at odds with the drawer.
+			AllowShortfall: in.BilledOffline,
 		})
 		if err != nil {
 			return nil, err
@@ -562,6 +610,7 @@ func (s *Service) deductStock(ctx context.Context, tx platform.Tx, in CreateInpu
 			SGST:           l.Tax.SGST,
 			IGST:           l.Tax.IGST,
 			Total:          l.Total,
+			Shortfall:      deduction.Shortfall,
 			CostOfGoods:    deduction.TotalCost,
 			UnitCostAtSale: deduction.UnitCost,
 		}
@@ -614,6 +663,66 @@ func (s *Service) invoiceNumber(ctx context.Context, tx platform.Tx, in CreateIn
 		return "", fmt.Errorf("record invoice number: %w", err)
 	}
 	return in.InvoiceNo, nil
+}
+
+// recordExceptions writes what the server could not verify about a sale it
+// accepted anyway.
+//
+// Nothing here fails the sale. By the time it runs the goods have gone and the
+// money is in the drawer; an exception that could roll that back would be a way
+// of losing a sale to a bookkeeping note.
+func (s *Service) recordExceptions(ctx context.Context, tx platform.Tx,
+	in CreateInput, inv domain.Invoice, items []domain.Item, overLimit error) error {
+	if s.exceptions == nil {
+		return nil
+	}
+
+	add := func(kind reconcile.Kind, detail string, fill func(*reconcile.Exception)) error {
+		e, err := reconcile.New(in.StoreID, kind, detail)
+		if err != nil {
+			return err
+		}
+		terminal := in.TerminalID
+		invoiceID := inv.ID
+		e.TerminalID = &terminal
+		e.InvoiceID = &invoiceID
+		if fill != nil {
+			fill(&e)
+		}
+		return s.exceptions.Insert(ctx, tx, e)
+	}
+
+	if overLimit != nil {
+		customer := *in.CustomerID
+		if err := add(reconcile.CreditLimitExceeded,
+			"This sale took the customer past their credit limit. The till was offline and could not check it. "+
+				"Decide whether to raise the limit or ask for payment.",
+			func(e *reconcile.Exception) {
+				e.CustomerID = &customer
+				e.Expected = "within the customer's credit limit"
+				e.Actual = overLimit.Error()
+			}); err != nil {
+			return fmt.Errorf("record credit limit exception: %w", err)
+		}
+	}
+
+	for _, it := range items {
+		if it.Shortfall.IsZero() {
+			continue
+		}
+		product := it.ProductID
+		if err := add(reconcile.Oversold,
+			"The shelf held less of this than the sale took. The goods have gone, so count the shelf "+
+				"and adjust it to what is actually there.",
+			func(e *reconcile.Exception) {
+				e.ProductID = &product
+				e.Expected = it.Quantity.StringFixed() + " on the shelf"
+				e.Actual = it.Quantity.Sub(it.Shortfall).StringFixed() + " was there"
+			}); err != nil {
+			return fmt.Errorf("record oversold exception: %w", err)
+		}
+	}
+	return nil
 }
 
 // terminalCode resolves the counter's code for the invoice number.

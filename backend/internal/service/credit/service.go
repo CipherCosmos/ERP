@@ -295,6 +295,19 @@ type IssueInput struct {
 	Amount    money.Money
 	// DueDate is when payment falls due. Nil means the default term.
 	DueDate *time.Time
+
+	// AlreadyIncurred records a debt the shop has already extended, skipping the
+	// limit check.
+	//
+	// It is for one case: a credit sale a till billed while it could not reach
+	// the server. The goods have gone and the customer has left, so the debt
+	// exists whatever the limit says. Refusing to record it would give the shop
+	// a receivable its own books deny, which is worse than an over-limit
+	// customer — the caller raises a reconciliation exception instead, and
+	// somebody rings them.
+	//
+	// Never set it for a sale being made now.
+	AlreadyIncurred bool
 }
 
 // RecordCreditSale checks the credit limit and writes the debt, both inside
@@ -316,8 +329,10 @@ func (s *Service) RecordCreditSale(ctx context.Context, tx platform.Tx, in Issue
 			domain.ErrValidation, in.Amount.StringFixed())
 	}
 
-	if err := s.EnsureWithinCreditLimit(ctx, tx, in.StoreID, in.CustomerID, in.Amount); err != nil {
-		return domain.Entry{}, err
+	if !in.AlreadyIncurred {
+		if err := s.EnsureWithinCreditLimit(ctx, tx, in.StoreID, in.CustomerID, in.Amount); err != nil {
+			return domain.Entry{}, err
+		}
 	}
 
 	dueDate := in.DueDate

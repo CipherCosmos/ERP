@@ -154,6 +154,13 @@ type Item struct {
 	// that loses paise on every pack size that does not divide evenly.
 	CostOfGoods money.Money `json:"cost_of_goods"`
 
+	// Shortfall is how much of this line the shelf could not account for, and is
+	// non-zero only on a sale the till billed while it was offline. The goods
+	// went; the books did not know they were there to go. It is not stored — the
+	// line records what was sold — and rides along so the sale can raise a
+	// reconciliation exception naming the amount somebody has to count.
+	Shortfall money.Quantity `json:"shortfall,omitempty"`
+
 	// UnitCostAtSale is the weighted-average cost of the batches consumed,
 	// snapshotted here because the batch's cost can change afterwards and the
 	// profit on this sale must not move with it. It is per base unit, because

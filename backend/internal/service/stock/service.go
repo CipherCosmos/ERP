@@ -766,6 +766,15 @@ func (s *Service) DeductFEFO(ctx context.Context, tx platform.Tx, req domain.Ded
 
 	// Exact, not "close enough". remaining is a decimal; if a thousandth of a
 	// unit is missing, a thousandth of a unit is missing.
+	//
+	// Unless the caller has said the goods have already gone. A sale billed
+	// while the till was offline moved stock that left the shop; the shelf
+	// disagreeing now means the shelf is wrong, and refusing would leave the
+	// books at odds with the cash drawer. The deduction then carries the
+	// shortfall and the caller records it for somebody to count.
+	if remaining.IsPositive() && req.AllowShortfall {
+		return domain.NewDeduction(consumed, req.Quantity), nil
+	}
 	if remaining.IsPositive() {
 		// What was actually available is what the walk managed to take. It is
 		// read from the debits just made rather than from a fresh SUM, which

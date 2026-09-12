@@ -276,3 +276,40 @@ func (h *harness) terminalID(t *testing.T) string {
 	mustDecode(t, created.Body.Bytes(), &term)
 	return term.ID
 }
+
+// putOnShelf books stock in through the adjustment endpoint, which is how a shop
+// records an opening count.
+func (h *harness) putOnShelf(t *testing.T, productID, unitID, qty, costEach string) {
+	t.Helper()
+	got := h.request(http.MethodPost, "/api/v1/stock/adjust?store_id="+h.storeID.String(), h.token,
+		map[string]any{
+			"product_id": productID, "product_unit_id": unitID, "unit_qty": qty,
+			"type": "add", "batch_no": "OPENING", "cost_price": costEach,
+			"reason": "opening count",
+		})
+	if got.Code != http.StatusCreated && got.Code != http.StatusOK {
+		t.Fatalf("put %s on the shelf: status %d body %s", qty, got.Code, got.Body.String())
+	}
+}
+
+// terminalCode returns a counter's code, which is a segment of every invoice
+// number it issues.
+func (h *harness) terminalCode(t *testing.T, terminalID string) string {
+	t.Helper()
+	store := h.storeID.String()
+	listed := h.request(http.MethodGet, "/api/v1/stores/"+store+"/terminals?store_id="+store, h.token, nil)
+	var body struct {
+		Terminals []struct {
+			ID   string `json:"id"`
+			Code string `json:"code"`
+		} `json:"terminals"`
+	}
+	mustDecode(t, listed.Body.Bytes(), &body)
+	for _, term := range body.Terminals {
+		if term.ID == terminalID {
+			return term.Code
+		}
+	}
+	t.Fatalf("terminal %s is not in this store", terminalID)
+	return ""
+}

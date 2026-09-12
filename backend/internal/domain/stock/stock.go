@@ -393,6 +393,20 @@ func (f UnitFactor) Validate() error {
 
 // DeductionRequest asks for a quantity of a product to leave a store.
 type DeductionRequest struct {
+	// AllowShortfall takes whatever is on the shelf when the shelf holds less
+	// than was asked for, instead of refusing.
+	//
+	// It exists for exactly one case: a sale that has already happened. A till
+	// that billed while the connection was down sold goods that left the shop,
+	// and the shelf disagreeing on sync means the shelf is wrong, not the sale.
+	// Refusing would leave a shop whose books disagree with its cash drawer,
+	// which is the one thing this system exists to prevent. The caller records
+	// the shortfall as an exception for somebody to count.
+	//
+	// Never set it for a sale being made now. Stock going short at the counter
+	// is something a cashier can act on, and silently selling air is not.
+	AllowShortfall bool
+
 	ProductID uuid.UUID
 	StoreID   uuid.UUID
 
@@ -456,6 +470,12 @@ type Deduction struct {
 	// UnitCost is TotalCost over Quantity: the weighted-average cost to
 	// snapshot on the invoice line.
 	UnitCost money.Money `json:"unit_cost"`
+
+	// Shortfall is what the shelf could not supply, and is non-zero only when
+	// the request allowed it. A sale that has already happened is recorded with
+	// the goods it moved and this figure says how much of it the books could not
+	// account for — which is a stock count waiting to happen, not a sale to undo.
+	Shortfall money.Quantity `json:"shortfall,omitempty"`
 }
 
 // PrimaryBatch is the batch to record against the movement when only one batch
@@ -483,15 +503,24 @@ func (d Deduction) PrimaryBatch() string {
 // request; a per-unit cost over zero units is not a number a ledger can hold.
 func NewDeduction(consumed []ConsumedBatch, quantity money.Quantity) Deduction {
 	total := money.Zero()
+	moved := money.ZeroQuantity()
 	for _, c := range consumed {
 		total = total.Add(c.Cost)
+		moved = moved.Add(c.Quantity)
 	}
-	return Deduction{
+	d := Deduction{
 		Batches:   consumed,
 		Quantity:  quantity,
 		TotalCost: total,
-		UnitCost:  total.DivQuantity(quantity),
+		Shortfall: quantity.Sub(moved),
 	}
+	// The average is over what actually moved. Dividing by what was asked for
+	// would understate the cost of every unit that did leave, in exactly the
+	// case where the figures are already in doubt.
+	if moved.IsPositive() {
+		d.UnitCost = total.DivQuantity(moved)
+	}
+	return d
 }
 
 // ---------------------------------------------------------------------------

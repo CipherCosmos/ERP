@@ -24,6 +24,7 @@ import (
 	expensesvc "gbos/internal/service/expense"
 	paymentsvc "gbos/internal/service/payment"
 	purchasingsvc "gbos/internal/service/purchasing"
+	reconcilesvc "gbos/internal/service/reconcile"
 	salesreturnsvc "gbos/internal/service/salesreturn"
 	stocksvc "gbos/internal/service/stock"
 	storesvc "gbos/internal/service/store"
@@ -53,6 +54,10 @@ type Services struct {
 	// Audit is the change trail. It is both a read endpoint and the sink the
 	// mutation middleware writes to.
 	Audit *auditsvc.Service
+	// Reconcile is the working list of what a shop has to look at after a till
+	// has been offline: stock the books could not account for, a credit sale
+	// past a limit the till could not check.
+	Reconcile *reconcilesvc.Service
 }
 
 // Config describes what the services need beyond a database.
@@ -82,7 +87,11 @@ func Build(db *platform.DB, cfg Config) (Services, error) {
 		Purchasing: purchasingsvc.New(db, repo.NewPurchasing(), purchasingStock{svc: stock, repo: stockRepo}),
 		Billing: billingsvc.New(db, repo.NewBilling(),
 			billingStock{svc: stock, repo: stockRepo},
-			billingCredit{svc: credit}),
+			billingCredit{svc: credit}).
+			// A sale the server cannot fully verify is accepted and flagged, not
+			// refused. Without this the sale still lands; it lands unflagged,
+			// which is why the recorder is wired here and not left optional.
+			WithExceptions(repo.NewReconcile()),
 		// The payment repository also satisfies payment's RefundReader port.
 		// When the returns aggregate grows a service of its own, that argument
 		// is where it plugs in and nothing inside payment changes.
@@ -94,6 +103,11 @@ func Build(db *platform.DB, cfg Config) (Services, error) {
 		// definition of a debt rather than a second copy of it.
 		Analytics: analyticssvc.New(db, repo.NewAnalytics(), credit),
 		Expense:   expensesvc.New(db, repo.NewExpense()),
+		// The working list of what a shop has to look at after a till has been
+		// offline. It reads with the pool rather than a transaction: nothing it
+		// does needs one, and a screen refreshing every few seconds should not
+		// hold one open.
+		Reconcile: reconcilesvc.New(db, repo.NewReconcile()),
 		Audit:     auditsvc.New(db, repo.NewAudit()),
 	}, nil
 }
@@ -192,13 +206,19 @@ func (a billingCredit) EnsureWithinCreditLimit(ctx context.Context, tx platform.
 	return a.svc.EnsureWithinCreditLimit(ctx, tx, storeID, customerID, additional)
 }
 
-func (a billingCredit) RecordCreditSale(ctx context.Context, tx platform.Tx, storeID, customerID, invoiceID uuid.UUID, amount money.Money) error {
+// RecordCreditSale writes the debt. alreadyIncurred is set for a sale a till
+// billed while it could not reach the server: the goods have gone and the
+// customer has left, so the limit check has nothing left to prevent and refusing
+// would leave the shop a receivable its own books deny.
+func (a billingCredit) RecordCreditSale(ctx context.Context, tx platform.Tx,
+	storeID, customerID, invoiceID uuid.UUID, amount money.Money, alreadyIncurred bool) error {
 	id := invoiceID
 	_, err := a.svc.RecordCreditSale(ctx, tx, creditsvc.IssueInput{
-		StoreID:    storeID,
-		CustomerID: customerID,
-		InvoiceID:  &id,
-		Amount:     amount,
+		StoreID:         storeID,
+		CustomerID:      customerID,
+		InvoiceID:       &id,
+		Amount:          amount,
+		AlreadyIncurred: alreadyIncurred,
 	})
 	return err
 }
