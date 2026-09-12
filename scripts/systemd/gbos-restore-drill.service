@@ -1,0 +1,31 @@
+# Restores the newest offsite backup into a scratch database, checks it, and
+# throws the scratch copy away. It never touches the live database.
+#
+# Driven by gbos-restore-drill.timer.
+#
+#   systemctl start gbos-restore-drill.service    # drill now
+#   journalctl -u   gbos-restore-drill.service -n 100
+#
+# If this unit is failing, the backups cannot be restored. Treat it exactly as
+# urgently as the shop being down, because it means the shop cannot be brought
+# back if it goes down.
+
+[Unit]
+Description=GBOS backup restore drill
+Documentation=file:///srv/gbos/docs/RUNBOOK.md
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/gbos
+EnvironmentFile=-/etc/gbos/backup.env
+
+# --from-remote on purpose: drilling the local copy proves the restore path
+# works but says nothing about the copy that survives the disk failing. The
+# offsite copy is the one that has to restore.
+ExecStart=/usr/bin/env bash scripts/restore-drill.sh --from-remote
+
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h

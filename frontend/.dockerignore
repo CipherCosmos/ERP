@@ -1,0 +1,23 @@
+# Without this, `COPY . .` after `npm ci` overwrites the container's clean
+# linux install with the host's node_modules (~371 MB, built for macOS/arm64),
+# producing a broken or corrupt bundle.
+node_modules
+build
+coverage
+
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+npm-debug.log*
+yarn-error.log*
+*.log
+
+.DS_Store
+.vscode
+.idea
+Dockerfile
+.dockerignore
+README.md

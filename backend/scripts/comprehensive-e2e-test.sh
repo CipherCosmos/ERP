@@ -155,13 +155,13 @@ api_delete() {
 print_header "Phase 1: System Initialization & Authentication"
 
 print_section "1.1 Login as Admin"
+# Must match the password the server was seeded with. Start the server with
+# GBOS_ADMIN_PASSWORD set, or export the same value before running this script.
+ADMIN_PASSWORD="${GBOS_ADMIN_PASSWORD:-password}"
 login_response=$(curl -s -w "\n%{http_code}" -X POST \
     "$BASE_URL/auth/login" \
     -H "Content-Type: application/json" \
-    -d '{
-        "username": "admin",
-        "password": "password"
-    }')
+    -d "{\"username\": \"admin\", \"password\": \"$ADMIN_PASSWORD\"}")
 
 assert_status_code "$login_response" "200" "Admin login"
 

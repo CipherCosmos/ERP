@@ -1,0 +1,43 @@
+# Runs one database backup. Driven by gbos-backup.timer, not enabled directly.
+#
+# Installed by scripts/install-timers.sh, which rewrites WorkingDirectory to
+# wherever the repository actually lives. If you place this by hand, fix that
+# path first.
+#
+#   systemctl start  gbos-backup.service      # run one now
+#   journalctl -u    gbos-backup.service -n 50
+
+[Unit]
+Description=GBOS database backup
+Documentation=file:///srv/gbos/docs/RUNBOOK.md
+# The backup talks to a container, so Docker has to be up first. Wants rather
+# than Requires: if Docker is broken the backup should fail and say so, not be
+# silently skipped.
+Wants=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+
+# Compose reads .env from here, and the script writes relative BACKUP_DIRs
+# here too.
+WorkingDirectory=/srv/gbos
+
+# Backup-only settings: BACKUP_DIR, RETAIN_DAYS, BACKUP_REMOTE and so on.
+# Deliberately NOT the application's .env — this job has no business holding
+# JWT_SECRET. The leading - means "carry on if the file is absent".
+EnvironmentFile=-/etc/gbos/backup.env
+
+ExecStart=/usr/bin/env bash scripts/backup.sh
+
+# A backup must never be the reason the counter is slow.
+Nice=10
+IOSchedulingClass=idle
+
+# Dumping the whole database can take a while on a slow disk; do not shoot it.
+TimeoutStartSec=2h
+
+# Failures land in the journal. There is no retry: the next night's run is the
+# retry, and a repeated failure should be visible rather than papered over.
+#   systemctl list-timers gbos-backup.timer
+#   journalctl -u gbos-backup.service --since '2 days ago'

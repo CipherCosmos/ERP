@@ -404,61 +404,76 @@ bash scripts/smoke-test.sh
 
 ## 🚀 Deployment
 
-### Docker Compose
+The target is **one VPS the owner administers themselves**, running the stack
+under docker compose. **[docs/RUNBOOK.md](./docs/RUNBOOK.md)** is the operating
+manual: first deploy, backups, restore, reading logs, and what to check when
+the shop says it is down. Read that, not this summary.
+
+### The stack
+
+| Container | What it is | Reachable from |
+|---|---|---|
+| `gbos-caddy` | TLS terminator and front door; gets and renews its own certificate | the internet, ports 80 and 443 |
+| `gbos-frontend` | nginx serving the built React bundle | Caddy only |
+| `gbos-backend` | the Go application | Caddy only |
+| `gbos-postgres` | PostgreSQL 16 — the shop's books | the backend only |
+
+Only Caddy publishes a host port. The database is not exposed at all.
+
+### Settings
+
+Copy `.env.example` to `.env` and fill it in. Compose refuses to start if any
+required value is missing, by name, rather than defaulting to something wrong:
+
+| Required | What |
+|---|---|
+| `JWT_SECRET` | `openssl rand -base64 48`. Placeholders are rejected at start. |
+| `POSTGRES_PASSWORD` | `openssl rand -base64 24` |
+| `GBOS_DOMAIN` | the hostname the shop uses; a bare hostname triggers automatic TLS |
+| `GBOS_TLS_EMAIL` | where Let's Encrypt reports renewal problems |
+| `CORS_ORIGIN` | the exact public origin, e.g. `https://shop.example.com` |
+
+`.env.example` documents the optional ones (ports, network, timezone, backups).
+
+### Running it
 
 ```bash
-docker-compose up -d
+cp .env.example .env && chmod 600 .env   # then edit it
+docker compose config >/dev/null         # parses, starts nothing
+docker compose up -d --build
+docker compose ps                        # wait for (healthy)
 ```
 
-**Services:**
-- Backend: http://localhost:8080
-- Frontend: http://localhost:80
-- Database: SQLite in volume
+Before the first `up` on a machine that already runs other stacks, work through
+the port and network collision check in the runbook — the stack wants 80, 443
+and the `10.89.7.0/24` private network.
 
-### Environment Variables
+### Backups
+
+There is no backup until the timers are installed:
 
 ```bash
-# Backend
-PORT=8080
-DATABASE_PATH=./data/gbos.db
-GIN_MODE=release
-JWT_SECRET=your-secret-key
-CORS_ORIGIN=http://localhost
-LOG_LEVEL=info
-
-# Frontend
-REACT_APP_API_URL=http://localhost:8080/api/v1
+sudo bash scripts/install-timers.sh      # nightly backup + monthly restore drill
+sudo nano /etc/gbos/backup.env           # set BACKUP_REMOTE, or it stays on this disk
+bash scripts/restore-drill.sh            # prove a backup restores. Safe; never touches live data.
 ```
-
-### Production Deployment
-
-1. **Build Images**
-   ```bash
-   docker build -t gbos-backend ./backend
-   docker build -t gbos-frontend ./frontend
-   ```
-
-2. **Push to Registry**
-   ```bash
-   docker push your-registry/gbos-backend
-   docker push your-registry/gbos-frontend
-   ```
-
-3. **Deploy with Kubernetes** (helm charts available)
-   ```bash
-   helm install gbos ./helm/gbos
-   ```
 
 ---
 
 ## 🔄 CI/CD Pipeline
 
-**GitHub Actions** automatically:
-- Runs unit tests on every push
-- Builds Docker images
-- Runs E2E tests
-- Generates test reports
-- Deploys to staging on merge to main
+**GitHub Actions**, on every push and pull request:
+
+- `go vet` and the full Go suite with `-race`, against a **real PostgreSQL
+  service container** — not mocks
+- migrations up from empty, all the way down, and up again
+- frontend lint and production build
+- **Ops Config**: parses `docker-compose.yml` (and proves it refuses to start
+  with any secret missing), checks only Caddy publishes a host port, validates
+  the Caddyfile, and runs shellcheck over `scripts/`
+- builds both Docker images
+
+Nothing is deployed automatically, and no step swallows a failure.
 
 View `.github/workflows/ci.yml`
 
@@ -466,6 +481,7 @@ View `.github/workflows/ci.yml`
 
 ## 📖 Documentation
 
+- **[docs/RUNBOOK.md](./docs/RUNBOOK.md)** - Operating the system on a VPS: first deploy, backups, restore, logs, outages
 - **[EXECUTION_GUIDE.md](./EXECUTION_GUIDE.md)** - Complete testing guide with expected outputs
 - **[E2E_TESTING_GUIDE.md](./E2E_TESTING_GUIDE.md)** - Detailed test scenarios (13 phases, 100+ cases)
 - **[backend/scripts/README.md](./backend/scripts/README.md)** - Test utilities reference

@@ -1,0 +1,44 @@
+# Backing services for local development and tests.
+#
+# The application itself is not here — run it with `make backend` / `make
+# frontend` so you keep a fast edit-rebuild loop. This file only provides the
+# things that are awkward to run natively.
+#
+#   make db-up      start Postgres
+#   make test       run the Go suite against it
+#   make db-down    stop it (data is preserved)
+#   make db-reset   stop it and destroy the data
+#
+# Port 5434 is deliberate: it keeps out of the way of the other Postgres
+# containers already running on this machine (5432 and 5433 are taken).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gbos-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: gbos
+      POSTGRES_PASSWORD: gbos_dev_password
+      POSTGRES_DB: gbos_dev
+      # Speeds up the throwaway case; never use these settings for real data.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "5434:5432"
+    volumes:
+      - gbos-dev-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gbos -d gbos_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  gbos-dev-pgdata:
+    driver: local

@@ -1,0 +1,91 @@
+# TLS terminator and front door for GBOS.
+#
+# Everything the outside world touches arrives here. Caddy obtains and renews
+# the certificate by itself, so there is no certbot cron job to forget and no
+# expiry to be woken up by.
+#
+# Two settings come from the environment (compose passes them through from
+# .env). Both are validated at start: a wrong value fails loudly here rather
+# than silently serving the wrong site.
+#
+#   GBOS_SITE_ADDRESS   the address to serve. Normally just the bare domain,
+#                       e.g. shop.example.com — a bare hostname makes Caddy
+#                       fetch a real certificate and redirect http to https.
+#                       Use http://localhost to run without TLS (a laptop, or
+#                       a first smoke test before DNS is pointed).
+#   GBOS_TLS_EMAIL      the address Let's Encrypt mails about expiry problems.
+#
+# After editing this file, apply it with:
+#   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+# which validates before swapping, so a typo leaves the running site up.
+
+{
+	email {$GBOS_TLS_EMAIL}
+
+	# The admin API is reachable only from inside the compose network — the
+	# port is never published. It is what `caddy reload` talks to.
+	admin localhost:2019
+}
+
+# --- the shop --------------------------------------------------------------
+
+{$GBOS_SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		# Tells the browser never to speak plain HTTP to this host again.
+		# Browsers ignore it when it arrives over plain HTTP, so this is
+		# harmless in the http://localhost case.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+
+		# Do not advertise the server software.
+		-Server
+	}
+
+	# Bills can carry a lot of line items, and stock imports are bulkier
+	# still. This matches the limit the frontend's nginx already applies.
+	request_body {
+		max_size 100MB
+	}
+
+	# The API goes straight to the backend rather than through the frontend's
+	# nginx. One proxy hop means one X-Forwarded-For entry, which is what the
+	# login rate limiter needs to see a real client address.
+	#
+	# No active health checking here on purpose: there is one upstream, so
+	# marking it down only turns the backend's own 503 into a less informative
+	# 502, and adds a way for a renamed health path to take the API offline.
+	handle /api/* {
+		reverse_proxy backend:8080
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+# --- internal health -------------------------------------------------------
+#
+# Port 2020 is not published to the host. It exists so the container's own
+# healthcheck has something to ask that does not depend on the site's hostname
+# or on a certificate being issued yet.
+:2020 {
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		respond 404
+	}
+}

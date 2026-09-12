@@ -1,5 +1,32 @@
 backend/data/*.db
 backend/data/*.db-journal
+backend/data/*.db-shm
+backend/data/*.db-wal
 frontend/node_modules/
 frontend/build/
 .DS_Store
+
+# Build output and runtime logs — never commit these
+backend/server
+backend/migrate
+*.log
+
+# Editor/agent workspace settings. Local to one machine.
+.claude/
+
+# Local environment files
+.env
+.env.local
+backend/.env
+
+# Database dumps are the shop's books. They must never be in git, and the
+# default BACKUP_DIR is ./backups.
+backups/
+*.dump
+*.dump.partial
+*.dump.corrupt
+
+# Scratch files written by `make ops-check` and the CI ops job
+.ops-check.env
+ci.env
+partial.env

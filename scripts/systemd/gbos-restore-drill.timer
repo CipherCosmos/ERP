@@ -1,0 +1,18 @@
+# Monthly proof that the backups actually restore.
+#
+#   systemctl enable --now gbos-restore-drill.timer
+#   systemctl list-timers gbos-restore-drill.timer
+
+[Unit]
+Description=Monthly GBOS backup restore drill
+
+[Timer]
+# First Sunday of the month, 03:30 — well after the nightly backup has
+# finished and long before the shop opens.
+OnCalendar=Sun *-*-01..07 03:30:00
+RandomizedDelaySec=20m
+Persistent=true
+Unit=gbos-restore-drill.service
+
+[Install]
+WantedBy=timers.target

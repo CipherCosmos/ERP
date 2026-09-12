@@ -1,0 +1,27 @@
+# Nightly database backup.
+#
+#   systemctl enable --now gbos-backup.timer
+#   systemctl list-timers gbos-backup.timer      # when it last ran, when next
+
+[Unit]
+Description=Nightly GBOS database backup
+
+[Timer]
+# 02:15 local time — after the shop has closed and cashed up, before anyone
+# arrives. The recovery point is therefore up to a day of billing: everything
+# rung up after the last successful run is lost in a restore. If that is too
+# much, add a second OnCalendar line (e.g. 14:15) rather than moving this one.
+OnCalendar=*-*-* 02:15:00
+
+# Stops every GBOS box on the internet hitting the same offsite target at the
+# same second.
+RandomizedDelaySec=15m
+
+# A shop that switches the machine off at night would otherwise never back up:
+# this runs the missed job at the next boot instead of skipping the day.
+Persistent=true
+
+Unit=gbos-backup.service
+
+[Install]
+WantedBy=timers.target

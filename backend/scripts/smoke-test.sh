@@ -155,7 +155,7 @@ cd "$BACKEND_DIR"
 go build -o "$TEST_DB_DIR/server" ./cmd/server/
 
 echo "Starting server with fresh DB at $TEST_DB..."
-DATABASE_PATH="$TEST_DB" SERVER_PORT=8080 JWT_SECRET=test-secret "$TEST_DB_DIR/server" &
+DATABASE_PATH="$TEST_DB" SERVER_PORT=8080 JWT_SECRET=test-secret GBOS_ADMIN_PASSWORD=admin123 "$TEST_DB_DIR/server" &
 SERVER_PID=$!
 sleep 2
 

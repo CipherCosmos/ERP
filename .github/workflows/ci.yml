@@ -10,49 +10,130 @@ jobs:
   backend-test:
     runs-on: ubuntu-latest
     name: Backend Tests
+
+    # Tests that touch the database run against a real Postgres, not a mock.
+    # Mocked SQL would hide exactly the class of defect this suite exists to
+    # catch: constraint violations, transaction behaviour and lost updates.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gbos
+          POSTGRES_PASSWORD: gbos_ci_password
+          POSTGRES_DB: gbos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gbos -d gbos_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://gbos:gbos_ci_password@localhost:5432/gbos_test?sslmode=disable
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          # Read from go.mod rather than pinned here, so CI cannot drift from
+          # the version the module actually requires.
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
 
       - name: Install dependencies
         run: go mod download
         working-directory: backend
 
+      - name: Vet
+        run: go vet ./...
+        working-directory: backend
+
+      # -p 2 caps how many package test binaries run at once. Each opens its
+      # own pool against the single Postgres service container, and the default
+      # (one per CPU) exhausts its max_connections.
       - name: Run tests
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: go test -race -coverprofile=coverage.out -p 2 ./...
         working-directory: backend
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           files: ./backend/coverage.out
           flags: backend
 
       - name: Build backend
-        run: CGO_ENABLED=1 go build -o server ./cmd/server
+        run: go build -o server ./cmd/server
+        working-directory: backend
+
+  migration-check:
+    runs-on: ubuntu-latest
+    name: Migrations apply and roll back
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: gbos
+          POSTGRES_PASSWORD: gbos_ci_password
+          POSTGRES_DB: gbos_migrate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gbos -d gbos_migrate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://gbos:gbos_ci_password@localhost:5432/gbos_migrate?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Read from go.mod rather than pinned here, so CI cannot drift from
+          # the version the module actually requires.
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      # A migration that cannot be rolled back is a migration you cannot
+      # recover from, so both directions are exercised on every push.
+      - name: Migrate up from empty
+        run: go run ./cmd/migrate -database "$DATABASE_URL" up
+        working-directory: backend
+
+      - name: Migrate all the way down
+        run: go run ./cmd/migrate -database "$DATABASE_URL" down-all -yes
+        working-directory: backend
+
+      - name: Migrate up again
+        run: go run ./cmd/migrate -database "$DATABASE_URL" up
         working-directory: backend
 
   frontend-build:
     runs-on: ubuntu-latest
     name: Frontend Build
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install dependencies
         run: npm ci
         working-directory: frontend
 
-      - name: Run linter (if configured)
-        run: npm run lint || true
+      - name: Run linter
+        run: npm run lint
         working-directory: frontend
 
       - name: Build frontend
@@ -61,66 +142,112 @@ jobs:
         env:
           REACT_APP_API_URL: /api/v1
 
+  # The deployment files are the ones nobody compiles, so nothing catches a
+  # mistake in them until it is on the shop's machine. These checks parse and
+  # validate every one of them, and start nothing.
+  ops-config:
+    runs-on: ubuntu-latest
+    name: Ops Config
+    steps:
+      - uses: actions/checkout@v4
+
+      # An earlier bug here was an unquoted value containing "with:", which
+      # YAML happily parsed as a nested mapping. Parsing on every push is what
+      # keeps that class of mistake off the VPS.
+      - name: Production compose parses
+        run: |
+          cat > ci.env <<'ENV'
+          JWT_SECRET=ci-placeholder-value-not-a-real-secret-0123456789
+          POSTGRES_PASSWORD=ci-placeholder-value
+          GBOS_DOMAIN=shop.example.com
+          GBOS_TLS_EMAIL=ci@example.com
+          CORS_ORIGIN=https://shop.example.com
+          ENV
+          docker compose --env-file ci.env config >/dev/null
+
+      # Every required secret must be a hard failure, not a silent default.
+      # Both cases: the line deleted, and the line present but left empty —
+      # the second is what copying .env.example and forgetting one looks like.
+      - name: Missing secrets are refused, one at a time
+        run: |
+          failed=0
+          for var in JWT_SECRET POSTGRES_PASSWORD GBOS_DOMAIN GBOS_TLS_EMAIL CORS_ORIGIN; do
+            grep -v "^$var=" ci.env > partial.env
+            if docker compose --env-file partial.env config >/dev/null 2>&1; then
+              echo "::error::docker-compose.yml parses with $var unset - it must fail loudly instead"
+              failed=1
+            fi
+            sed "s|^$var=.*|$var=|" ci.env > partial.env
+            if docker compose --env-file partial.env config >/dev/null 2>&1; then
+              echo "::error::docker-compose.yml parses with $var empty - it must fail loudly instead"
+              failed=1
+            fi
+          done
+          exit $failed
+
+      # Copying the example and filling in nothing must not start a stack.
+      - name: .env.example as shipped is refused
+        run: |
+          if docker compose --env-file .env.example config >/dev/null 2>&1; then
+            echo "::error::.env.example parses as-is - its required values must be blank"
+            exit 1
+          fi
+
+      - name: Nothing but Caddy is published to the host
+        run: |
+          published=$(docker compose --env-file ci.env config --format json \
+            | jq -r '.services | to_entries[] | select(.value.ports) | .key' | sort | tr '\n' ' ')
+          if [ "$published" != "caddy " ]; then
+            echo "::error::services publishing host ports: $published (expected only caddy)"
+            exit 1
+          fi
+
+      # The dev workflow must keep working: `make db-up` brings up Postgres and
+      # nothing else, on 5434, out of the way of other stacks.
+      - name: Dev compose is still Postgres only
+        run: |
+          docker compose -f docker-compose.dev.yml config >/dev/null
+          services=$(docker compose -f docker-compose.dev.yml config --services | sort | tr '\n' ' ')
+          if [ "$services" != "postgres " ]; then
+            echo "::error::docker-compose.dev.yml defines: $services (expected only postgres)"
+            exit 1
+          fi
+
+      # A broken Caddyfile means no TLS at all, and the only symptom is a
+      # container that will not start. Adapt and validate it here instead.
+      - name: Caddyfile is valid
+        run: |
+          docker run --rm \
+            -e GBOS_SITE_ADDRESS=shop.example.com \
+            -e GBOS_TLS_EMAIL=ci@example.com \
+            -v "$PWD/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      # Default severity, deliberately: the backup and restore scripts are the
+      # ones that run unattended at 02:15 with nobody reading the output.
+      - name: Shell scripts
+        run: shellcheck -x scripts/*.sh
+
   docker-build:
     runs-on: ubuntu-latest
     name: Docker Build
     needs: [backend-test, frontend-build]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       - name: Build backend image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: ./backend
           push: false
           tags: gbos-backend:latest
 
       - name: Build frontend image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: ./frontend
           push: false
           tags: gbos-frontend:latest
-
-  integration-test:
-    runs-on: ubuntu-latest
-    name: Integration Tests
-    needs: docker-build
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Build backend
-        run: docker build -t gbos-backend:test ./backend
-
-      - name: Build frontend
-        run: docker build -t gbos-frontend:test ./frontend
-
-      - name: Start services with docker-compose
-        run: |
-          docker-compose -f docker-compose.yml up -d
-          sleep 10
-
-      - name: Check backend health
-        run: |
-          for i in {1..30}; do
-            curl -s http://localhost:8080/api/v1/health && break || sleep 1
-          done
-
-      - name: Check frontend health
-        run: |
-          for i in {1..30}; do
-            curl -s http://localhost/ > /dev/null && break || sleep 1
-          done
-
-      - name: Run smoke tests
-        run: bash backend/scripts/smoke-test.sh || true
-
-      - name: Cleanup
-        if: always()
-        run: docker-compose down -v

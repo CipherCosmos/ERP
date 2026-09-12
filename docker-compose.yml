@@ -1,53 +1,216 @@
-version: '3.8'
+# Production stack.
+#
+# Requires a .env file alongside this one. Copy .env.example and fill it in.
+# At minimum:
+#   JWT_SECRET        openssl rand -base64 48
+#   POSTGRES_PASSWORD openssl rand -base64 24
+#   GBOS_DOMAIN       the hostname the shop will use, e.g. shop.example.com
+#   GBOS_TLS_EMAIL    where Let's Encrypt should mail about certificate problems
+#
+# Anything missing stops the stack at parse time with a named error, rather
+# than starting something subtly wrong.
+#
+# The backend applies the schema on start. The migrations are compiled into
+# the binary, so there is no directory to mount and no separate step to forget.
+#
+# Before the first `docker compose up` on a machine that runs other stacks,
+# check for collisions — see docs/RUNBOOK.md, "First deploy".
+#   docker compose --env-file .env config      # parses only, starts nothing
 
 services:
+  # --- TLS terminator and front door ---------------------------------------
+  #
+  # The only service published to the host. Caddy obtains and renews the
+  # certificate itself and redirects plain HTTP to HTTPS, so nothing else
+  # needs to know TLS exists.
+  caddy:
+    image: caddy:2-alpine
+    container_name: gbos-caddy
+    restart: unless-stopped
+    ports:
+      # Bind address is configurable so this can sit on a second IP if port
+      # 80/443 on the primary address already belongs to another stack.
+      - "${GBOS_BIND_ADDRESS:-0.0.0.0}:${GBOS_HTTP_PORT:-80}:80"
+      - "${GBOS_BIND_ADDRESS:-0.0.0.0}:${GBOS_HTTPS_PORT:-443}:443"
+      # HTTP/3. Harmless to publish; browsers fall back to TCP without it.
+      - "${GBOS_BIND_ADDRESS:-0.0.0.0}:${GBOS_HTTPS_PORT:-443}:443/udp"
+    environment:
+      # A bare hostname makes Caddy fetch a real certificate. Set it to
+      # http://localhost to run without TLS while DNS is still pointing
+      # somewhere else.
+      GBOS_SITE_ADDRESS: ${GBOS_DOMAIN:?set GBOS_DOMAIN in .env, e.g. shop.example.com}
+      GBOS_TLS_EMAIL: ${GBOS_TLS_EMAIL:?set GBOS_TLS_EMAIL in .env - Let's Encrypt mails this address when renewal is failing}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Issued certificates and ACME account keys live here. If this is lost,
+      # every restart requests new certificates and Let's Encrypt's rate limit
+      # (5 per domain per week) will eventually lock the shop out of HTTPS.
+      - gbos-caddy-data:/data
+      - gbos-caddy-config:/config
+    networks:
+      - gbos-network
+    # Deliberately does NOT wait for the backend or the database. Caddy is
+    # what tells you the site is up and what is wrong with it, and it is what
+    # keeps the certificate renewed. If it only started once the database was
+    # healthy, a bad database would also silently stop renewals.
+    depends_on:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:2020/healthz | grep -q ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: gbos-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gbos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-gbos}
+      # Detects silent disk corruption, which matters more here than the few
+      # percent of write throughput it costs: this volume is the shop's books.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - gbos-pgdata:/var/lib/postgresql/data
+    # Deliberately not published to the host. Only the backend needs it, and
+    # it reaches it over the private network below.
+    expose:
+      - "5432"
+    networks:
+      - gbos-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gbos} -d ${POSTGRES_DB:-gbos}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          # A cap, not a reservation: the container only uses what it needs.
+          memory: 1G
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: gbos-backend:local
     container_name: gbos-backend
-    ports:
-      - "8080:8080"
+    # Without this, one crash or a host reboot leaves the shop offline until
+    # somebody connects and starts it by hand.
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Not published to the host. The only way in is through Caddy, which is
+    # also what makes the trusted-proxy setting below safe.
+    expose:
+      - "8080"
     environment:
-      DATABASE_PATH: /app/data/gbos.db
+      DATABASE_URL: postgres://${POSTGRES_USER:-gbos}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gbos}?sslmode=disable
       GIN_MODE: release
-      JWT_SECRET: ${JWT_SECRET:-default-change-in-production}
-      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
-      LOG_LEVEL: info
-    volumes:
-      - gbos-data:/app/data
+      JWT_SECRET: "${JWT_SECRET:?set JWT_SECRET in .env - generate one with 'openssl rand -base64 48'}"
+      CORS_ORIGIN: ${CORS_ORIGIN:?set CORS_ORIGIN in .env to the exact origin the browser loads, e.g. https://shop.example.com}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Rate limiting keys on client IP. Without this, every request looks like
+      # it comes from Caddy and the whole shop shares one login-attempt budget.
+      # Trusting the header is only safe because the backend port is not
+      # published: the sole route in is Caddy, on this network.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-10.89.7.0/24}
+      # Day boundaries in reports follow this. Wrong here means yesterday's
+      # takings land in today's column.
+      TZ: ${TZ:-Asia/Kolkata}
+      # Applied only on the first run against an empty database. If unset, a
+      # random password is generated and printed once in these logs.
+      GBOS_ADMIN_PASSWORD: ${GBOS_ADMIN_PASSWORD:-}
     networks:
       - gbos-network
+    # Asks the application to talk to the database and checks the answer. A
+    # check that only proves the process is listening stays green through a
+    # total database outage, which is the one failure it exists to catch.
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/api/v1/health"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/api/v1/health | grep -q '\"database\":\"ok\"'"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      # Long enough to cover migrations on first start.
+      start_period: 60s
+    # Unbounded json-file logs will eventually fill the disk and take the
+    # database down with them.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+    image: gbos-frontend:local
     container_name: gbos-frontend
-    ports:
-      - "80:80"
+    restart: unless-stopped
+    # Not published to the host; Caddy serves it.
+    expose:
+      - "80"
     depends_on:
       backend:
         condition: service_healthy
     networks:
       - gbos-network
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
 
 volumes:
-  gbos-data:
+  gbos-pgdata:
+    driver: local
+  gbos-caddy-data:
+    driver: local
+  gbos-caddy-config:
     driver: local
 
 networks:
   gbos-network:
     driver: bridge
+    ipam:
+      config:
+        # Pinned so TRUSTED_PROXIES above can name it exactly. Docker refuses
+        # to create the network if this overlaps one that already exists, so a
+        # clash is a loud error at `up`, not a silent misroute. Change both
+        # this and TRUSTED_PROXIES together if you have to move it.
+        - subnet: ${GBOS_NETWORK_SUBNET:-10.89.7.0/24}

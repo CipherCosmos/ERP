@@ -1,0 +1,22 @@
+# Keeps the build context small and stops local databases, build output and
+# secrets from being baked into an image layer.
+data
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+
+server
+*.log
+
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.vscode
+.idea
+Dockerfile
+.dockerignore
