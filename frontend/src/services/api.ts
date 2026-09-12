@@ -1,5 +1,5 @@
 import axios, { AxiosResponse } from 'axios';
-import { Category, CategoryMergeResult, Product, Store, Customer, Invoice, Terminal } from '../types';
+import { Category, CategoryMergeResult, ImportReport, Product, Store, Customer, Invoice, Terminal } from '../types';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || '/api/v1',
@@ -226,6 +226,29 @@ export const categoryApi = {
 export const productApi = {
   list: (params: { store_id: string; category_id?: string; barcode?: string; search?: string }) =>
     list<Product>(api.get('/products', { params }), 'products'),
+  /**
+   * Uploads a catalogue spreadsheet.
+   *
+   * Without `apply` this is a dry run: the server does the whole import and
+   * rolls the transaction back, so the report is what would happen rather than
+   * a guess. The same call with `apply` commits it.
+   */
+  import: (
+    storeId: string,
+    file: File,
+    opts: { apply?: boolean; updateExisting?: boolean } = {}
+  ) => {
+    const body = new FormData();
+    body.append('file', file);
+    if (opts.apply) body.append('apply', 'true');
+    if (opts.updateExisting) body.append('update_existing', 'true');
+    // No explicit Content-Type: the browser has to set the multipart boundary
+    // itself, and naming the type without one produces a body the server
+    // cannot split.
+    return api.post<ImportReport>('/products/import', body, { params: { store_id: storeId } });
+  },
+  /** The empty sheet with the headings that are certain to be accepted. */
+  importTemplate: () => api.get('/products/import/template', { responseType: 'blob' }),
   get: (id: string, storeId: string) => api.get(`/products/${id}`, { params: { store_id: storeId } }),
   /**
    * The units a product may be transacted in: loose by the kilo, a 5 kg bag, a

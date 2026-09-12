@@ -24,6 +24,14 @@ func invalid(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{ErrValidation}, args...)...)
 }
 
+// Invalid builds a validation error from outside this package.
+//
+// The service layer needs it for the rules it owns that are still the caller's
+// mistake rather than the system's — a unit name that matches nothing, a
+// category path that resolves to nothing — so that those come back through the
+// same sentinel every other rejected value does and are rendered the same way.
+func Invalid(format string, args ...any) error { return invalid(format, args...) }
+
 // Category groups products for reporting and for the POS keypad. Names carry
 // Hindi and Kannada translations because the shop floor is multilingual.
 type Category struct {

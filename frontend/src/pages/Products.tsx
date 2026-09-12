@@ -416,6 +416,10 @@ export default function Products() {
       <div style={styles.header}>
         <button onClick={() => navigate('/')} style={ui.button}>← Back</button>
         <h1 style={styles.h1}>Products</h1>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: space.sm }}>
+          <button style={ui.button} onClick={() => navigate('/categories')}>Categories</button>
+          <button style={ui.button} onClick={() => navigate('/products/import')}>Import a catalogue</button>
+        </div>
       </div>
 
       <div style={styles.summary}>

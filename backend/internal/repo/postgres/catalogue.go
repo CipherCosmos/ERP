@@ -16,6 +16,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -1046,4 +1047,117 @@ func nullIfBlank(s string) any {
 func escapeLike(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(s)
+}
+
+// ---------------------------------------------------------------------------
+// Lookups the bulk import needs
+// ---------------------------------------------------------------------------
+//
+// An import matches a sheet against what is already stored, and it matches the
+// way a person would: by the name they typed, not by an identifier they have
+// never seen. That makes these lookups case-insensitive and accent-exact, which
+// is the right trade — "ATTA" and "Atta" are the same product, "Aata" is a
+// different spelling and a human has to decide.
+
+// FindCategoryByName returns an active category with this name under this
+// parent. parentID nil means a top-level category.
+//
+// The parent is part of the key because two different "Flour" categories under
+// two different parents are two different categories, and an import that
+// collapsed them would file one shop's baking flour with its atta.
+func (r *Catalogue) FindCategoryByName(ctx context.Context, q platform.Querier,
+	name string, parentID *uuid.UUID) (catalogue.Category, bool, error) {
+	c, err := scanCategory(q.QueryRowContext(ctx,
+		`SELECT `+categoryColumns+categoryFrom+
+			` WHERE c.is_active AND lower(c.name) = lower($1) AND c.parent_id IS NOT DISTINCT FROM $2
+			  LIMIT 1`, name, parentID))
+	if err != nil {
+		if errors.Is(platform.MapError(err), platform.ErrNotFound) {
+			return catalogue.Category{}, false, nil
+		}
+		return catalogue.Category{}, false, platform.MapError(err)
+	}
+	return c, true, nil
+}
+
+// FindUnitByCodeOrName resolves what somebody typed in a unit column.
+//
+// Code first: "KG" is unambiguous, and a shop's sheet uses codes far more often
+// than names. The name is tried second so "Kilogram" also works.
+func (r *Catalogue) FindUnitByCodeOrName(ctx context.Context, q platform.Querier,
+	text string) (catalogue.UnitOfMeasure, bool, error) {
+	u, err := scanUnit(q.QueryRowContext(ctx,
+		`SELECT `+unitColumns+` FROM units_of_measure
+		  WHERE is_active AND (lower(code) = lower($1) OR lower(name) = lower($1))
+		  ORDER BY (lower(code) = lower($1)) DESC
+		  LIMIT 1`, text))
+	if err != nil {
+		if errors.Is(platform.MapError(err), platform.ErrNotFound) {
+			return catalogue.UnitOfMeasure{}, false, nil
+		}
+		return catalogue.UnitOfMeasure{}, false, platform.MapError(err)
+	}
+	return u, true, nil
+}
+
+// FindProductByBarcode returns the product carrying this barcode, in any store
+// and whether or not it is still active.
+//
+// Inactive products are deliberately included. A barcode is unique across the
+// whole table, so a discontinued product still holds its own: reporting "no
+// such product" and then failing on the unique index is the worst of both.
+func (r *Catalogue) FindProductByBarcode(ctx context.Context, q platform.Querier,
+	barcode string) (catalogue.Product, bool, error) {
+	return oneProduct(q.QueryRowContext(ctx,
+		`SELECT `+plainProductColumns+` FROM products WHERE barcode = $1`, barcode))
+}
+
+// FindProductByName returns an active product with this name in this category.
+// It is how a row without a barcode is matched — which is most of them, because
+// a shop's own sheet rarely carries one.
+func (r *Catalogue) FindProductByName(ctx context.Context, q platform.Querier,
+	name string, categoryID uuid.UUID) (catalogue.Product, bool, error) {
+	return oneProduct(q.QueryRowContext(ctx,
+		`SELECT `+plainProductColumns+` FROM products
+		  WHERE is_active AND category_id = $2 AND lower(name) = lower($1)
+		  LIMIT 1`, name, categoryID))
+}
+
+// DefaultProductUnitID returns the unit a bare quantity of this product means,
+// which is also the unit an imported price attaches to.
+func (r *Catalogue) DefaultProductUnitID(ctx context.Context, q platform.Querier,
+	productID uuid.UUID) (uuid.UUID, bool, error) {
+	var id uuid.UUID
+	err := q.QueryRowContext(ctx,
+		`SELECT id FROM product_units WHERE product_id = $1 AND is_default AND is_active`,
+		productID).Scan(&id)
+	if err != nil {
+		if errors.Is(platform.MapError(err), platform.ErrNotFound) {
+			return uuid.Nil, false, nil
+		}
+		return uuid.Nil, false, platform.MapError(err)
+	}
+	return id, true, nil
+}
+
+const plainProductColumns = `id, name, COALESCE(name_hi, ''), COALESCE(name_kn, ''),
+	category_id, COALESCE(hsn_code, ''), COALESCE(sac_code, ''), COALESCE(barcode, ''),
+	uom_id, base_unit_qty, gst_rate, is_free, is_active, allow_decimal, min_stock,
+	COALESCE(image_url, ''), COALESCE(brand, ''), COALESCE(description, ''),
+	tracks_expiry, shelf_life_days, preferred_vendor_id`
+
+func oneProduct(row interface{ Scan(...any) error }) (catalogue.Product, bool, error) {
+	var p catalogue.Product
+	err := row.Scan(&p.ID, &p.Name, &p.NameHi, &p.NameKn, &p.CategoryID,
+		&p.HSNCode, &p.SACCode, &p.Barcode, &p.UOMID, &p.BaseUnitQty, &p.GSTRate,
+		&p.IsFree, &p.IsActive, &p.AllowDecimal, &p.MinStock,
+		&p.ImageURL, &p.Brand, &p.Description,
+		&p.TracksExpiry, &p.ShelfLifeDays, &p.PreferredVendorID)
+	if err != nil {
+		if errors.Is(platform.MapError(err), platform.ErrNotFound) {
+			return catalogue.Product{}, false, nil
+		}
+		return catalogue.Product{}, false, platform.MapError(err)
+	}
+	return p, true, nil
 }

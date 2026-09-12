@@ -4,6 +4,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
 	domain "gbos/internal/domain/catalogue"
@@ -59,6 +60,10 @@ func (h *Catalogue) Register(r gin.IRoutes) {
 	r.GET("/products", mw.RequirePermission(rbac.PermCatalogRead), h.ListProducts)
 	r.GET("/products/:id", mw.RequirePermission(rbac.PermCatalogRead), h.GetProduct)
 	r.POST("/products", mw.RequirePermission(rbac.PermProductCatalogWrite), h.CreateProduct)
+	// Import sits behind the same permission as creating a product, because
+	// that is exactly what it does — several thousand times.
+	r.POST("/products/import", mw.RequirePermission(rbac.PermProductCatalogWrite), h.ImportProducts)
+	r.GET("/products/import/template", mw.RequirePermission(rbac.PermCatalogRead), h.ImportTemplate)
 	r.PUT("/products/:id", mw.RequirePermission(rbac.PermProductUpdate), h.UpdateProduct)
 	r.POST("/products/:id/deactivate", mw.RequirePermission(rbac.PermProductUpdate), h.DeactivateProduct)
 	r.POST("/products/:id/activate", mw.RequirePermission(rbac.PermProductUpdate), h.ActivateProduct)
@@ -861,4 +866,66 @@ func (h *Catalogue) SetPrice(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, price)
+}
+
+// maxImportBytes bounds an upload. Five thousand rows of catalogue is well
+// under a megabyte; four is room for a sheet with long descriptions and no
+// room for someone uploading a video.
+const maxImportBytes = 4 << 20
+
+// ImportProducts takes a catalogue spreadsheet.
+//
+// It runs as a dry run unless the caller asks for it to be applied, and the dry
+// run is the same work with the transaction rolled back — so what it reports is
+// what would happen, checked by the database, rather than a guess made by
+// different code.
+func (h *Catalogue) ImportProducts(c *gin.Context) {
+	storeID, ok := scope.MustStore(c)
+	if !ok {
+		return
+	}
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxImportBytes)
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		if errors.Is(err, http.ErrMissingFile) {
+			httperr.Respond(c, httperr.BadRequest("attach the spreadsheet as the 'file' field"))
+			return
+		}
+		// A MaxBytesReader trip arrives here, as does a malformed multipart
+		// body. Both are the request's fault and neither is worth a 500.
+		httperr.Respond(c, httperr.BadRequest(
+			fmt.Sprintf("the upload could not be read — it must be a CSV of at most %d MB", maxImportBytes>>20)))
+		return
+	}
+	defer file.Close()
+	if header != nil && header.Size == 0 {
+		httperr.Respond(c, httperr.BadRequest("the file is empty"))
+		return
+	}
+
+	report, err := h.svc.ImportProducts(c.Request.Context(), file, service.ImportRequest{
+		StoreID:        storeID,
+		UpdateExisting: c.PostForm("update_existing") == "true",
+		Apply:          c.PostForm("apply") == "true",
+	})
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	// A sheet with problems is not an error: the report is the answer, and it
+	// is the same answer whether the caller asked to apply it or not. Answering
+	// 4xx here would make the client throw away the one thing it needs.
+	c.JSON(http.StatusOK, report)
+}
+
+// ImportTemplate hands back an empty sheet with the headings filled in and one
+// worked example.
+//
+// Without it the first question every shop asks is what the columns are called,
+// and the answer is a support call. The reader accepts many spellings of each
+// heading; this file is the one that is certain to work.
+func (h *Catalogue) ImportTemplate(c *gin.Context) {
+	c.Header("Content-Disposition", `attachment; filename="gbos-catalogue-template.csv"`)
+	c.Data(http.StatusOK, "text/csv; charset=utf-8", []byte(domain.ImportTemplate))
 }

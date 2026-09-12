@@ -62,6 +62,14 @@ type Repository interface {
 	SellableUnitsWithPrices(ctx context.Context, q platform.Querier, storeID uuid.UUID,
 		productIDs []uuid.UUID) (map[uuid.UUID][]domain.SellableUnitsWithPrice, error)
 
+	// Lookups by the names a person types. Bulk import matches a sheet against
+	// what is stored, and a sheet has names in it, not identifiers.
+	FindCategoryByName(ctx context.Context, q platform.Querier, name string, parentID *uuid.UUID) (domain.Category, bool, error)
+	FindUnitByCodeOrName(ctx context.Context, q platform.Querier, text string) (domain.UnitOfMeasure, bool, error)
+	FindProductByBarcode(ctx context.Context, q platform.Querier, barcode string) (domain.Product, bool, error)
+	FindProductByName(ctx context.Context, q platform.Querier, name string, categoryID uuid.UUID) (domain.Product, bool, error)
+	DefaultProductUnitID(ctx context.Context, q platform.Querier, productID uuid.UUID) (uuid.UUID, bool, error)
+
 	ListProductUnits(ctx context.Context, q platform.Querier, productID uuid.UUID) ([]domain.ProductUnit, error)
 	GetProductUnit(ctx context.Context, q platform.Querier, id, productID uuid.UUID) (domain.ProductUnit, error)
 	CreateProductUnit(ctx context.Context, q platform.Querier, u domain.ProductUnit) error
@@ -597,61 +605,86 @@ func (s *Service) CreateProduct(ctx context.Context, in CreateProductInput) (Cre
 
 	var created CreatedProduct
 	err = s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
-		if err := s.repo.CreateProduct(ctx, tx, p); err != nil {
-			return err
-		}
-
-		// The label comes from the unit of measure the product is stocked in, so
-		// a kilo product offers "Kilogram" rather than a nameless "Unit". A
-		// product whose unit has been removed still gets a usable default.
-		label := "Unit"
-		if uom, err := s.repo.GetUnit(ctx, tx, p.UOMID); err == nil {
-			label = uom.Name
-		} else if !errors.Is(err, platform.ErrNotFound) {
-			return fmt.Errorf("read unit of measure: %w", err)
-		}
-
-		uomID := p.UOMID
-		unit, err := domain.NewProductUnit(domain.NewProductUnitInput{
-			ProductID: p.ID,
-			UOMID:     &uomID,
-			Label:     label,
-			// One of the default unit is one of the stocking unit. Every other
-			// unit of this product is then expressed against the same pool.
-			QtyInBase:     money.QuantityFromInt(1),
-			IsDefault:     true,
-			IsSellable:    true,
-			IsPurchasable: true,
-		})
-		if err != nil {
-			return err
-		}
-		if err := s.repo.CreateProductUnit(ctx, tx, unit); err != nil {
-			return err
-		}
-
-		if in.Price != nil {
-			price := *in.Price
-			price.ProductID = p.ID
-			price.StoreID = in.StoreID
-			price.ProductUnitID = unit.ID
-			price.Label = unit.Label
-			price.QtyInBase = unit.QtyInBase
-			if err := price.Validate(); err != nil {
-				return err
-			}
-			if err := s.repo.UpsertPrice(ctx, tx, price); err != nil {
-				return err
-			}
-		}
-
-		created = CreatedProduct{Product: p, DefaultUnit: unit}
-		return nil
+		made, err := s.createProduct(ctx, tx, p, in)
+		created = made
+		return err
 	})
 	if err != nil {
 		return CreatedProduct{}, fmt.Errorf("create product: %w", err)
 	}
 	return created, nil
+}
+
+// CreateProductTx is CreateProduct inside a transaction the caller owns.
+//
+// Bulk import needs it: two thousand products are one transaction, not two
+// thousand, and the rules that make a product usable the moment it exists — it
+// has a default unit, its opening price is written with it — must be the same
+// rules, not a second implementation that drifts.
+func (s *Service) CreateProductTx(ctx context.Context, tx platform.Tx, in CreateProductInput) (CreatedProduct, error) {
+	p, err := domain.NewProduct(in.Product)
+	if err != nil {
+		return CreatedProduct{}, err
+	}
+	if in.Price != nil && in.StoreID == uuid.Nil {
+		return CreatedProduct{}, ErrStoreRequired
+	}
+	return s.createProduct(ctx, tx, p, in)
+}
+
+// createProduct is the body both entry points share: the product, the default
+// unit it cannot be used without, and the opening price, all in the caller's
+// transaction.
+func (s *Service) createProduct(ctx context.Context, tx platform.Tx, p domain.Product, in CreateProductInput) (CreatedProduct, error) {
+	if err := s.repo.CreateProduct(ctx, tx, p); err != nil {
+		return CreatedProduct{}, err
+	}
+
+	// The label comes from the unit of measure the product is stocked in, so
+	// a kilo product offers "Kilogram" rather than a nameless "Unit". A
+	// product whose unit has been removed still gets a usable default.
+	label := "Unit"
+	if uom, err := s.repo.GetUnit(ctx, tx, p.UOMID); err == nil {
+		label = uom.Name
+	} else if !errors.Is(err, platform.ErrNotFound) {
+		return CreatedProduct{}, fmt.Errorf("read unit of measure: %w", err)
+	}
+
+	uomID := p.UOMID
+	unit, err := domain.NewProductUnit(domain.NewProductUnitInput{
+		ProductID: p.ID,
+		UOMID:     &uomID,
+		Label:     label,
+		// One of the default unit is one of the stocking unit. Every other
+		// unit of this product is then expressed against the same pool.
+		QtyInBase:     money.QuantityFromInt(1),
+		IsDefault:     true,
+		IsSellable:    true,
+		IsPurchasable: true,
+	})
+	if err != nil {
+		return CreatedProduct{}, err
+	}
+	if err := s.repo.CreateProductUnit(ctx, tx, unit); err != nil {
+		return CreatedProduct{}, err
+	}
+
+	if in.Price != nil {
+		price := *in.Price
+		price.ProductID = p.ID
+		price.StoreID = in.StoreID
+		price.ProductUnitID = unit.ID
+		price.Label = unit.Label
+		price.QtyInBase = unit.QtyInBase
+		if err := price.Validate(); err != nil {
+			return CreatedProduct{}, err
+		}
+		if err := s.repo.UpsertPrice(ctx, tx, price); err != nil {
+			return CreatedProduct{}, err
+		}
+	}
+
+	return CreatedProduct{Product: p, DefaultUnit: unit}, nil
 }
 
 // UpdateProduct replaces a product's editable fields.

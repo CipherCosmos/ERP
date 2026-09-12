@@ -49,6 +49,43 @@ export interface Category {
   child_count?: number;
 }
 
+/** One thing wrong with one line of an uploaded catalogue sheet. */
+export interface ImportProblem {
+  /** The line number as a spreadsheet counts them: the header is line 1. */
+  line: number;
+  /** The heading as the file spelled it, so it can be found in the sheet. */
+  column?: string;
+  message: string;
+}
+
+export type ImportOutcome = 'created' | 'updated' | 'skipped' | 'failed';
+
+export interface ImportRowResult {
+  line: number;
+  name: string;
+  outcome: ImportOutcome;
+  /** How an existing product was recognised: "barcode" or "name". */
+  matched_on?: string;
+  product_id?: string;
+  message?: string;
+}
+
+/** What an import would do, or did. A dry run and a real run report the same
+ *  shape, because the dry run is the real thing with the transaction undone. */
+export interface ImportReport {
+  applied: boolean;
+  rows: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  prices_set: number;
+  categories_created: number;
+  new_categories?: string[];
+  problems?: ImportProblem[];
+  results: ImportRowResult[];
+}
+
 /** What a merge actually moved, so the screen can say so instead of "done". */
 export interface CategoryMergeResult {
   from: string;

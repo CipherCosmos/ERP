@@ -258,13 +258,23 @@ func (p UnitPrice) Validate() error {
 	// Commodities) Rules, so the system must not be able to express it. An MRP
 	// of zero means "not a packaged commodity" and is not a ceiling — which is
 	// exactly the loose case, where there is no printed maximum.
+	// The label is blank when a price is checked before it is attached to a
+	// unit — which is what bulk import does, on every row — so it is appended
+	// only when there is one. "above the MRP 50 for " is not a sentence.
 	if !p.MRP.IsZero() && p.SellPrice.GreaterThan(p.MRP) {
-		return invalid("selling price %s is above the MRP %s for %s", p.SellPrice, p.MRP, p.Label)
+		return invalid("selling price %s is above the MRP %s%s", p.SellPrice, p.MRP, forLabel(p.Label))
 	}
 	if !p.MRP.IsZero() && p.WholesaleSellPrice.GreaterThan(p.MRP) {
-		return invalid("wholesale price %s is above the MRP %s for %s", p.WholesaleSellPrice, p.MRP, p.Label)
+		return invalid("wholesale price %s is above the MRP %s%s", p.WholesaleSellPrice, p.MRP, forLabel(p.Label))
 	}
 	return nil
+}
+
+func forLabel(label string) string {
+	if strings.TrimSpace(label) == "" {
+		return ""
+	}
+	return " for " + label
 }
 
 // PriceFor returns what this customer pays for one of this unit.
