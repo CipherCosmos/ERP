@@ -33,21 +33,41 @@ export interface Column<T> {
   width?: string;
 }
 
+/**
+ * Blocks a position from taking part in inferring T.
+ *
+ * It matters here more than it looks. Every callback below is a place
+ * TypeScript will happily infer the row type from, and the commonest thing a
+ * screen passes is `onRowClick={setViewing}` — a state setter, whose parameter
+ * is `SetStateAction<Row>`, meaning "a Row or a function returning one". T then
+ * unified to that union, and every other callback silently agreed: `rowKey={(r)
+ * => r.id}` type-checked against a value that might be a function, and so did a
+ * `rowTone` reading a field the row does not have.
+ *
+ * Four screens were shipping errors this hid. Pinning T to `rows` is what makes
+ * the rest of the props be checked against the rows they are actually given.
+ *
+ * TypeScript gained a built-in NoInfer in 5.4; this is the standard encoding for
+ * earlier versions and can be replaced when the toolchain moves.
+ */
+type NoInfer<T> = [T][T extends unknown ? 0 : never];
+
 interface DataTableProps<T> {
+  // The one position T is inferred from.
   rows: T[];
-  columns: Column<T>[];
-  rowKey: (row: T) => string;
+  columns: Column<NoInfer<T>>[];
+  rowKey: (row: NoInfer<T>) => string;
   loading?: boolean;
   /** Shown when there are genuinely no rows, as opposed to none matching a search. */
   empty?: React.ReactNode;
-  onRowClick?: (row: T) => void;
+  onRowClick?: (row: NoInfer<T>) => void;
   /** Renders in the toolbar, right of the search box — "+ New", filters, etc. */
   toolbar?: React.ReactNode;
   searchable?: boolean;
   searchPlaceholder?: string;
   pageSize?: number;
   /** Tints a row: overdue red, low stock amber. */
-  rowTone?: (row: T) => 'danger' | 'warning' | 'success' | undefined;
+  rowTone?: (row: NoInfer<T>) => 'danger' | 'warning' | 'success' | undefined;
 }
 
 type SortDir = 'asc' | 'desc';

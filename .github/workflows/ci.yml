@@ -136,6 +136,20 @@ jobs:
         run: npm run lint
         working-directory: frontend
 
+      # Separate from the build, and before it, so a type error is reported as
+      # a type error. The build does type-check now, but it stops at the first
+      # failure and buries it among webpack's output; this lists them all and
+      # says plainly what the job was doing.
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: frontend
+
+      - name: Run tests
+        run: npm test -- --watchAll=false
+        working-directory: frontend
+        env:
+          CI: 'true'
+
       - name: Build frontend
         run: npm run build
         working-directory: frontend

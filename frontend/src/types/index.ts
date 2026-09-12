@@ -125,6 +125,17 @@ export interface Customer {
   is_wholesale?: boolean;
   store_id?: string;
   is_active: boolean;
+  /**
+   * What the customer owes, and what they have paid in advance. Both come back
+   * on the listing: the credit screen is opened to answer "who owes what", and
+   * a figure per row is the whole point of it.
+   *
+   * They were missing here, so the credit screen declared its own Customer with
+   * them and cast the listing to it — which is how two definitions of the same
+   * thing started, and the cast then had to be forced past the type checker.
+   */
+  outstanding?: number;
+  advance?: number;
 }
 
 export interface Invoice {

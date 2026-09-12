@@ -4,6 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import { creditApi, customerApi } from '../services/api';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
+import { Customer } from '../types';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
 import { formatDate, formatMoney } from '../utils/format';
@@ -19,13 +20,6 @@ interface CreditEntry {
   due_date: string;
   status: string;
   created_at: string;
-}
-
-interface Customer {
-  id: string;
-  name: string;
-  credit_limit: number;
-  outstanding: number;
 }
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
