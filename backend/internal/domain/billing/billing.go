@@ -91,7 +91,18 @@ type Invoice struct {
 	PaymentMode  PaymentMode `json:"payment_mode"`
 	IsGSTR1Filed bool        `json:"is_gstr1_filed"`
 	GSTR1Month   *string     `json:"gstr1_month"`
-	CreatedAt    time.Time   `json:"created_at"`
+
+	// BilledOffline says the till raised this while it could not reach the
+	// server. It is stated by the till and never inferred: the server cannot
+	// know, and guessing from arrival time would be wrong on every slow
+	// connection. A reconciliation needs to tell the two apart.
+	BilledOffline bool `json:"billed_offline"`
+	// BilledAt is when the customer was served, by the till's clock. CreatedAt
+	// is when the server heard about it, which for an offline sale is later —
+	// sometimes a day later, and a day's takings are counted by the former.
+	BilledAt time.Time `json:"billed_at"`
+
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Item is one line of a sale.

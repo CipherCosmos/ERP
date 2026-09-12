@@ -36,14 +36,15 @@ func nullIfNilUUID(id uuid.UUID) any {
 
 const invoiceColumns = `i.id, i.invoice_no, i.store_id, i.user_id, i.terminal_id, i.customer_id,
 	i.invoice_date, i.sub_total, i.cgst, i.sgst, i.igst, i.discount, i.round_off, i.total,
-	i.status, i.payment_mode, i.is_gstr1_filed, i.gstr1_month, i.created_at`
+	i.status, i.payment_mode, i.is_gstr1_filed, i.gstr1_month,
+	i.billed_offline, COALESCE(i.billed_at, i.invoice_date), i.created_at`
 
 func scanInvoice(s interface{ Scan(...any) error }) (billing.Invoice, error) {
 	var inv billing.Invoice
 	err := s.Scan(&inv.ID, &inv.InvoiceNo, &inv.StoreID, &inv.UserID, &inv.TerminalID, &inv.CustomerID,
 		&inv.InvoiceDate, &inv.SubTotal, &inv.CGST, &inv.SGST, &inv.IGST, &inv.Discount,
 		&inv.RoundOff, &inv.Total, &inv.Status, &inv.PaymentMode, &inv.IsGSTR1Filed,
-		&inv.GSTR1Month, &inv.CreatedAt)
+		&inv.GSTR1Month, &inv.BilledOffline, &inv.BilledAt, &inv.CreatedAt)
 	return inv, err
 }
 
@@ -54,16 +55,25 @@ func (r *Billing) NextInvoiceNumber(ctx context.Context, q platform.Querier, sto
 	return nextDocumentNumber(ctx, q, storeID, terminalID, "invoice", finYear)
 }
 
+// ClaimInvoiceNumber records a number a till allocated for itself and moves the
+// terminal's counter past it. See claimDocumentNumber for why it is a high-water
+// mark and why uniqueness is left to the index.
+func (r *Billing) ClaimInvoiceNumber(ctx context.Context, q platform.Querier,
+	storeID, terminalID uuid.UUID, finYear string, seq int64) error {
+	return claimDocumentNumber(ctx, q, storeID, terminalID, "invoice", finYear, seq)
+}
+
 // InsertInvoice writes the invoice header.
 func (r *Billing) InsertInvoice(ctx context.Context, q platform.Querier, inv billing.Invoice) error {
 	_, err := q.ExecContext(ctx,
 		`INSERT INTO invoices (id, invoice_no, store_id, user_id, terminal_id, customer_id,
 			invoice_date, sub_total, cgst, sgst, igst, discount, round_off, total,
-			status, payment_mode)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::invoice_status,$16)`,
+			status, payment_mode, billed_offline, billed_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::invoice_status,$16,$17,$18)`,
 		inv.ID, inv.InvoiceNo, inv.StoreID, inv.UserID, inv.TerminalID, inv.CustomerID,
 		inv.InvoiceDate, inv.SubTotal, inv.CGST, inv.SGST, inv.IGST, inv.Discount,
-		inv.RoundOff, inv.Total, string(inv.Status), string(inv.PaymentMode))
+		inv.RoundOff, inv.Total, string(inv.Status), string(inv.PaymentMode),
+		inv.BilledOffline, inv.BilledAt)
 	return platform.MapError(err)
 }
 

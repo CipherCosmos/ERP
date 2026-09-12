@@ -98,6 +98,16 @@ type saleRequest struct {
 	BillDiscount money.Money       `json:"discount"`
 	RoundTotal   bool              `json:"round_total"`
 	DueDate      *string           `json:"due_date"`
+
+	// InvoiceNo is the number the till allocated from its own terminal's series.
+	// A till has to be able to bill with the connection down, and a tax invoice
+	// carries a number, so it draws its own — online too, so the path is the one
+	// exercised every day. Omitted, the server allocates.
+	InvoiceNo string `json:"invoice_no"`
+	// BilledOffline and BilledAt are what the till says about when and how this
+	// sale happened. The server cannot know either.
+	BilledOffline bool    `json:"billed_offline"`
+	BilledAt      *string `json:"billed_at"`
 }
 
 func (h *Billing) Create(c *gin.Context) {
@@ -130,6 +140,17 @@ func (h *Billing) Create(c *gin.Context) {
 	if err != nil {
 		httperr.Respond(c, httperr.BadRequest("due_date must look like 2026-04-30"))
 		return
+	}
+	// A full timestamp, not a date: a till syncing a backlog has to say which
+	// minute each sale happened, and the day's takings are counted by it.
+	var billedAt *time.Time
+	if req.BilledAt != nil && *req.BilledAt != "" {
+		parsed, err := time.Parse(time.RFC3339, *req.BilledAt)
+		if err != nil {
+			httperr.Respond(c, httperr.BadRequest("billed_at must be a timestamp like 2026-04-30T18:45:00+05:30"))
+			return
+		}
+		billedAt = &parsed
 	}
 
 	lines := make([]domain.LineInput, len(req.Items))
@@ -165,6 +186,9 @@ func (h *Billing) Create(c *gin.Context) {
 		RoundTotal:     req.RoundTotal,
 		DueDate:        dueDate,
 		IdempotencyKey: c.GetHeader(idempotencyHeader),
+		InvoiceNo:      req.InvoiceNo,
+		BilledOffline:  req.BilledOffline,
+		BilledAt:       billedAt,
 	})
 	if err != nil {
 		respondBilling(c, err)

@@ -59,3 +59,37 @@ func nextDocumentNumber(ctx context.Context, q platform.Querier, storeID, termin
 	}
 	return next, nil
 }
+
+// claimDocumentNumber records that a terminal has used a number its own till
+// allocated, and moves the counter past it.
+//
+// A till that bills while the connection is down has to hand the customer a tax
+// invoice, and a tax invoice carries a number, so the till allocates from its own
+// terminal's series. The counter here stops being the allocator and becomes a
+// high-water mark: whatever arrives, the next server-side allocation starts after
+// it.
+//
+// GREATEST rather than assignment. Documents arrive out of order — a till syncs a
+// backlog oldest-first, but two tills on one store sync whenever each reconnects —
+// and a lower number arriving later must not wind the counter back.
+//
+// Uniqueness is not this function's job and must not be: invoices_store_no_key
+// already refuses a duplicate, atomically, in the same transaction as the
+// document. A check here would be a read before a write, which two tills syncing
+// at once would race straight through.
+func claimDocumentNumber(ctx context.Context, q platform.Querier,
+	storeID, terminalID uuid.UUID, docType, finYear string, seq int64) error {
+	if seq < 1 {
+		return fmt.Errorf("document sequence number must be positive, got %d", seq)
+	}
+	if _, err := q.ExecContext(ctx,
+		`INSERT INTO document_sequences (store_id, terminal_id, doc_type, fin_year, next_value)
+		 VALUES ($1, $2, $3::document_type, $4, $5)
+		 ON CONFLICT (store_id, terminal_id, doc_type, fin_year) DO UPDATE
+		 SET next_value = GREATEST(document_sequences.next_value, excluded.next_value),
+		     updated_at = now()`,
+		storeID, terminalID, docType, finYear, seq+1); err != nil {
+		return platform.MapError(err)
+	}
+	return nil
+}

@@ -40,6 +40,10 @@ var (
 // Repository is the persistence this service needs.
 type Repository interface {
 	NextInvoiceNumber(ctx context.Context, q platform.Querier, storeID, terminalID uuid.UUID, finYear string) (int64, error)
+	// ClaimInvoiceNumber records a number the till allocated and moves the
+	// terminal's counter past it, so a later server-side allocation cannot
+	// reissue it.
+	ClaimInvoiceNumber(ctx context.Context, q platform.Querier, storeID, terminalID uuid.UUID, finYear string, seq int64) error
 	InsertInvoice(ctx context.Context, q platform.Querier, inv domain.Invoice) error
 	InsertItems(ctx context.Context, q platform.Querier, items []domain.Item) error
 	GetInvoice(ctx context.Context, q platform.Querier, storeID, id uuid.UUID) (domain.Invoice, error)
@@ -120,6 +124,29 @@ type CreateInput struct {
 	// a double-clicked Checkout button producing two sales, and what lets an
 	// offline till replay its queue without fear.
 	IdempotencyKey string
+
+	// InvoiceNo is the number the till allocated for this sale.
+	//
+	// A till that cannot reach the server still has to hand the customer a tax
+	// invoice, and a tax invoice carries a number, so the till draws from its own
+	// terminal's series. It does so online too: one path, exercised every day,
+	// rather than a second one that runs only when the network is down.
+	//
+	// Blank means the server allocates, which is what an older client sends and
+	// what the seed and test paths use.
+	//
+	// The number is checked against the terminal and financial year it claims,
+	// and the unique index on (store_id, invoice_no) refuses a duplicate — so two
+	// tills sharing one terminal code fail loudly on sync rather than quietly
+	// issuing the same number twice.
+	InvoiceNo string
+
+	// BilledOffline records that the till raised this while it could not reach
+	// the server, and BilledAt when it did so by the till's own clock. The server
+	// cannot know either; guessing from arrival time would be wrong on every slow
+	// connection.
+	BilledOffline bool
+	BilledAt      *time.Time
 }
 
 // Result is a raised sale.
@@ -276,34 +303,43 @@ func (s *Service) create(ctx context.Context, tx platform.Tx, in CreateInput) (R
 	}
 
 	now := s.now()
-	seq, err := s.repo.NextInvoiceNumber(ctx, tx, in.StoreID, in.TerminalID, document.FinancialYear(now))
-	if err != nil {
-		return Result{}, fmt.Errorf("allocate invoice number: %w", err)
+	if in.BilledAt != nil {
+		// The till's clock decides the document date, because that is when the
+		// customer was served. For an offline sale the server hears about it
+		// later, sometimes much later, and dating it on arrival would put a
+		// Tuesday's takings in Wednesday's column.
+		now = *in.BilledAt
 	}
 	terminalCode, err := s.terminalCode(ctx, tx, in.StoreID, in.TerminalID)
+	if err != nil {
+		return Result{}, err
+	}
+	invoiceNo, err := s.invoiceNumber(ctx, tx, in, terminalCode, now)
 	if err != nil {
 		return Result{}, err
 	}
 
 	terminalID := in.TerminalID
 	inv := domain.Invoice{
-		ID:          invoiceID,
-		InvoiceNo:   document.Number(document.PrefixInvoice, terminalCode, document.FinancialYear(now), seq),
-		StoreID:     in.StoreID,
-		UserID:      in.UserID,
-		TerminalID:  &terminalID,
-		CustomerID:  in.CustomerID,
-		InvoiceDate: now,
-		SubTotal:    computed.SubTotal,
-		CGST:        computed.CGST,
-		SGST:        computed.SGST,
-		IGST:        computed.IGST,
-		Discount:    computed.Discount,
-		RoundOff:    computed.RoundOff,
-		Total:       computed.Total,
-		Status:      domain.StatusCompleted,
-		PaymentMode: in.PaymentMode,
-		CreatedAt:   now,
+		ID:            invoiceID,
+		InvoiceNo:     invoiceNo,
+		StoreID:       in.StoreID,
+		UserID:        in.UserID,
+		TerminalID:    &terminalID,
+		CustomerID:    in.CustomerID,
+		InvoiceDate:   now,
+		SubTotal:      computed.SubTotal,
+		CGST:          computed.CGST,
+		SGST:          computed.SGST,
+		IGST:          computed.IGST,
+		Discount:      computed.Discount,
+		RoundOff:      computed.RoundOff,
+		Total:         computed.Total,
+		Status:        domain.StatusCompleted,
+		PaymentMode:   in.PaymentMode,
+		BilledOffline: in.BilledOffline,
+		BilledAt:      now,
+		CreatedAt:     now,
 	}
 
 	if err := s.repo.InsertInvoice(ctx, tx, inv); err != nil {
@@ -531,6 +567,53 @@ func (s *Service) deductStock(ctx context.Context, tx platform.Tx, in CreateInpu
 		}
 	}
 	return items, nil
+}
+
+// invoiceNumber returns the number this sale is issued under: the one the till
+// allocated, or the next in the terminal's series when the till states none.
+//
+// A till allocates its own because it has to be able to bill with the connection
+// down, and a tax invoice carries a number. Accepting one is therefore not a
+// concession to offline working; it is the ordinary path, and the server-side
+// allocation is what remains for clients that do not keep a counter.
+//
+// What arrives is checked against the terminal and year it claims. Without that
+// a till could state another terminal's series, a closed year's, or a number far
+// ahead of the counter — each of which breaks the consecutive series Rule 46(b)
+// requires, and none of which the unique index would catch.
+func (s *Service) invoiceNumber(ctx context.Context, tx platform.Tx, in CreateInput, terminalCode string, now time.Time) (string, error) {
+	finYear := document.FinancialYear(now)
+
+	if in.InvoiceNo == "" {
+		seq, err := s.repo.NextInvoiceNumber(ctx, tx, in.StoreID, in.TerminalID, finYear)
+		if err != nil {
+			return "", fmt.Errorf("allocate invoice number: %w", err)
+		}
+		return document.Number(document.PrefixInvoice, terminalCode, finYear, seq), nil
+	}
+
+	prefix, claimedTerminal, claimedYear, seq, err := document.ParseNumber(in.InvoiceNo)
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", domain.ErrValidation, err)
+	}
+	if prefix != document.PrefixInvoice {
+		return "", fmt.Errorf("%w: %q is not an invoice number", domain.ErrValidation, in.InvoiceNo)
+	}
+	if claimedTerminal != terminalCode {
+		return "", fmt.Errorf("%w: %q belongs to counter %s, and this sale is from %s",
+			domain.ErrValidation, in.InvoiceNo, claimedTerminal, terminalCode)
+	}
+	if claimedYear != finYear {
+		// A till that was offline across midnight on 1 April would otherwise
+		// extend the closed year's series, and neither year would then be the
+		// unbroken run the rule asks for.
+		return "", fmt.Errorf("%w: %q is in financial year %s and this sale falls in %s",
+			domain.ErrValidation, in.InvoiceNo, claimedYear, finYear)
+	}
+	if err := s.repo.ClaimInvoiceNumber(ctx, tx, in.StoreID, in.TerminalID, finYear, seq); err != nil {
+		return "", fmt.Errorf("record invoice number: %w", err)
+	}
+	return in.InvoiceNo, nil
 }
 
 // terminalCode resolves the counter's code for the invoice number.

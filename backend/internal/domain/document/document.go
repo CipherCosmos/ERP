@@ -10,6 +10,8 @@ package document
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -69,3 +71,44 @@ const (
 	PrefixInvoice       = "INV"
 	PrefixPurchaseOrder = "PO"
 )
+
+// ParseNumber reads a document number back into its parts.
+//
+// It exists because a till that bills while the connection is down allocates its
+// own numbers, and the server has to check that what arrives belongs to the
+// terminal and year it claims to. Without that check a till could state any
+// number at all: another terminal's series, a closed year's, or one far ahead of
+// where the counter stands, and each of those quietly breaks the consecutive
+// series CGST Rule 46(b) requires.
+//
+// A number is only well formed if it renders back to exactly what came in, so
+// the check is the round trip rather than a pattern: that way the two functions
+// cannot drift apart.
+func ParseNumber(s string) (prefix, terminalCode, finYear string, seq int64, err error) {
+	parts := strings.Split(s, "/")
+	if len(parts) != 4 {
+		return "", "", "", 0, fmt.Errorf("document number %q is not in the form PREFIX/TERMINAL/YEAR/SEQUENCE", s)
+	}
+	prefix, terminalCode, finYear = parts[0], parts[1], parts[2]
+	// Every part has to be a bare token. The round trip below cannot catch a
+	// stray space, because a prefix of " INV" renders back to exactly what came
+	// in — the caller compares the prefix and terminal against what it expects,
+	// and a space would fail that, but a parser that hands back a value it knows
+	// is malformed is one comparison away from a mistake.
+	for _, part := range parts[:3] {
+		if part == "" || strings.TrimSpace(part) != part {
+			return "", "", "", 0, fmt.Errorf("document number %q has a malformed part %q", s, part)
+		}
+	}
+	seq, err = strconv.ParseInt(parts[3], 10, 64)
+	if err != nil || seq < 1 {
+		return "", "", "", 0, fmt.Errorf("document number %q does not end in a sequence number", s)
+	}
+	if Number(prefix, terminalCode, finYear, seq) != s {
+		// Catches a sequence that is not zero-padded to five places, a stray
+		// space, a leading zero count that differs — anything this system would
+		// not itself have produced.
+		return "", "", "", 0, fmt.Errorf("document number %q is not in the form this system issues", s)
+	}
+	return prefix, terminalCode, finYear, seq, nil
+}
