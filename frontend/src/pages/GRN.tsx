@@ -6,7 +6,7 @@ import { Column, DataTable } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney, formatQty } from '../utils/format';
+import { addDaysISO, formatDate, formatMoney, formatQty, todayISO } from '../utils/format';
 
 /**
  * Goods receipts — the loading bay.
@@ -96,6 +96,16 @@ interface ProductRow {
   uom_id?: string;
   default_product_unit_id?: string;
   units?: PricedUnit[];
+  /**
+   * Whether this product expires, and how long it lasts from manufacture.
+   *
+   * The product has carried both since the column was added, and receiving —
+   * the one place a date can still be read off the packet — never asked. Every
+   * batch that arrived this way had no expiry, so the expiry screen showed only
+   * what somebody had typed in by hand.
+   */
+  tracks_expiry?: boolean;
+  shelf_life_days?: number | null;
 }
 
 interface BuyingUnit {
@@ -131,6 +141,24 @@ interface DraftItem {
   cost: string;
   /** The vendor's lot number, if the goods carry one. */
   batch_no: string;
+  /** What the packet says. Either one will do; see expiryFor. */
+  expiry_date: string;
+  mfg_date: string;
+}
+
+/**
+ * The expiry a line will end up with.
+ *
+ * A stated date wins. Otherwise a packing date plus the product's shelf life,
+ * which is what most Indian packaging carries: a date of packing and "best
+ * before N days". The server decides this for real — this is the same rule
+ * shown in front of the clerk so they can see what they are about to record.
+ */
+function expiryFor(item: DraftItem, product?: ProductRow): string {
+  if (item.expiry_date) return item.expiry_date;
+  const days = product?.shelf_life_days;
+  if (!item.mfg_date || !days) return '';
+  return addDaysISO(item.mfg_date, days);
 }
 
 /**
@@ -174,7 +202,7 @@ export default function GRN() {
   const [poOptions, setPoOptions] = useState<POOption[]>([]);
   const [posLoading, setPosLoading] = useState(false);
   const [selectedPO, setSelectedPO] = useState('');
-  const [receivedDate, setReceivedDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [receivedDate, setReceivedDate] = useState(todayISO);
   const [notes, setNotes] = useState('');
   const [draftItems, setDraftItems] = useState<DraftItem[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
@@ -277,7 +305,7 @@ export default function GRN() {
   const openCreateForm = async () => {
     setShowCreate(true);
     setSelectedPO('');
-    setReceivedDate(new Date().toISOString().slice(0, 10));
+    setReceivedDate(todayISO());
     setNotes('');
     setDraftItems([]);
     setCreateError(null);
@@ -336,6 +364,8 @@ export default function GRN() {
             // only holds while the line is counted in the ordered unit.
             cost: it.rate && it.rate > 0 ? String(it.rate) : '',
             batch_no: '',
+            expiry_date: '',
+            mfg_date: '',
           };
         })
       );
@@ -369,6 +399,8 @@ export default function GRN() {
       reason?: string;
       cost_price?: number;
       batch_no?: string;
+      expiry_date?: string;
+      mfg_date?: string;
     }[] = [];
 
     for (const [i, it] of draftItems.entries()) {
@@ -399,11 +431,28 @@ export default function GRN() {
         // also what the server does with an absent one.
         cost_price: cost > 0 ? cost : undefined,
         batch_no: it.batch_no.trim() || undefined,
+        expiry_date: it.expiry_date || undefined,
+        mfg_date: it.mfg_date || undefined,
       });
     }
 
     if (items.length === 0) {
       setCreateError('Enter what arrived for at least one line.');
+      return;
+    }
+
+    // The server refuses these, and it is right to. Saying so here means the
+    // clerk fixes one line rather than losing the whole form to a refusal.
+    const undated = draftItems.filter((it) => {
+      if ((parseFloat(it.received) || 0) <= 0) return false;
+      const product = productById(it.product_id);
+      return product?.tracks_expiry && !expiryFor(it, product);
+    });
+    if (undated.length) {
+      setCreateError(
+        `${undated.map((it) => it.product_name).join(', ')} ${undated.length === 1 ? 'expires' : 'expire'}, ` +
+          'so this delivery needs an expiry date or the date it was made.'
+      );
       return;
     }
 
@@ -454,7 +503,7 @@ export default function GRN() {
   const totals = useMemo(() => {
     const orders = new Set(grns.map((g) => g.po_id));
     const lines = grns.reduce((sum, g) => sum + (g.item_count ?? g.items?.length ?? 0), 0);
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     return {
       receipts: grns.length,
       orders: orders.size,
@@ -735,6 +784,56 @@ export default function GRN() {
                       />
                     </Field>
                   </FormGrid>
+
+                  {/* Dates only for goods that have them. A clerk checking in
+                      buckets should not be asked when they go off. */}
+                  {productById(it.product_id)?.tracks_expiry && (
+                    <>
+                      <FormGrid>
+                        <Field
+                          label="Expiry date"
+                          hint="As printed on the packet."
+                          htmlFor={`grn-e-${it.po_item_id}`}
+                        >
+                          <TextInput
+                            id={`grn-e-${it.po_item_id}`}
+                            type="date"
+                            value={it.expiry_date}
+                            onChange={(e) => patchItem(idx, { expiry_date: e.target.value })}
+                          />
+                        </Field>
+                        <Field
+                          label="Packed on"
+                          hint={
+                            productById(it.product_id)?.shelf_life_days
+                              ? `Enough on its own: the ${productById(it.product_id)?.shelf_life_days} day shelf life is counted from it.`
+                              : 'Recorded with the batch.'
+                          }
+                          htmlFor={`grn-m-${it.po_item_id}`}
+                        >
+                          <TextInput
+                            id={`grn-m-${it.po_item_id}`}
+                            type="date"
+                            value={it.mfg_date}
+                            onChange={(e) => patchItem(idx, { mfg_date: e.target.value })}
+                          />
+                        </Field>
+                      </FormGrid>
+                      <div style={styles.lineFoot}>
+                        {expiryFor(it, productById(it.product_id)) ? (
+                          <span>
+                            This lot expires{' '}
+                            <strong>{formatDate(expiryFor(it, productById(it.product_id)))}</strong>
+                            {!it.expiry_date && <> — counted from when it was packed</>}.
+                          </span>
+                        ) : (
+                          <span style={{ color: color.warning }}>
+                            {it.product_name} expires, so this lot needs one of these dates.
+                          </span>
+                        )}
+                      </div>
+                    </>
+                  )}
 
                   {rejected > 0 && (
                     <Field label="Why they were rejected" htmlFor={`grn-why-${it.po_item_id}`}>

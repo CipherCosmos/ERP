@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi } from '../services/api';
 import { BarChart, LineChart, PieChart } from '../components/Charts';
+import { todayISO } from '../utils/format';
 
 interface SalesReport {
   category: string;
@@ -29,8 +30,8 @@ export default function Reports() {
    */
   const [dataTab, setDataTab] = useState<'category' | 'products' | 'hourly' | 'payment' | null>(null);
   const [loading, setLoading] = useState(false);
-  const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
-  const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(todayISO());
+  const [endDate, setEndDate] = useState(todayISO());
 
   useEffect(() => {
     if (!user || user.role === 'cashier') {

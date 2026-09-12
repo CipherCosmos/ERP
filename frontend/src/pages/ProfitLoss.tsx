@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { reportApi } from '../services/api';
-import { formatDate, formatMoney } from '../utils/format';
+import { formatDate, formatMoney, toISODate, todayISO } from '../utils/format';
 
 export default function ProfitLoss() {
   const navigate = useNavigate();
@@ -11,9 +11,9 @@ export default function ProfitLoss() {
   const [startDate, setStartDate] = useState(() => {
     const d = new Date();
     d.setMonth(d.getMonth() - 1);
-    return d.toISOString().split('T')[0];
+    return toISODate(d);
   });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [endDate, setEndDate] = useState(todayISO);
   const [loading, setLoading] = useState(false);
 
   // Memoised so the effect can depend on it. It re-creates when the date range

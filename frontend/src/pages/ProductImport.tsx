@@ -6,6 +6,7 @@ import { ImportProblem, ImportReport, ImportRowResult } from '../types';
 import { DataTable, Column } from '../components/DataTable';
 import { Checkbox, FormError } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
+import { todayISO } from '../utils/format';
 
 /**
  * Bulk catalogue import.
@@ -100,7 +101,7 @@ export default function ProductImport() {
     setError(null);
     try {
       const { data } = await productApi.export(storeId);
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayISO();
       save(data as Blob, `gbos-catalogue-${today}.csv`);
     } catch (err: any) {
       setError(

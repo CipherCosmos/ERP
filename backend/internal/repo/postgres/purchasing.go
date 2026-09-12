@@ -207,6 +207,12 @@ type PurchaseProduct struct {
 	ID      uuid.UUID
 	Name    string
 	GSTRate money.Rate
+	// TracksExpiry and ShelfLifeDays are what the product knows about its own
+	// dating, and receiving is where that has to be asked. A product that
+	// expires needs a date on every lot; one with a shelf life can have it
+	// counted from the manufacture date instead of read off the packet.
+	TracksExpiry  bool
+	ShelfLifeDays *int
 	// Units are every unit the product may be transacted in, with this store's
 	// recorded cost for each, in the order a buyer should be offered them.
 	Units []PurchaseUnit
@@ -250,7 +256,7 @@ func (r *Purchasing) ProductsForPurchase(ctx context.Context, q platform.Querier
 	// product has no unit set up rather than that it does not exist.
 	placeholders, args := purchasingIDArgs(ids, 1)
 	rows, err := q.QueryContext(ctx,
-		`SELECT p.id, p.name, p.gst_rate,
+		`SELECT p.id, p.name, p.gst_rate, p.tracks_expiry, p.shelf_life_days,
 		        pu.id, COALESCE(pu.label, ''), COALESCE(pu.qty_in_base, 0),
 		        COALESCE(pu.is_default, false), COALESCE(pu.is_purchasable, false),
 		        COALESCE(pu.is_active, false), COALESCE(pp.cost_price, 0)
@@ -270,7 +276,7 @@ func (r *Purchasing) ProductsForPurchase(ctx context.Context, q platform.Querier
 		var p PurchaseProduct
 		var u PurchaseUnit
 		var unitID uuid.NullUUID
-		if err := rows.Scan(&p.ID, &p.Name, &p.GSTRate,
+		if err := rows.Scan(&p.ID, &p.Name, &p.GSTRate, &p.TracksExpiry, &p.ShelfLifeDays,
 			&unitID, &u.Label, &u.QtyInBase, &u.IsDefault, &u.IsPurchasable, &u.IsActive,
 			&u.CostPrice); err != nil {
 			return nil, fmt.Errorf("scan purchase product: %w", platform.MapError(err))

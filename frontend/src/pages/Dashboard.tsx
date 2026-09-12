@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi } from '../services/api';
 import { StatCard, BarChart, PieChart } from '../components/Charts';
+import { addDaysISO, toISODate, todayISO } from '../utils/format';
 
 interface DashboardData {
   revenue: number;
@@ -42,22 +43,24 @@ export default function Dashboard() {
     }
   }, [user, navigate]);
 
+  // Calendar dates, computed as a calendar does. The version this replaces
+  // rendered each one with toISOString, which converts to UTC first: in India,
+  // five and a half hours ahead, every range between midnight and half past
+  // five in the morning asked the server for the wrong day.
   const getRangeDates = useCallback(() => {
+    const end = todayISO();
     const now = new Date();
-    const end = now.toISOString().slice(0, 10);
     let start = end;
     if (range === 'week') {
-      const d = new Date(now);
-      d.setDate(d.getDate() - 7);
-      start = d.toISOString().slice(0, 10);
+      start = addDaysISO(end, -7);
     } else if (range === 'month') {
       const d = new Date(now);
       d.setMonth(d.getMonth() - 1);
-      start = d.toISOString().slice(0, 10);
+      start = toISODate(d);
     } else if (range === 'year') {
       const d = new Date(now);
       d.setFullYear(d.getFullYear() - 1);
-      start = d.toISOString().slice(0, 10);
+      start = toISODate(d);
     }
     return { start, end };
   }, [range]);

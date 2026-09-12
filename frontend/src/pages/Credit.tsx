@@ -7,7 +7,7 @@ import { Modal } from '../components/Modal';
 import { Customer } from '../types';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney } from '../utils/format';
+import { formatDate, formatMoney, todayISO } from '../utils/format';
 
 interface CreditEntry {
   id: string;
@@ -22,7 +22,7 @@ interface CreditEntry {
   created_at: string;
 }
 
-const todayISO = () => new Date().toISOString().slice(0, 10);
+
 
 /**
  * Credit management.

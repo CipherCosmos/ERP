@@ -92,6 +92,11 @@ type StockMovement struct {
 	// It is meaningless on the way out — what a batch cost is already recorded
 	// against that batch — and is left zero there.
 	TotalCost money.Money
+
+	// ExpiryDate and MfgDate describe the lot arriving. Both are nil on the way
+	// out, where the batch already carries its own.
+	ExpiryDate *time.Time
+	MfgDate    *time.Time
 }
 
 // StockWriter is the slice of the stock aggregate that purchasing needs, and
@@ -640,6 +645,10 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 			// landedCost is what the accepted goods on this line cost in full,
 			// not a rate. See the comment where it is computed.
 			landedCost money.Money
+			// expiry and mfg are the lot's dates, already resolved against the
+			// product's own shelf life.
+			expiry *time.Time
+			mfg    *time.Time
 		}
 		plans := make([]plan, 0, len(in.Lines))
 
@@ -721,11 +730,25 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 			if batch == "" {
 				batch = "GRN-" + grID.String()[:8]
 			}
+
+			// What a lot expires on, decided by the product rather than left to
+			// whoever is typing. Every batch that arrived this way used to
+			// carry no date at all, so the expiry report showed only the
+			// batches somebody had entered by hand and missed everything
+			// actually on the shelf.
+			expiry, err := stockdomain.ExpiryForBatch(
+				p.Name, p.TracksExpiry, p.ShelfLifeDays, line.ExpiryDate, line.MfgDate, in.ReceivedDate)
+			if err != nil {
+				return err
+			}
+
 			plans = append(plans, plan{
 				item:        item,
 				allocations: allocations,
 				batchNo:     batch,
 				landedCost:  landed,
+				expiry:      expiry,
+				mfg:         line.MfgDate,
 			})
 		}
 
@@ -777,11 +800,13 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 			// 100 rejected adds nothing — the whole of defect 2.
 			if p.item.AcceptedQty.IsPositive() {
 				if err := s.stock.ReceiveIntoStock(ctx, tx, StockMovement{
-					StoreID:   in.StoreID,
-					ProductID: p.item.ProductID,
-					BatchNo:   p.batchNo,
-					Quantity:  p.item.AcceptedQty,
-					TotalCost: p.landedCost,
+					StoreID:    in.StoreID,
+					ProductID:  p.item.ProductID,
+					BatchNo:    p.batchNo,
+					Quantity:   p.item.AcceptedQty,
+					TotalCost:  p.landedCost,
+					ExpiryDate: p.expiry,
+					MfgDate:    p.mfg,
 				}); err != nil {
 					return fmt.Errorf("receive product %s into stock: %w", p.item.ProductID, err)
 				}

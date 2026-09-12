@@ -7,7 +7,7 @@ import { Column, DataTable } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney } from '../utils/format';
+import { formatDate, formatMoney, thisMonthISO, todayISO } from '../utils/format';
 
 /**
  * Money paid out to vendors.
@@ -67,7 +67,7 @@ export default function VendorPayments() {
   const [amount, setAmount] = useState('0');
   const [paymentMode, setPaymentMode] = useState('cash');
   const [reference, setReference] = useState('');
-  const [paymentDate, setPaymentDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [paymentDate, setPaymentDate] = useState(todayISO);
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -114,7 +114,7 @@ export default function VendorPayments() {
     setAmount('0');
     setPaymentMode('cash');
     setReference('');
-    setPaymentDate(new Date().toISOString().slice(0, 10));
+    setPaymentDate(todayISO());
     setNotes('');
     setExposure(null);
     setFormError(null);
@@ -215,7 +215,7 @@ export default function VendorPayments() {
   );
 
   const totals = useMemo(() => {
-    const month = new Date().toISOString().slice(0, 7);
+    const month = thisMonthISO();
     return {
       count: payments.length,
       paid: payments.reduce((sum, p) => sum + (Number(p.amount) || 0), 0),

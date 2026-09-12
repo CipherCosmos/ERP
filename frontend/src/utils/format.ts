@@ -74,3 +74,82 @@ export function formatQty(value?: number | string | null, unit?: string, fallbac
 }
 
 export default formatDate;
+
+// ---------------------------------------------------------------------------
+// The shop's calendar
+// ---------------------------------------------------------------------------
+
+/**
+ * Renders a Date as YYYY-MM-DD in the viewer's own timezone.
+ *
+ * Every screen in this app used to write `new Date().toISOString().slice(0, 10)`
+ * for the same job, and that is wrong everywhere east of Greenwich. toISOString
+ * converts to UTC first, and India is five and a half hours ahead: between
+ * midnight and half past five in the morning the "today" it produces is
+ * yesterday. A shop open at five — a dairy, a vegetable market — filed its
+ * receipts, its settlement and its reports under the previous day.
+ *
+ * It is worse for a date built at local midnight, which is what a date input
+ * gives. Midnight on the 14th in India is half past six the evening before in
+ * UTC, so the round trip loses a whole day every time: a lot packed on the 11th
+ * with a three day shelf life was shown to the clerk as expiring on the 13th
+ * while the server, which does this correctly, recorded the 14th.
+ *
+ * The parts are read off the local date and padded. Nothing converts.
+ */
+export function toISODate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** Today, as the shop's own calendar has it. */
+export function todayISO(): string {
+  return toISODate(new Date());
+}
+
+/**
+ * N days after an ISO date, still as a calendar date.
+ *
+ * Days are added through Date.setDate, which handles month and year ends and
+ * knows nothing about clocks, so the result is the calendar day somebody would
+ * count to on their fingers.
+ */
+export function addDaysISO(iso: string, days: number): string {
+  const parts = ISO_DATE.exec(iso);
+  if (!parts) return '';
+  const [, y, m, d] = parts;
+  const day = new Date(Number(y), Number(m) - 1, Number(d));
+  if (Number.isNaN(day.getTime())) return '';
+  day.setDate(day.getDate() + days);
+  return toISODate(day);
+}
+
+/**
+ * This month, as YYYY-MM.
+ *
+ * Same reasoning as todayISO, and it matters more here than the narrowness
+ * suggests: this is what the GST return screen opens on. Rendered through UTC,
+ * the first five and a half hours of the first of a month name the month
+ * before — and a statutory return prepared for the wrong month is not a
+ * mistake anybody catches by looking at the screen.
+ */
+export function thisMonthISO(): string {
+  return toISODate(new Date()).slice(0, 7);
+}
+
+/**
+ * Whole days from today to an ISO date: negative in the past, zero today.
+ *
+ * Both ends are calendar dates, compared as calendar dates. Subtracting two
+ * instants would make the answer depend on the time of day.
+ */
+export function daysUntilISO(iso?: string | null): number | null {
+  if (!iso) return null;
+  const parts = ISO_DATE.exec(String(iso));
+  if (!parts) return null;
+  const [, y, m, d] = parts;
+  const target = new Date(Number(y), Number(m) - 1, Number(d));
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((target.getTime() - today.getTime()) / 86_400_000);
+}

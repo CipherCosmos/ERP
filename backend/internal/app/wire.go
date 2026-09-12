@@ -155,6 +155,12 @@ func (a purchasingStock) ReceiveIntoStock(ctx context.Context, tx platform.Tx, m
 		BatchNo:   m.BatchNo,
 		Quantity:  m.Quantity,
 		TotalCost: m.TotalCost,
+		// The dates the delivery stated, already resolved against the product's
+		// own shelf life by the time they reach here. Dropping them was why
+		// every batch received through a purchase order had no expiry and the
+		// expiry report saw only what somebody had typed in by hand.
+		ExpiryDate: m.ExpiryDate,
+		MfgDate:    m.MfgDate,
 	})
 }
 

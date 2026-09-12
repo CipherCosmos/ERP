@@ -484,6 +484,15 @@ type ReceiptLineInput struct {
 	// CostPrice is the landed cost of one buying unit of this lot — what one
 	// sack cost. Zero means "use the store's recorded cost price for the unit".
 	CostPrice money.Money
+
+	// ExpiryDate and MfgDate are what the delivery states about this lot.
+	//
+	// Either can be nil. A product that expires needs one of them, and which is
+	// decided by stock.ExpiryForBatch: a stated expiry is used as given, and a
+	// manufacture date is counted forward by the product's shelf life. A
+	// product that does not expire needs neither.
+	ExpiryDate *time.Time
+	MfgDate    *time.Time
 }
 
 // NewGoodsReceiptItem validates a receipt line, resolves the accepted quantity

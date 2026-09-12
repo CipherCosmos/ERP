@@ -1907,3 +1907,165 @@ func TestADeliveryIsBookedInAnAgreedOrderSoItCannotDeadlockTheCounter(t *testing
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Expiry at the receiving bay
+// ---------------------------------------------------------------------------
+
+// perishable makes a product that expires, optionally with a shelf life.
+func (f *fixture) perishable(t *testing.T, name string, shelfLifeDays *int) uuid.UUID {
+	t.Helper()
+	id := f.seedProduct(t, name, 5)
+	if _, err := f.db.ExecContext(context.Background(),
+		`UPDATE products SET tracks_expiry = true, shelf_life_days = $2 WHERE id = $1`,
+		id, shelfLifeDays); err != nil {
+		t.Fatalf("mark %s perishable: %v", name, err)
+	}
+	return id
+}
+
+// batchExpiry is the date on the last movement handed to the stock writer for
+// this product. These tests stop at that boundary: purchasing's job is to
+// decide the date and hand it over, and what the stock aggregate does with it
+// is the stock aggregate's own tests.
+func (f *fixture) batchExpiry(t *testing.T, productID uuid.UUID) *time.Time {
+	t.Helper()
+	f.stock.mu.Lock()
+	defer f.stock.mu.Unlock()
+	for i := len(f.stock.received) - 1; i >= 0; i-- {
+		if f.stock.received[i].ProductID == productID {
+			return f.stock.received[i].ExpiryDate
+		}
+	}
+	t.Fatalf("no stock movement was recorded for %s", productID)
+	return nil
+}
+
+// A product that expires needs a date on every lot, and receiving is where it
+// has to be asked.
+//
+// It was not asked. Every batch that arrived through a purchase receipt carried
+// no expiry date at all — the movement type had nowhere to put one — so the
+// expiry report showed only the batches somebody had entered by hand and missed
+// everything actually on the shelf. The product field that says a product
+// expires existed the whole time and nothing read it.
+func TestReceivingAPerishableNeedsADate(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+	vendorID := f.seedVendor(t, "Dairy", karnatakaVendor, "0")
+	productID := f.perishable(t, "Toned Milk 500 ml", nil)
+
+	po, _ := f.createOrder(t, vendorID, domain.LineInput{
+		ProductID: productID,
+		UnitQty:   money.QuantityFromInt(100),
+		Rate:      money.MustFromString("30.00"),
+	})
+
+	_, _, err := f.svc.ReceiveGoods(ctx, service.ReceiveGoodsInput{
+		POID: po.ID, StoreID: f.storeID, UserID: f.userID, ReceivedDate: orderDate(t),
+		Lines: []domain.ReceiptLineInput{{ProductID: productID, ReceivedQty: money.QuantityFromInt(100)}},
+	})
+	if err == nil {
+		t.Fatal("a perishable was received with no expiry date")
+	}
+	if !strings.Contains(err.Error(), "Toned Milk 500 ml") {
+		t.Errorf("message = %q, want it to name the product — a receipt has many lines", err)
+	}
+	if !strings.Contains(err.Error(), "expiry date") {
+		t.Errorf("message = %q, want it to say what is missing", err)
+	}
+
+	// Nothing reached stock: the refusal has to take the whole receipt with it,
+	// or the order advances against goods that never got to the shelf.
+	if !f.stock.receivedQty(productID).IsZero() {
+		t.Errorf("%s reached stock despite the refusal", f.stock.receivedQty(productID))
+	}
+	// And no receipt document was written either.
+	var receipts int
+	if err := f.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM goods_receipts WHERE po_id = $1`, po.ID).Scan(&receipts); err != nil {
+		t.Fatalf("count receipts: %v", err)
+	}
+	if receipts != 0 {
+		t.Errorf("%d goods receipts were written despite the refusal", receipts)
+	}
+
+	// With a date it goes through, and the date reaches the batch.
+	expiry := orderDate(t).AddDate(0, 0, 7)
+	if _, _, err := f.svc.ReceiveGoods(ctx, service.ReceiveGoodsInput{
+		POID: po.ID, StoreID: f.storeID, UserID: f.userID, ReceivedDate: orderDate(t),
+		Lines: []domain.ReceiptLineInput{{
+			ProductID: productID, ReceivedQty: money.QuantityFromInt(100), ExpiryDate: &expiry,
+		}},
+	}); err != nil {
+		t.Fatalf("receive with a date: %v", err)
+	}
+	got := f.batchExpiry(t, productID)
+	if got == nil {
+		t.Fatal("the batch has no expiry date")
+	}
+	if !got.Equal(expiry) {
+		t.Errorf("batch expiry = %s, want %s", got.Format("2006-01-02"), expiry.Format("2006-01-02"))
+	}
+}
+
+// The shelf life is what turns a packing date into an expiry, so a clerk keys
+// what the packet says rather than doing the arithmetic.
+func TestAShelfLifeCountsForwardFromTheManufactureDate(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+	vendorID := f.seedVendor(t, "Biscuit Co", karnatakaVendor, "0")
+	shelfLife := 270
+	productID := f.perishable(t, "Parle-G 200g", &shelfLife)
+
+	po, _ := f.createOrder(t, vendorID, domain.LineInput{
+		ProductID: productID,
+		UnitQty:   money.QuantityFromInt(48),
+		Rate:      money.MustFromString("24.50"),
+	})
+
+	made := orderDate(t).AddDate(0, 0, -30)
+	if _, _, err := f.svc.ReceiveGoods(ctx, service.ReceiveGoodsInput{
+		POID: po.ID, StoreID: f.storeID, UserID: f.userID, ReceivedDate: orderDate(t),
+		Lines: []domain.ReceiptLineInput{{
+			ProductID: productID, ReceivedQty: money.QuantityFromInt(48), MfgDate: &made,
+		}},
+	}); err != nil {
+		t.Fatalf("receive with a manufacture date: %v", err)
+	}
+
+	got := f.batchExpiry(t, productID)
+	want := made.AddDate(0, 0, shelfLife)
+	if got == nil || !got.Equal(want) {
+		t.Errorf("batch expiry = %v, want %s counted from the packing date",
+			got, want.Format("2006-01-02"))
+	}
+}
+
+// A product that does not expire needs nothing, and receiving one must not
+// start asking.
+func TestReceivingSomethingThatDoesNotExpireNeedsNoDate(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+	vendorID := f.seedVendor(t, "Supplier", karnatakaVendor, "0")
+	productID := f.seedProduct(t, "Steel Bucket", 18)
+
+	po, _ := f.createOrder(t, vendorID, domain.LineInput{
+		ProductID: productID,
+		UnitQty:   money.QuantityFromInt(10),
+		Rate:      money.MustFromString("180.00"),
+	})
+
+	if _, _, err := f.svc.ReceiveGoods(ctx, service.ReceiveGoodsInput{
+		POID: po.ID, StoreID: f.storeID, UserID: f.userID, ReceivedDate: orderDate(t),
+		Lines: []domain.ReceiptLineInput{{ProductID: productID, ReceivedQty: money.QuantityFromInt(10)}},
+	}); err != nil {
+		t.Fatalf("receive a product that does not expire: %v", err)
+	}
+	if got := f.batchExpiry(t, productID); got != nil {
+		t.Errorf("batch expiry = %s, want none", got.Format("2006-01-02"))
+	}
+}

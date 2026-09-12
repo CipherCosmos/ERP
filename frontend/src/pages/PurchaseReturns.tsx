@@ -7,7 +7,7 @@ import { Column, DataTable } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney, formatQty } from '../utils/format';
+import { formatDate, formatMoney, formatQty, todayISO } from '../utils/format';
 
 /**
  * Goods going back to the vendor.
@@ -68,7 +68,7 @@ export default function PurchaseReturns() {
   const [showForm, setShowForm] = useState(false);
   const [vendorId, setVendorId] = useState('');
   const [poId, setPoId] = useState('');
-  const [returnDate, setReturnDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [returnDate, setReturnDate] = useState(todayISO);
   const [reason, setReason] = useState('');
   const [lines, setLines] = useState<DraftLine[]>([BLANK_LINE]);
   const [saving, setSaving] = useState(false);
@@ -131,7 +131,7 @@ export default function PurchaseReturns() {
   const openForm = () => {
     setVendorId('');
     setPoId('');
-    setReturnDate(new Date().toISOString().slice(0, 10));
+    setReturnDate(todayISO());
     setReason('');
     setLines([{ ...BLANK_LINE }]);
     setFormError(null);

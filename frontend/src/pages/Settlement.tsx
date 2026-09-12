@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { paymentApi } from '../services/api';
-import { formatDate, formatMoney } from '../utils/format';
+import { formatDate, formatMoney, todayISO } from '../utils/format';
 
 /**
  * The settlement endpoint reports one row per payment mode rather than a fixed
@@ -32,7 +32,7 @@ export default function Settlement() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
   const [report, setReport] = useState<any>(null);
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [date, setDate] = useState(todayISO());
   const [loading, setLoading] = useState(false);
 
   // Memoised so the effect can depend on it. It re-creates when the selected

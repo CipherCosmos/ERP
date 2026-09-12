@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import { invoiceApi, reportApi } from '../services/api';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
-import { formatDate, formatMoney } from '../utils/format';
+import { formatDate, formatMoney, thisMonthISO } from '../utils/format';
 
 /** One GSTR-1 row exactly as the server sends it. */
 interface GSTR1Entry {
@@ -33,7 +33,7 @@ export default function GSTR1Reports() {
   const [gstr1Data, setGstr1Data] = useState<{ invoices: GSTR1Entry[] } | null>(null);
   const [gstr3b, setGstr3b] = useState<any>(null);
   const [loading, setLoading] = useState(false);
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [month, setMonth] = useState(thisMonthISO);
 
   /**
    * The endpoint returns the rows and nothing else, so the three headline

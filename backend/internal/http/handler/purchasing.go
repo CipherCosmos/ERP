@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"time"
@@ -403,6 +404,12 @@ type purchasingReceiptLineRequest struct {
 	// CostPrice is what one buying unit landed at — what one sack cost, not one
 	// kilo. Zero means "use the store's recorded cost for the unit".
 	CostPrice money.Money `json:"cost_price"`
+	// ExpiryDate and MfgDate are what the delivery states about this lot,
+	// as YYYY-MM-DD. A product that expires needs one of them; which, and what
+	// happens when only the manufacture date is given, is decided by the
+	// product's own shelf life.
+	ExpiryDate *string `json:"expiry_date"`
+	MfgDate    *string `json:"mfg_date"`
 }
 
 // received resolves the three spellings. A line stating none is left at zero,
@@ -468,6 +475,18 @@ func (h *Purchasing) ReceiveGoods(c *gin.Context) {
 			httperr.Respond(c, httperr.BadRequest("item product_unit_id is not a valid identifier"))
 			return
 		}
+		expiryDate, err := optionalDate(item.ExpiryDate)
+		if err != nil {
+			httperr.Respond(c, httperr.BadRequest(
+				fmt.Sprintf("line %d: expiry_date must be a date like 2026-03-31", i+1)))
+			return
+		}
+		mfgDate, err := optionalDate(item.MfgDate)
+		if err != nil {
+			httperr.Respond(c, httperr.BadRequest(
+				fmt.Sprintf("line %d: mfg_date must be a date like 2026-03-31", i+1)))
+			return
+		}
 		lines[i] = domain.ReceiptLineInput{
 			ProductID:     productID,
 			ProductUnitID: productUnitID,
@@ -477,6 +496,8 @@ func (h *Purchasing) ReceiveGoods(c *gin.Context) {
 			Reason:        item.Reason,
 			BatchNo:       item.BatchNo,
 			CostPrice:     item.CostPrice,
+			ExpiryDate:    expiryDate,
+			MfgDate:       mfgDate,
 		}
 	}
 
@@ -898,6 +919,13 @@ func respondPurchasing(c *gin.Context, err error) {
 		// Approving a return takes goods out of stock, so the stock aggregate's
 		// refusal surfaces here.
 		httperr.Respond(c, httperr.Unprocessable(err.Error()))
+	case errors.Is(err, stockdomain.ErrValidation):
+		// Purchasing applies some of the stock aggregate's rules on the way in
+		// — a perishable delivery needs a date, a manufacture date cannot be in
+		// the future — and those carry the stock sentinel rather than this
+		// package's. Without this case the clerk is told "an unexpected error
+		// occurred" for a refusal that names the product and says what to type.
+		httperr.Respond(c, httperr.Unprocessable(unwrapValidationMessage(err)))
 	case errors.Is(err, service.ErrStoreRequired):
 		httperr.Respond(c, httperr.BadRequest(err.Error()))
 	default:

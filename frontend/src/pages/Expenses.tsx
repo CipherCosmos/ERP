@@ -6,7 +6,7 @@ import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney } from '../utils/format';
+import { formatDate, formatMoney, toISODate, todayISO } from '../utils/format';
 
 interface Expense {
   id: string;
@@ -32,7 +32,7 @@ interface CategoryTotal {
   total: number;
 }
 
-const today = () => new Date().toISOString().split('T')[0];
+const today = todayISO;
 
 const BLANK = { category_id: '', amount: '', description: '', expense_date: today() };
 
@@ -227,7 +227,7 @@ export default function Expenses() {
     const start = new Date();
     if (preset === 'month') start.setDate(1);
     else start.setDate(end.getDate() - 29);
-    setRange({ start_date: start.toISOString().split('T')[0], end_date: end.toISOString().split('T')[0] });
+    setRange({ start_date: toISODate(start), end_date: toISODate(end) });
   };
 
   const breakdown = useMemo(() => summary?.summary ?? [], [summary]);

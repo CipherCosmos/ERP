@@ -6,7 +6,7 @@ import { Column, DataTable } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney, formatQty } from '../utils/format';
+import { formatDate, formatMoney, formatQty, todayISO } from '../utils/format';
 
 /**
  * Purchase orders, in the unit the shop actually buys in.
@@ -429,7 +429,7 @@ export default function Purchases() {
         store_id: store.id,
         vendor_id: createVendor,
         terminal_id: terminalId,
-        order_date: new Date().toISOString().slice(0, 10),
+        order_date: todayISO(),
         expected_date: createExpected || undefined,
         // The request type in services/api.ts predates units and still spells a
         // line {product_id, quantity, ...}. The server takes unit_qty and

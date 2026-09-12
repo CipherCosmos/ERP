@@ -664,6 +664,16 @@ export const purchaseApi = {
       quantity?: number;
       batch_no?: string;
       cost_price?: number;
+      /**
+       * What the packet says about this lot, as YYYY-MM-DD.
+       *
+       * A product that expires needs one of them. Given only `mfg_date`, the
+       * server counts the product's own shelf life forward from it — which is
+       * what most Indian packaging carries: a date of packing and "best before
+       * N days".
+       */
+      expiry_date?: string;
+      mfg_date?: string;
     }[];
   }) => api.post('/purchases/receive', data),
   cancel: (id: string) => api.post(`/purchases/cancel/${id}`),

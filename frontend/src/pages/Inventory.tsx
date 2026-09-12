@@ -6,7 +6,7 @@ import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney, formatQty } from '../utils/format';
+import { daysUntilISO, formatDate, formatMoney, formatQty } from '../utils/format';
 
 interface Batch {
   id: string;
@@ -248,17 +248,16 @@ export default function Inventory() {
     const value = batches.reduce((s, b) => s + (b.total_cost || 0), 0);
     const reserved = batches.reduce((s, b) => s + (b.reserved_qty || 0), 0);
     const expiringSoon = batches.filter((b) => {
-      if (!b.expiry_date) return false;
-      const days = (Date.parse(b.expiry_date.slice(0, 10)) - Date.parse(new Date().toISOString().slice(0, 10))) / 86_400_000;
-      return days >= 0 && days <= 30;
+      const days = daysUntilISO(b.expiry_date);
+      return days !== null && days >= 0 && days <= 30;
     }).length;
     return { value, reserved, expiringSoon };
   }, [batches]);
 
-  const daysToExpiry = (iso: string | null) => {
-    if (!iso) return null;
-    return Math.round((Date.parse(iso.slice(0, 10)) - Date.parse(new Date().toISOString().slice(0, 10))) / 86_400_000);
-  };
+  // Both ends truncated to a calendar date before the subtraction, and the
+  // "today" end built locally. Comparing a date against a UTC-rendered today is
+  // off by a day for the first five and a half hours of every Indian morning.
+  const daysToExpiry = (iso: string | null) => daysUntilISO(iso);
 
   const stockColumns: Column<Batch>[] = [
     { key: 'product_name', header: 'Product', render: (b) => <span style={{ fontWeight: 600 }}>{b.product_name}</span>, value: (b) => b.product_name },

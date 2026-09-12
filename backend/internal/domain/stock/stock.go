@@ -637,3 +637,59 @@ func InLockOrder(productIDs []uuid.UUID) []int {
 	})
 	return order
 }
+
+// ---------------------------------------------------------------------------
+// Expiry at the receiving bay
+// ---------------------------------------------------------------------------
+
+// ExpiryForBatch decides what expiry date a batch carries, from what the
+// delivery stated and what the product knows about itself.
+//
+// This is the rule two product fields were added for and neither had. A product
+// says whether it expires and, where the date is counted from manufacture, how
+// long it lasts — and the point of it being the PRODUCT's property was that
+// receiving would then ask, rather than leaving the expiry report as complete
+// as whoever was typing at the receiving bay happened to remember. Nothing
+// asked. Every batch that arrived through a purchase receipt carried no date at
+// all, so the expiry screen showed only the batches somebody had entered by
+// hand and missed everything actually on the shelf.
+//
+// A stated date always wins, including on a product that does not track expiry:
+// a clerk reading a date off a packet is recording a fact, and the report is
+// better for having it.
+//
+// A past expiry is accepted. Goods do arrive expired, and a shop that cannot
+// record that cannot send them back or write them off — the expiry report is
+// where it finds them. A manufacture date in the future is refused, because
+// that is a typing mistake and nothing else.
+func ExpiryForBatch(productName string, tracksExpiry bool, shelfLifeDays *int,
+	stated, mfg *time.Time, today time.Time) (*time.Time, error) {
+	if mfg != nil && mfg.After(today) {
+		return nil, invalid("%s: the manufacture date %s is in the future",
+			productName, mfg.Format("2 Jan 2006"))
+	}
+	if stated != nil {
+		if mfg != nil && stated.Before(*mfg) {
+			return nil, invalid("%s: the expiry date %s is before it was made",
+				productName, stated.Format("2 Jan 2006"))
+		}
+		return stated, nil
+	}
+	if !tracksExpiry {
+		return nil, nil
+	}
+	if mfg != nil && shelfLifeDays != nil {
+		// Counted from manufacture, which is what the shelf life means and what
+		// is printed on most Indian packaging: a date of packing and a "best
+		// before N days".
+		computed := mfg.AddDate(0, 0, *shelfLifeDays)
+		return &computed, nil
+	}
+
+	want := "an expiry date"
+	if shelfLifeDays != nil {
+		want = fmt.Sprintf("an expiry date, or the date it was made so the %d day shelf life can be counted from it",
+			*shelfLifeDays)
+	}
+	return nil, invalid("%s expires, so this delivery needs %s", productName, want)
+}

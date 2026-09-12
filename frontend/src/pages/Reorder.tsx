@@ -6,7 +6,7 @@ import { ReorderItem } from '../types';
 import { Column, DataTable } from '../components/DataTable';
 import { FormError, NumberInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatMoney, formatQty } from '../utils/format';
+import { formatMoney, formatQty, todayISO } from '../utils/format';
 
 /** A supplier's worth of the reorder list. */
 interface Group {
@@ -162,7 +162,7 @@ export default function Reorder() {
         store_id: store.id,
         vendor_id: group.vendorId,
         terminal_id: terminalId,
-        order_date: new Date().toISOString().slice(0, 10),
+        order_date: todayISO(),
         items: lines.map((item) => ({
           product_id: item.product_id,
           product_unit_id: item.purchase_unit_id,
