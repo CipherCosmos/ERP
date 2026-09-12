@@ -86,6 +86,15 @@ There are no tolerance comparisons anywhere. The seven `math.Abs(x) > 0.05`
 checks that used to reconcile client and server float drift are gone; equality
 is exact.
 
+Inventory value is conserved rather than derived. A stock batch holds what it
+cost, in full, because a per-unit cost cannot be stored for a pack size that
+does not divide evenly: a 30 kg sack at Rs.940 is Rs.31.3333... a kilo, and
+thirty times Rs.31.33 is Rs.939.90. Receiving adds what was paid, consuming part
+of a batch moves a proportional share out and leaves the rest, and the cost of
+goods sold for a delivery therefore adds up to what the delivery cost. The
+per-unit figure reports want is generated from the value, not the other way
+round.
+
 ### What the database enforces itself
 
 Status columns are enums. Stock and reserved quantities cannot go negative. A
