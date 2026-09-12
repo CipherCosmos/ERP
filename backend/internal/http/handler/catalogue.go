@@ -352,6 +352,11 @@ func (h *Catalogue) ListProducts(c *gin.Context) {
 		Search:          c.Query("search"),
 		Limit:           intQuery(c, "limit", 0),
 		IncludeInactive: c.Query("include_inactive") == "true",
+		// ?unclassified=true lists the products carrying neither an HSN nor a
+		// SAC code. New products cannot be saved without one; these are the
+		// ones that predate the rule, and every invoice selling one goes out
+		// without the classification a tax invoice has to print.
+		Unclassified: c.Query("unclassified") == "true",
 	})
 	if err != nil {
 		respond(c, err)

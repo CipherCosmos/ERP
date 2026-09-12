@@ -152,7 +152,7 @@ api() { curl -s -X "$1" "${AUTH[@]}" -H 'Content-Type: application/json' \
 
 CAT=$(api POST /categories '{"name":"Probe"}' | jq -r '.id // empty')
 KG=$(curl -s "${AUTH[@]}" "$BASE/uoms?store_id=$STORE" | jq -r '.units[]? | select(.code=="KG") | .id')
-PROD=$(api POST /products "{\"name\":\"Probe Item\",\"category_id\":\"$CAT\",\"uom_id\":\"$KG\",\"gst_rate\":5,\"allow_decimal\":true}" | jq -r '.id // empty')
+PROD=$(api POST /products "{\"name\":\"Probe Item\",\"category_id\":\"$CAT\",\"uom_id\":\"$KG\",\"gst_rate\":5,\"hsn_code\":\"10063010\",\"allow_decimal\":true}" | jq -r '.id // empty')
 UNIT=$(api POST "/products/$PROD/units" "{\"label\":\"Each\",\"qty_in_base\":1,\"uom_id\":\"$KG\",\"is_default\":true,\"is_sellable\":true}" | jq -r '.id // empty')
 api POST /products/price "{\"product_id\":\"$PROD\",\"product_unit_id\":\"$UNIT\",\"mrp\":100,\"cost_price\":40,\"sell_price\":55}" >/dev/null
 api POST /stock/adjust "{\"product_id\":\"$PROD\",\"product_unit_id\":\"$UNIT\",\"unit_qty\":10,\"type\":\"add\",\"batch_no\":\"PROBE\",\"cost_price\":40,\"reason\":\"probe\"}" >/dev/null

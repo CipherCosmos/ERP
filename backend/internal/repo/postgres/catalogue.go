@@ -367,6 +367,11 @@ func (r *Catalogue) ListProducts(ctx context.Context, q platform.Querier, f cata
 		args = append(args, f.Barcode)
 		fmt.Fprintf(&sb, ` AND p.barcode = $%d`, len(args))
 	}
+	if f.Unclassified {
+		// COALESCE because both columns are nullable and a blank is the same
+		// absence as a NULL here.
+		sb.WriteString(` AND COALESCE(p.hsn_code, '') = '' AND COALESCE(p.sac_code, '') = ''`)
+	}
 	if f.Search != "" {
 		// ILIKE, not LIKE. SQLite's LIKE is case-insensitive for ASCII and
 		// Postgres's is not, so a straight port would have made every product

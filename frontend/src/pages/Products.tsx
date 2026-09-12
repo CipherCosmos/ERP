@@ -296,6 +296,13 @@ export default function Products() {
             {p.category_name || 'Uncategorised'}
             {p.barcode ? ` · ${p.barcode}` : ''}
           </div>
+          {/* A product with no HSN code issues invoices missing a particular a
+              tax invoice has to print, and the gap is invisible until a return
+              is prepared. New products cannot be saved without one; this marks
+              the ones that predate the rule, where they can be fixed. */}
+          {!p.hsn_code && (
+            <div style={styles.needsHsn}>HSN code missing — invoices for this cannot be filed</div>
+          )}
         </div>
       ),
       value: (p) => `${p.name} ${p.brand ?? ''} ${p.category_name ?? ''} ${p.barcode ?? ''}`,
@@ -470,8 +477,18 @@ export default function Products() {
               <Field label="GST rate %" required htmlFor="p-gst">
                 <NumberInput id="p-gst" min={0} max={100} value={form.gst_rate ?? 0} onChange={(e) => setForm({ ...form, gst_rate: Number(e.target.value) })} />
               </Field>
-              <Field label="HSN code" hint="Printed on the tax invoice." htmlFor="p-hsn">
-                <TextInput id="p-hsn" value={form.hsn_code ?? ''} onChange={(e) => setForm({ ...form, hsn_code: e.target.value })} />
+              <Field
+                label="HSN code"
+                required
+                hint="Printed on every tax invoice. 4, 6 or 8 digits."
+                htmlFor="p-hsn"
+              >
+                <TextInput
+                  id="p-hsn"
+                  inputMode="numeric"
+                  value={form.hsn_code ?? ''}
+                  onChange={(e) => setForm({ ...form, hsn_code: e.target.value })}
+                />
               </Field>
               <Field label="Barcode" hint="The product's own code. Packs get their own." htmlFor="p-bc">
                 <TextInput id="p-bc" value={form.barcode ?? ''} onChange={(e) => setForm({ ...form, barcode: e.target.value })} />
@@ -746,6 +763,7 @@ const styles: Record<string, React.CSSProperties> = {
   statLabel: { fontSize: font.size.xs, textTransform: 'uppercase', letterSpacing: '0.04em', color: color.textMuted, fontWeight: 700 },
   statValue: { marginTop: space.xs, fontSize: font.size.xl, fontWeight: 700, fontVariantNumeric: 'tabular-nums' },
   sub: { fontSize: font.size.xs, color: color.textMuted },
+  needsHsn: { fontSize: font.size.xs, color: color.danger, fontWeight: 600 },
   muted: { color: color.textFaint, fontSize: font.size.sm },
   tabs: { display: 'flex', gap: space.xs },
   tab: { ...ui.button, borderRadius: '999px', padding: '0.25rem 0.75rem', fontSize: font.size.sm },

@@ -247,6 +247,7 @@ func TestFullCatalogueRoundTripThroughHTTP(t *testing.T) {
 		"name":          "Basmati Rice",
 		"category_id":   categoryBody.ID,
 		"uom_id":        unitBody.ID,
+		"hsn_code":      "10063010",
 		"barcode":       "8901001100001",
 		"gst_rate":      5,
 		"allow_decimal": true,
@@ -376,7 +377,7 @@ func TestErrorsDoNotLeakDriverDetail(t *testing.T) {
 
 	product := map[string]any{
 		"name": "Duplicate", "category_id": categoryBody.ID, "uom_id": unitID,
-		"barcode": "8901001100777", "gst_rate": 5,
+		"barcode": "8901001100777", "gst_rate": 5, "hsn_code": "10063010",
 	}
 	if first := h.request(http.MethodPost, "/api/v1/products", h.token, product); first.Code != http.StatusCreated {
 		t.Fatalf("first create: status %d body %s", first.Code, first.Body.String())
@@ -444,7 +445,7 @@ func (h *harness) sellableProduct(t *testing.T) (productID, terminalID string) {
 
 	created := h.request(http.MethodPost, "/api/v1/products", h.token, map[string]any{
 		"name": "Soap Bar", "category_id": categoryBody.ID, "uom_id": unitID,
-		"gst_rate": 18, "mrp": "70.00", "cost_price": "45.00", "sell_price": "60.00",
+		"gst_rate": 18, "hsn_code": "34011190", "mrp": "70.00", "cost_price": "45.00", "sell_price": "60.00",
 	})
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create product: status %d body %s", created.Code, created.Body.String())

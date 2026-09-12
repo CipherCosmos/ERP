@@ -66,10 +66,13 @@ func newCategory(t *testing.T, svc *service.Service) uuid.UUID {
 
 func productInput(categoryID, uomID uuid.UUID, name, barcode string) domain.NewProductInput {
 	return domain.NewProductInput{
-		Name:         name,
-		CategoryID:   categoryID,
-		UOMID:        uomID,
-		Barcode:      barcode,
+		Name:       name,
+		CategoryID: categoryID,
+		UOMID:      uomID,
+		Barcode:    barcode,
+		// Every product carries the classification a tax invoice has to print.
+		// A fixture without one is not a product a shop could sell.
+		HSNCode:      "10063010",
 		BaseUnitQty:  money.QuantityFromInt(1),
 		GSTRate:      money.RateFromInt(5),
 		AllowDecimal: true,

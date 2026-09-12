@@ -171,6 +171,10 @@ func NewProduct(in NewProductInput) (Product, error) {
 	if err := ValidateGSTRate(in.GSTRate); err != nil {
 		return Product{}, err
 	}
+	hsn, sac, err := validateClassification(in.HSNCode, in.SACCode)
+	if err != nil {
+		return Product{}, err
+	}
 	if in.BaseUnitQty.IsNegative() || in.BaseUnitQty.IsZero() {
 		return Product{}, invalid("base unit quantity must be greater than zero")
 	}
@@ -183,8 +187,8 @@ func NewProduct(in NewProductInput) (Product, error) {
 		NameHi:       strings.TrimSpace(in.NameHi),
 		NameKn:       strings.TrimSpace(in.NameKn),
 		CategoryID:   in.CategoryID,
-		HSNCode:      strings.TrimSpace(in.HSNCode),
-		SACCode:      strings.TrimSpace(in.SACCode),
+		HSNCode:      hsn,
+		SACCode:      sac,
 		Barcode:      strings.TrimSpace(in.Barcode),
 		UOMID:        in.UOMID,
 		BaseUnitQty:  in.BaseUnitQty,
@@ -204,6 +208,78 @@ func NewProduct(in NewProductInput) (Product, error) {
 // units.go replaces it with a flat list whose every entry states its size in
 // the product's own stocking unit. See the comment on that type for why flat is
 // a correction rather than a simplification.
+
+// validateClassification requires a product to carry the code a tax invoice has
+// to print for it: an HSN code for goods, a SAC code for a service.
+//
+// CGST Rule 46(g) names it among the particulars of an invoice, and since April
+// 2021 it is mandatory — four digits for business-to-consumer supplies below the
+// turnover threshold, six above it and for anything business-to-business. A
+// product saved without one produces invoices that cannot be filed, and nothing
+// said so: the field was optional, trimmed, and stored blank.
+//
+// The length is checked as well as the presence. A three-digit code is not a
+// classification, it is a typo that the GST portal will reject months later when
+// the return is filed, by which time the invoices are with customers.
+//
+// Exempt and zero-rated goods are classified too. The code says what the goods
+// are, not what they are taxed at, so there is no exemption from having one.
+func validateClassification(hsnIn, sacIn string) (hsn, sac string, err error) {
+	hsn = strings.TrimSpace(hsnIn)
+	sac = strings.TrimSpace(sacIn)
+
+	switch {
+	case hsn == "" && sac == "":
+		return "", "", invalid(
+			"an HSN code is required: a tax invoice has to print the classification of what it sells, " +
+				"and a product without one produces invoices that cannot be filed. " +
+				"Use the SAC code field instead if this is a service")
+	case hsn != "" && sac != "":
+		return "", "", invalid(
+			"a product carries an HSN code or a SAC code, not both: HSN classifies goods and SAC classifies services")
+	case hsn != "":
+		if err := validateCode("HSN", hsn, 4, 6, 8); err != nil {
+			return "", "", err
+		}
+	default:
+		if err := validateCode("SAC", sac, 6); err != nil {
+			return "", "", err
+		}
+	}
+	return hsn, sac, nil
+}
+
+// validateCode checks that a classification is digits and one of the lengths the
+// scheme defines.
+func validateCode(kind, code string, lengths ...int) error {
+	for _, r := range code {
+		if r < '0' || r > '9' {
+			return invalid("%s code %q must be digits only", kind, code)
+		}
+	}
+	for _, n := range lengths {
+		if len(code) == n {
+			return nil
+		}
+	}
+	return invalid("%s code %q is %d digits; it must be %s",
+		kind, code, len(code), describeLengths(lengths))
+}
+
+func describeLengths(lengths []int) string {
+	parts := make([]string, len(lengths))
+	for i, n := range lengths {
+		parts[i] = fmt.Sprintf("%d", n)
+	}
+	switch len(parts) {
+	case 1:
+		return parts[0] + " digits"
+	case 2:
+		return parts[0] + " or " + parts[1] + " digits"
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + " or " + parts[len(parts)-1] + " digits"
+	}
+}
 
 // ValidateGSTRate rejects rates outside the statutory range. The database
 // carries the same CHECK, so this exists to produce a usable message rather
@@ -240,6 +316,15 @@ type ProductFilter struct {
 	// IncludeInactive lists deactivated products too, for the management
 	// screens that need to reactivate one.
 	IncludeInactive bool
+	// Unclassified lists only the products carrying neither an HSN nor a SAC
+	// code.
+	//
+	// New products cannot be saved without one, but products created before that
+	// rule existed are still on the shelf, and every invoice that sells one goes
+	// out without the classification Rule 46(g) requires. Refusing to sell them
+	// would stop a shop trading over a missing field, so the API exposes the list
+	// instead and somebody works through it.
+	Unclassified bool
 }
 
 // PricedProduct is the read model the POS and the products screen use: a

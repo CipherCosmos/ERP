@@ -129,6 +129,14 @@ of them can never disagree.
 
 ### Tax invoice particulars
 
+Every product carries the classification a tax invoice has to print — an HSN code
+for goods, a SAC code for a service — and is refused without one, or with one of
+the wrong length. A code with the wrong number of digits is a typo the GST portal
+rejects months later, when the return is filed and the invoices are already with
+customers. Products created before that rule are listed by
+`GET /products?unclassified=true` and marked on the products screen, because
+refusing to sell them would stop a shop trading over a missing field.
+
 Description, HSN code and rate of tax are snapshotted onto each invoice line
 when it is written, not joined from the catalogue. Renaming a product must not
 rewrite the bills it was already sold on, and a rate moved by notification must
@@ -230,7 +238,6 @@ bash scripts/restore-drill.sh            # prove a backup restores. Safe; never 
 | **Offline billing** | Not built. The counter needs the server. The old service-worker sync is removed: it read IndexedDB while the app wrote `localStorage`, its token getter always returned an empty string, and the offline path printed no receipt. Replacing it properly means terminal-scoped series (done), an outbox, idempotent sync against `processed_requests` (done), and cash-only rules offline. |
 | **Pilot** | Not run. The gate is fourteen consecutive days in one shop reconciling against the cash drawer and a physical stock count with no manual correction. |
 | **Mobile app** | Cut. The `mobile/` tree was seven Dart files, never built, read-only, with its API URL hardcoded to an emulator loopback. The web app is a PWA and serves the same purpose. |
-| **HSN enforcement** | A product can be saved with no HSN code, and then its invoices go out without one. The invoice view flags it; nothing yet prevents it. |
 
 ## Known judgement calls
 
