@@ -9,8 +9,10 @@ import (
 	"gbos/internal/domain/money"
 	domain "gbos/internal/domain/purchasing"
 	stockdomain "gbos/internal/domain/stock"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/purchasing"
 
 	"github.com/gin-gonic/gin"
@@ -35,30 +37,30 @@ func NewPurchasing(svc *service.Service) *Purchasing {
 // legacy spellings of receiving goods — POST /purchases/receive and POST /grn —
 // which are now the same operation behind two doors.
 func (h *Purchasing) Register(r gin.IRoutes) {
-	r.GET("/vendors", h.ListVendors)
-	r.GET("/vendors/:id", h.GetVendor)
-	r.POST("/vendors", h.CreateVendor)
-	r.PUT("/vendors/:id", h.UpdateVendor)
-	r.POST("/vendors/:id/deactivate", h.DeactivateVendor)
+	r.GET("/vendors", mw.RequirePermission(rbac.PermCatalogRead), h.ListVendors)
+	r.GET("/vendors/:id", mw.RequirePermission(rbac.PermCatalogRead), h.GetVendor)
+	r.POST("/vendors", mw.RequirePermission(rbac.PermVendorWrite), h.CreateVendor)
+	r.PUT("/vendors/:id", mw.RequirePermission(rbac.PermVendorUpdate), h.UpdateVendor)
+	r.POST("/vendors/:id/deactivate", mw.RequirePermission(rbac.PermVendorUpdate), h.DeactivateVendor)
 
-	r.GET("/purchases", h.ListPurchaseOrders)
-	r.GET("/purchases/:id", h.GetPurchaseOrder)
-	r.POST("/purchases", h.CreatePurchaseOrder)
-	r.POST("/purchases/receive", h.ReceiveGoods)
-	r.POST("/purchases/cancel/:id", h.CancelPurchaseOrder)
+	r.GET("/purchases", mw.RequirePermission(rbac.PermPurchaseRead), h.ListPurchaseOrders)
+	r.GET("/purchases/:id", mw.RequirePermission(rbac.PermPurchaseRead), h.GetPurchaseOrder)
+	r.POST("/purchases", mw.RequirePermission(rbac.PermPurchaseWrite), h.CreatePurchaseOrder)
+	r.POST("/purchases/receive", mw.RequirePermission(rbac.PermPurchaseWrite), h.ReceiveGoods)
+	r.POST("/purchases/cancel/:id", mw.RequirePermission(rbac.PermPurchaseWrite), h.CancelPurchaseOrder)
 
-	r.GET("/grn", h.ListGoodsReceipts)
-	r.GET("/grn/:id", h.GetGoodsReceipt)
-	r.POST("/grn", h.ReceiveGoods)
+	r.GET("/grn", mw.RequirePermission(rbac.PermGRNRead), h.ListGoodsReceipts)
+	r.GET("/grn/:id", mw.RequirePermission(rbac.PermGRNRead), h.GetGoodsReceipt)
+	r.POST("/grn", mw.RequirePermission(rbac.PermGRNWrite), h.ReceiveGoods)
 
-	r.GET("/purchase-returns", h.ListPurchaseReturns)
-	r.GET("/purchase-returns/:id", h.GetPurchaseReturn)
-	r.POST("/purchase-returns", h.CreatePurchaseReturn)
-	r.POST("/purchase-returns/:id/approve", h.ApprovePurchaseReturn)
+	r.GET("/purchase-returns", mw.RequirePermission(rbac.PermPurchaseReturn), h.ListPurchaseReturns)
+	r.GET("/purchase-returns/:id", mw.RequirePermission(rbac.PermPurchaseReturn), h.GetPurchaseReturn)
+	r.POST("/purchase-returns", mw.RequirePermission(rbac.PermPurchaseReturn), h.CreatePurchaseReturn)
+	r.POST("/purchase-returns/:id/approve", mw.RequirePermission(rbac.PermPurchaseReturn), h.ApprovePurchaseReturn)
 
-	r.GET("/vendor-payments", h.ListVendorPayments)
-	r.POST("/vendor-payments", h.RecordVendorPayment)
-	r.GET("/vendor-payments/summary", h.VendorPaymentSummary)
+	r.GET("/vendor-payments", mw.RequirePermission(rbac.PermVendorPayment), h.ListVendorPayments)
+	r.POST("/vendor-payments", mw.RequirePermission(rbac.PermVendorPayment), h.RecordVendorPayment)
+	r.GET("/vendor-payments/summary", mw.RequirePermission(rbac.PermVendorPayment), h.VendorPaymentSummary)
 }
 
 // ---------------------------------------------------------------------------

@@ -7,9 +7,11 @@ import (
 
 	domain "gbos/internal/domain/credit"
 	"gbos/internal/domain/money"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
 	platform "gbos/internal/platform/postgres"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/credit"
 
 	"github.com/gin-gonic/gin"
@@ -32,16 +34,16 @@ func NewCredit(svc *service.Service) *Credit {
 // of these reads or writes. The paths are the ones the existing frontend
 // already calls, so the cutover is a wiring change rather than a client change.
 func (h *Credit) Register(r gin.IRoutes) {
-	r.GET("/customers", h.ListCustomers)
-	r.POST("/customers", h.CreateCustomer)
-	r.GET("/customers/:id", h.GetCustomer)
-	r.PUT("/customers/:id", h.UpdateCustomer)
-	r.GET("/customers/:id/outstanding", h.Outstanding)
+	r.GET("/customers", mw.RequirePermission(rbac.PermCatalogRead), h.ListCustomers)
+	r.POST("/customers", mw.RequirePermission(rbac.PermCustomerCreate), h.CreateCustomer)
+	r.GET("/customers/:id", mw.RequirePermission(rbac.PermCatalogRead), h.GetCustomer)
+	r.PUT("/customers/:id", mw.RequirePermission(rbac.PermCustomerAdmin), h.UpdateCustomer)
+	r.GET("/customers/:id/outstanding", mw.RequirePermission(rbac.PermCreditView), h.Outstanding)
 
-	r.GET("/credit", h.ListEntries)
-	r.GET("/credit/overdue", h.Overdue)
-	r.POST("/credit/payment", h.RecordPayment)
-	r.GET("/credit/:id", h.GetEntry)
+	r.GET("/credit", mw.RequirePermission(rbac.PermCreditView), h.ListEntries)
+	r.GET("/credit/overdue", mw.RequirePermission(rbac.PermCreditView), h.Overdue)
+	r.POST("/credit/payment", mw.RequirePermission(rbac.PermCreditPay), h.RecordPayment)
+	r.GET("/credit/:id", mw.RequirePermission(rbac.PermCreditView), h.GetEntry)
 }
 
 // ---------------------------------------------------------------------------

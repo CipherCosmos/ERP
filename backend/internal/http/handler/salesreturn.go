@@ -7,8 +7,10 @@ import (
 	"gbos/internal/domain/money"
 	domain "gbos/internal/domain/salesreturn"
 	stockdomain "gbos/internal/domain/stock"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/salesreturn"
 
 	"github.com/gin-gonic/gin"
@@ -36,9 +38,9 @@ func NewSalesReturn(svc *service.Service) *SalesReturn {
 // audit trail. Both aggregates grew a RecordLoss during the port; stock's is
 // the one mounted, and this handler's ListLosses and CreateLoss are unused.
 func (h *SalesReturn) Register(r gin.IRoutes) {
-	r.GET("/returns", h.ListReturns)
-	r.POST("/returns", h.CreateReturn)
-	r.POST("/returns/:id/approve", h.ApproveReturn)
+	r.GET("/returns", mw.RequirePermission(rbac.PermReturnRead), h.ListReturns)
+	r.POST("/returns", mw.RequirePermission(rbac.PermReturnCreate), h.CreateReturn)
+	r.POST("/returns/:id/approve", mw.RequirePermission(rbac.PermReturnApprove), h.ApproveReturn)
 }
 
 // ---------------------------------------------------------------------------

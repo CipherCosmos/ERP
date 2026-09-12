@@ -11,6 +11,7 @@ interface LoginForm {
 export default function Login() {
   const navigate = useNavigate();
   const setUser = useAppStore((s) => s.setUser);
+  const setPermissions = useAppStore((s) => s.setPermissions);
   const setStore = useAppStore((s) => s.setStore);
   const setTerminal = useAppStore((s) => s.setTerminal);
   const [form, setForm] = useState<LoginForm>({ username: '', password: '' });
@@ -27,6 +28,10 @@ export default function Login() {
       localStorage.setItem('token', data.token);
       localStorage.setItem('storeId', data.user.store_id);
       setUser(data.user);
+      // What this session may do, from the server. A response without the field
+      // leaves the list empty, which hides everything optional rather than
+      // showing controls that would be refused.
+      setPermissions(Array.isArray(data.permissions) ? data.permissions : []);
       try {
         const storeRes = await storeApi.get(data.user.store_id);
         setStore(storeRes.data as any);

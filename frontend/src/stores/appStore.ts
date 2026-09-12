@@ -4,6 +4,16 @@ import { User, Store, Category, Product, CartItem, Terminal } from '../types';
 
 interface AppState {
   user: User | null;
+  /**
+   * What this session may do, as the server reports it at sign-in.
+   *
+   * The menu used to carry its own role list per screen, and the two had drifted
+   * in both directions: a warehouse hand who may write off damage had no entry
+   * for it, and a helper whose job is reading the reports could not reach them.
+   * The server is the only place that decides, so it is the only place that
+   * should say. Hiding a control is a courtesy; the API refuses regardless.
+   */
+  permissions: string[];
   store: Store | null;
   /**
    * The counter this device bills from. Every invoice carries it, because each
@@ -19,6 +29,9 @@ interface AppState {
   language: string;
 
   setUser: (user: User | null) => void;
+  setPermissions: (permissions: string[]) => void;
+  /** True when the session holds the named permission. */
+  can: (permission: string) => boolean;
   setStore: (store: Store | null) => void;
   setTerminal: (terminal: Terminal | null) => void;
   setCategories: (categories: Category[]) => void;
@@ -40,6 +53,7 @@ export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
       user: null,
+      permissions: [],
       store: null,
       terminal: null,
       categories: [],
@@ -50,6 +64,8 @@ export const useAppStore = create<AppState>()(
       language: 'en',
 
       setUser: (user) => set({ user }),
+      setPermissions: (permissions) => set({ permissions }),
+      can: (permission) => get().permissions.includes(permission),
       setStore: (store) => set({ store }),
       setTerminal: (terminal) => set({ terminal }),
       setCategories: (categories) => set({ categories }),
@@ -110,6 +126,7 @@ export const useAppStore = create<AppState>()(
       name: 'gbos-store',
       partialize: (state) => ({
         user: state.user,
+        permissions: state.permissions,
         store: state.store,
         terminal: state.terminal,
         language: state.language,

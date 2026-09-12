@@ -1,5 +1,7 @@
 package rbac
 
+import "sort"
+
 const (
 	PermAll = "*"
 
@@ -192,4 +194,94 @@ func RoleHas(role, permission string) bool {
 		}
 	}
 	return false
+}
+
+// PermissionsFor returns everything a role may do, sorted, so a client can hide
+// the controls it would only be refused on.
+//
+// The wildcard is expanded rather than returned as "*": a client that has to
+// special-case a wildcard will get it wrong somewhere, and an owner holding the
+// full list behaves the same as an owner holding the wildcard. An unknown role
+// returns an empty list, never nil, because a caller ranging over it should get
+// nothing rather than a surprise.
+//
+// This exists so the permission matrix lives in one place. The web client used to
+// keep its own copy as a role list per screen, and the two had drifted in both
+// directions: a warehouse hand could write off damage but had no menu entry for
+// it, and a helper whose entire job is reading the reports could not see them.
+func PermissionsFor(role string) []string {
+	perms, ok := rolePermissions[role]
+	if !ok {
+		return []string{}
+	}
+	for _, p := range perms {
+		if p == PermAll {
+			out := append([]string(nil), All...)
+			sort.Strings(out)
+			return out
+		}
+	}
+	out := append([]string(nil), perms...)
+	sort.Strings(out)
+	return out
+}
+
+// All is every permission this system defines, and it is what the owner's
+// wildcard expands to.
+//
+// It has to be written out. Go cannot enumerate its own constants, and the
+// obvious substitute — the union of what the other roles name — silently omits
+// anything only the owner holds. user.register is exactly that: no role but the
+// owner may create users, so deriving the list from the role table told an owner
+// they could not, and the web client hid the screen. TestAllCoversTheRoleTable
+// keeps this list and the table in step.
+var All = []string{
+	PermAnalyticsView,
+	PermAuditPost,
+	PermAuditView,
+	PermBarcodeGenerate,
+	PermCatalogRead,
+	PermCategoryWrite,
+	PermCreditPay,
+	PermCreditView,
+	PermCustomerAdmin,
+	PermCustomerCreate,
+	PermExpenseRead,
+	PermExpenseWrite,
+	PermExpiryRead,
+	PermGRNRead,
+	PermGRNWrite,
+	PermGSTR1File,
+	PermInvoiceCreate,
+	PermInvoiceRead,
+	PermInvoiceVoid,
+	PermLossRead,
+	PermLossWrite,
+	PermPasswordChange,
+	PermPaymentRead,
+	PermPaymentSplit,
+	PermProductCatalogWrite,
+	PermProductPrice,
+	PermProductUpdate,
+	PermPurchaseRead,
+	PermPurchaseReturn,
+	PermPurchaseWrite,
+	PermReportView,
+	PermReturnApprove,
+	PermReturnCreate,
+	PermReturnRead,
+	PermStockMove,
+	PermStoreCreate,
+	PermStoreUpdate,
+	PermSyncConflict,
+	PermSyncMark,
+	PermSyncPush,
+	PermSyncRead,
+	PermUOMWrite,
+	PermUserDeactivate,
+	PermUserList,
+	PermUserRegister,
+	PermVendorPayment,
+	PermVendorUpdate,
+	PermVendorWrite,
 }

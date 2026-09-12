@@ -6,7 +6,7 @@ import { getPendingInvoiceCount } from '../services/offlineInvoiceQueue';
 
 export default function Menu() {
   const navigate = useNavigate();
-  const { user, store, language, isOnline, syncPending, setSyncPending } = useAppStore();
+  const { user, store, language, isOnline, syncPending, setSyncPending, permissions } = useAppStore();
 
   useEffect(() => {
     setSyncPending(getPendingInvoiceCount());
@@ -17,38 +17,50 @@ export default function Menu() {
     return null;
   }
 
-  const role = user.role;
   const lang = language || 'en';
 
+  // Each screen names the permission its own API calls need, so this list and
+  // the server cannot disagree. It used to name roles instead, duplicating the
+  // matrix, and the copies had drifted in both directions: a warehouse hand who
+  // may write off damage had no entry for it, and a helper whose job is reading
+  // the reports could not reach them.
+  //
+  // Hiding an entry is a courtesy. The API refuses on its own account, so a
+  // stale list here cannot grant anything.
   const menuItems = [
-    { key: 'billing', labelKey: 'billing', icon: '💰', path: '/billing', roles: ['owner', 'manager', 'cashier'] },
-    { key: 'products', labelKey: 'products', icon: '🏷️', path: '/products', roles: ['owner', 'manager'] },
-    { key: 'inventory', labelKey: 'inventory', icon: '📦', path: '/inventory', roles: ['owner', 'manager', 'helper', 'warehouse'] },
-    { key: 'expiry', labelKey: 'expiry', icon: '⏰', path: '/expiry', roles: ['owner', 'manager', 'warehouse'] },
-    { key: 'purchases', labelKey: 'purchases', icon: '🛒', path: '/purchases', roles: ['owner', 'manager'] },
-    { key: 'vendors', labelKey: 'vendors', icon: '🏭', path: '/vendors', roles: ['owner', 'manager'] },
-    { key: 'customers', labelKey: 'customers', icon: '👥', path: '/customers', roles: ['owner', 'manager', 'cashier'] },
-    { key: 'credit', labelKey: 'credit', icon: '💳', path: '/credit', roles: ['owner', 'manager'] },
-    { key: 'settlement', labelKey: 'settlement', icon: '📝', path: '/settlement', roles: ['owner', 'manager'] },
-    { key: 'returns', labelKey: 'returns', icon: '↩️', path: '/returns', roles: ['owner', 'manager'] },
-    { key: 'losses', labelKey: 'losses', icon: '📉', path: '/losses', roles: ['owner', 'manager'] },
-    { key: 'expenses', labelKey: 'expenses', icon: '💸', path: '/expenses', roles: ['owner', 'manager'] },
-    { key: 'dashboard', labelKey: 'dashboard', icon: '📊', path: '/dashboard', roles: ['owner', 'manager'] },
-    { key: 'reports', labelKey: 'reports', icon: '📈', path: '/reports', roles: ['owner', 'manager'] },
-    { key: 'profit-loss', labelKey: 'profitLoss', icon: '💵', path: '/profit-loss', roles: ['owner', 'manager'] },
-    { key: 'credit-aging', labelKey: 'creditAging', icon: '📅', path: '/credit-aging', roles: ['owner', 'manager'] },
-    { key: 'gstr1', labelKey: 'gstr1', icon: '📋', path: '/gstr1', roles: ['owner', 'manager'] },
-    { key: 'invoices', labelKey: 'invoices', icon: '🧾', path: '/invoices', roles: ['owner', 'manager', 'cashier'] },
-    { key: 'stock-transfer', labelKey: 'stockTransfer', icon: '🔄', path: '/stock-transfer', roles: ['owner', 'manager', 'warehouse'] },
-    { key: 'grn', labelKey: 'grn', icon: '📥', path: '/grn', roles: ['owner', 'manager', 'warehouse'] },
-    { key: 'vendor-payments', labelKey: 'vendorPayments', icon: '💳', path: '/vendor-payments', roles: ['owner', 'manager'] },
-    { key: 'purchase-returns', labelKey: 'purchaseReturns', icon: '↩️', path: '/purchase-returns', roles: ['owner', 'manager'] },
-    { key: 'multi-store', labelKey: 'multiStore', icon: '🏪', path: '/multi-store', roles: ['owner'] },
-    { key: 'audit', labelKey: 'audit', icon: '🔍', path: '/audit', roles: ['owner', 'manager'] },
-    { key: 'settings', labelKey: 'settings', icon: '⚙️', path: '/settings', roles: ['owner'] },
+    { key: 'billing', labelKey: 'billing', icon: '💰', path: '/billing', permission: 'invoice.create' },
+    { key: 'products', labelKey: 'products', icon: '🏷️', path: '/products', permission: 'catalog.read' },
+    { key: 'inventory', labelKey: 'inventory', icon: '📦', path: '/inventory', permission: 'catalog.read' },
+    { key: 'expiry', labelKey: 'expiry', icon: '⏰', path: '/expiry', permission: 'expiry.read' },
+    { key: 'purchases', labelKey: 'purchases', icon: '🛒', path: '/purchases', permission: 'purchase.read' },
+    { key: 'vendors', labelKey: 'vendors', icon: '🏭', path: '/vendors', permission: 'catalog.read' },
+    { key: 'customers', labelKey: 'customers', icon: '👥', path: '/customers', permission: 'catalog.read' },
+    { key: 'credit', labelKey: 'credit', icon: '💳', path: '/credit', permission: 'credit.view' },
+    { key: 'settlement', labelKey: 'settlement', icon: '📝', path: '/settlement', permission: 'payment.read' },
+    { key: 'returns', labelKey: 'returns', icon: '↩️', path: '/returns', permission: 'return.read' },
+    { key: 'losses', labelKey: 'losses', icon: '📉', path: '/losses', permission: 'loss.read' },
+    { key: 'expenses', labelKey: 'expenses', icon: '💸', path: '/expenses', permission: 'expense.read' },
+    { key: 'dashboard', labelKey: 'dashboard', icon: '📊', path: '/dashboard', permission: 'analytics.view' },
+    { key: 'reports', labelKey: 'reports', icon: '📈', path: '/reports', permission: 'analytics.view' },
+    { key: 'profit-loss', labelKey: 'profitLoss', icon: '💵', path: '/profit-loss', permission: 'report.view' },
+    { key: 'credit-aging', labelKey: 'creditAging', icon: '📅', path: '/credit-aging', permission: 'report.view' },
+    { key: 'gstr1', labelKey: 'gstr1', icon: '📋', path: '/gstr1', permission: 'report.view' },
+    { key: 'invoices', labelKey: 'invoices', icon: '🧾', path: '/invoices', permission: 'invoice.read' },
+    { key: 'stock-transfer', labelKey: 'stockTransfer', icon: '🔄', path: '/stock-transfer', permission: 'stock.move' },
+    { key: 'grn', labelKey: 'grn', icon: '📥', path: '/grn', permission: 'grn.read' },
+    { key: 'vendor-payments', labelKey: 'vendorPayments', icon: '💳', path: '/vendor-payments', permission: 'vendor.payment' },
+    { key: 'purchase-returns', labelKey: 'purchaseReturns', icon: '↩️', path: '/purchase-returns', permission: 'purchase.return' },
+    { key: 'multi-store', labelKey: 'multiStore', icon: '🏪', path: '/multi-store', permission: 'analytics.view' },
+    { key: 'audit', labelKey: 'audit', icon: '🔍', path: '/audit', permission: 'audit.view' },
+    { key: 'settings', labelKey: 'settings', icon: '⚙️', path: '/settings', permission: 'user.register' },
   ];
 
-  const visibleItems = menuItems.filter((item) => item.roles.includes(role));
+  // A session that predates this field has no permissions recorded. Falling back
+  // to showing everything is the safe choice here: the entries still 403 if the
+  // role cannot use them, and hiding the whole menu from somebody who signed in
+  // before a deploy would look like the app had broken.
+  const visibleItems =
+    permissions.length === 0 ? menuItems : menuItems.filter((item) => permissions.includes(item.permission));
 
   return (
     <div style={styles.container}>

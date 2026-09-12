@@ -95,6 +95,20 @@ goods sold for a delivery therefore adds up to what the delivery cost. The
 per-unit figure reports want is generated from the value, not the other way
 round.
 
+### Who may do what
+
+Every one of the 112 routes names the permission it needs, and the server checks
+it. A cashier bills and takes payments; a warehouse hand moves stock and receives
+deliveries; a helper reads, including the reports. None of them can open a store,
+write off inventory, void a bill or see the profit and loss unless their role says
+so.
+
+The web client is told what the session may do at sign-in rather than keeping its
+own copy of the matrix, so a screen cannot be offered that the API would refuse.
+Two tests hold the arrangement together: one reads the router's source and fails
+on any route registered without a permission, and one reads the client's menu and
+fails on any permission it names that does not exist.
+
 ### What the database enforces itself
 
 Status columns are enums. Stock and reserved quantities cannot go negative. A

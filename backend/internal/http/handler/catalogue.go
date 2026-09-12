@@ -8,8 +8,10 @@ import (
 
 	domain "gbos/internal/domain/catalogue"
 	"gbos/internal/domain/money"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/catalogue"
 
 	"github.com/gin-gonic/gin"
@@ -30,47 +32,47 @@ func NewCatalogue(svc *service.Service) *Catalogue {
 // store-scoped data sits behind the store middleware, so no handler below can
 // see a store id that has not been authorised.
 func (h *Catalogue) Register(r gin.IRoutes) {
-	r.GET("/categories", h.ListCategories)
-	r.POST("/categories", h.CreateCategory)
-	r.POST("/categories/:id/deactivate", h.DeactivateCategory)
+	r.GET("/categories", mw.RequirePermission(rbac.PermCatalogRead), h.ListCategories)
+	r.POST("/categories", mw.RequirePermission(rbac.PermCategoryWrite), h.CreateCategory)
+	r.POST("/categories/:id/deactivate", mw.RequirePermission(rbac.PermCategoryWrite), h.DeactivateCategory)
 
 	// Unit families and units of measure are catalogue reference data. They are
 	// rows rather than an enum precisely so a trade the shop takes up next year
 	// needs an INSERT and not a deploy.
-	r.GET("/unit-families", h.ListFamilies)
-	r.POST("/unit-families", h.CreateFamily)
-	r.PUT("/unit-families/:id", h.UpdateFamily)
-	r.POST("/unit-families/:id/base-unit", h.SetFamilyBaseUnit)
-	r.POST("/unit-families/:id/deactivate", h.DeactivateFamily)
-	r.POST("/unit-families/:id/activate", h.ActivateFamily)
+	r.GET("/unit-families", mw.RequirePermission(rbac.PermCatalogRead), h.ListFamilies)
+	r.POST("/unit-families", mw.RequirePermission(rbac.PermUOMWrite), h.CreateFamily)
+	r.PUT("/unit-families/:id", mw.RequirePermission(rbac.PermUOMWrite), h.UpdateFamily)
+	r.POST("/unit-families/:id/base-unit", mw.RequirePermission(rbac.PermUOMWrite), h.SetFamilyBaseUnit)
+	r.POST("/unit-families/:id/deactivate", mw.RequirePermission(rbac.PermUOMWrite), h.DeactivateFamily)
+	r.POST("/unit-families/:id/activate", mw.RequirePermission(rbac.PermUOMWrite), h.ActivateFamily)
 
-	r.GET("/uoms", h.ListUnits)
-	r.POST("/uoms", h.CreateUnit)
-	r.PUT("/uoms/:id", h.UpdateUnit)
-	r.POST("/uoms/:id/deactivate", h.DeactivateUnit)
-	r.POST("/uoms/:id/activate", h.ActivateUnit)
+	r.GET("/uoms", mw.RequirePermission(rbac.PermCatalogRead), h.ListUnits)
+	r.POST("/uoms", mw.RequirePermission(rbac.PermUOMWrite), h.CreateUnit)
+	r.PUT("/uoms/:id", mw.RequirePermission(rbac.PermUOMWrite), h.UpdateUnit)
+	r.POST("/uoms/:id/deactivate", mw.RequirePermission(rbac.PermUOMWrite), h.DeactivateUnit)
+	r.POST("/uoms/:id/activate", mw.RequirePermission(rbac.PermUOMWrite), h.ActivateUnit)
 
-	r.GET("/products", h.ListProducts)
-	r.GET("/products/:id", h.GetProduct)
-	r.POST("/products", h.CreateProduct)
-	r.PUT("/products/:id", h.UpdateProduct)
-	r.POST("/products/:id/deactivate", h.DeactivateProduct)
-	r.POST("/products/:id/activate", h.ActivateProduct)
+	r.GET("/products", mw.RequirePermission(rbac.PermCatalogRead), h.ListProducts)
+	r.GET("/products/:id", mw.RequirePermission(rbac.PermCatalogRead), h.GetProduct)
+	r.POST("/products", mw.RequirePermission(rbac.PermProductCatalogWrite), h.CreateProduct)
+	r.PUT("/products/:id", mw.RequirePermission(rbac.PermProductUpdate), h.UpdateProduct)
+	r.POST("/products/:id/deactivate", mw.RequirePermission(rbac.PermProductUpdate), h.DeactivateProduct)
+	r.POST("/products/:id/activate", mw.RequirePermission(rbac.PermProductUpdate), h.ActivateProduct)
 
-	r.POST("/products/price", h.SetPrice)
-	r.GET("/products/:id/prices", h.ListPrices)
+	r.POST("/products/price", mw.RequirePermission(rbac.PermProductPrice), h.SetPrice)
+	r.GET("/products/:id/prices", mw.RequirePermission(rbac.PermCatalogRead), h.ListPrices)
 
 	// Was /products/:id/packing-units. A product unit is no longer "how it is
 	// boxed" but "what it may be transacted as", which is a different question
 	// and deserves the plainer path.
-	r.GET("/products/:id/units", h.ListProductUnits)
-	r.POST("/products/:id/units", h.CreateProductUnit)
-	r.PUT("/products/:id/units/:unit_id", h.UpdateProductUnit)
-	r.POST("/products/:id/units/:unit_id/default", h.SetDefaultUnit)
-	r.POST("/products/:id/units/:unit_id/deactivate", h.DeactivateProductUnit)
-	r.POST("/products/:id/units/:unit_id/activate", h.ActivateProductUnit)
+	r.GET("/products/:id/units", mw.RequirePermission(rbac.PermCatalogRead), h.ListProductUnits)
+	r.POST("/products/:id/units", mw.RequirePermission(rbac.PermProductCatalogWrite), h.CreateProductUnit)
+	r.PUT("/products/:id/units/:unit_id", mw.RequirePermission(rbac.PermProductCatalogWrite), h.UpdateProductUnit)
+	r.POST("/products/:id/units/:unit_id/default", mw.RequirePermission(rbac.PermProductCatalogWrite), h.SetDefaultUnit)
+	r.POST("/products/:id/units/:unit_id/deactivate", mw.RequirePermission(rbac.PermProductCatalogWrite), h.DeactivateProductUnit)
+	r.POST("/products/:id/units/:unit_id/activate", mw.RequirePermission(rbac.PermProductCatalogWrite), h.ActivateProductUnit)
 
-	r.GET("/barcodes/lookup/:barcode", h.LookupBarcode)
+	r.GET("/barcodes/lookup/:barcode", mw.RequirePermission(rbac.PermCatalogRead), h.LookupBarcode)
 }
 
 // ---------------------------------------------------------------------------

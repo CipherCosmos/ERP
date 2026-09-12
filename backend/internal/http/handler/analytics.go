@@ -8,8 +8,10 @@ import (
 
 	domain "gbos/internal/domain/analytics"
 	userdomain "gbos/internal/domain/user"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/analytics"
 
 	"github.com/gin-gonic/gin"
@@ -33,15 +35,15 @@ func NewAnalytics(svc *service.Service) *Analytics {
 // The multi-store rollup is deliberately not here — it is the one report that
 // crosses the store boundary, and it is mounted by RegisterUnscoped.
 func (h *Analytics) Register(r gin.IRoutes) {
-	r.GET("/analytics/dashboard", h.Dashboard)
-	r.GET("/analytics/sales/category", h.SalesByCategory)
-	r.GET("/analytics/sales/top", h.TopProducts)
-	r.GET("/analytics/sales/hourly", h.HourlySales)
-	r.GET("/analytics/sales/payment", h.PaymentModes)
+	r.GET("/analytics/dashboard", mw.RequirePermission(rbac.PermAnalyticsView), h.Dashboard)
+	r.GET("/analytics/sales/category", mw.RequirePermission(rbac.PermAnalyticsView), h.SalesByCategory)
+	r.GET("/analytics/sales/top", mw.RequirePermission(rbac.PermAnalyticsView), h.TopProducts)
+	r.GET("/analytics/sales/hourly", mw.RequirePermission(rbac.PermAnalyticsView), h.HourlySales)
+	r.GET("/analytics/sales/payment", mw.RequirePermission(rbac.PermAnalyticsView), h.PaymentModes)
 
-	r.GET("/reports/profit-loss", h.ProfitAndLoss)
-	r.GET("/reports/credit-aging", h.CreditAging)
-	r.GET("/reports/gstr-3b", h.GSTR3B)
+	r.GET("/reports/profit-loss", mw.RequirePermission(rbac.PermReportView), h.ProfitAndLoss)
+	r.GET("/reports/credit-aging", mw.RequirePermission(rbac.PermReportView), h.CreditAging)
+	r.GET("/reports/gstr-3b", mw.RequirePermission(rbac.PermReportView), h.GSTR3B)
 }
 
 // RegisterUnscoped mounts the owner's rollup across several shops.
@@ -53,7 +55,7 @@ func (h *Analytics) Register(r gin.IRoutes) {
 // itself lets act on any active store — and only over a store list the caller
 // names explicitly.
 func (h *Analytics) RegisterUnscoped(r gin.IRoutes) {
-	r.GET("/analytics/multi-store", h.MultiStore)
+	r.GET("/analytics/multi-store", mw.RequirePermission(rbac.PermAnalyticsView), h.MultiStore)
 }
 
 // ---------------------------------------------------------------------------

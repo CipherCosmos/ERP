@@ -6,8 +6,10 @@ import (
 
 	"gbos/internal/domain/money"
 	domain "gbos/internal/domain/stock"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/stock"
 
 	"github.com/gin-gonic/gin"
@@ -31,24 +33,24 @@ func NewStock(svc *service.Service) *Stock {
 // paths mirror the ones the existing frontend already calls — /stock/*,
 // /losses and /expiry/* — so the cutover does not need a client change.
 func (h *Stock) Register(r gin.IRoutes) {
-	r.GET("/stock", h.List)
-	r.GET("/stock/low", h.LowStock)
-	r.GET("/stock/adjustments", h.ListAdjustments)
-	r.GET("/stock/product/:id", h.ProductStock)
-	r.POST("/stock/adjust", h.Adjust)
-	r.POST("/stock/transfer", h.Transfer)
+	r.GET("/stock", mw.RequirePermission(rbac.PermCatalogRead), h.List)
+	r.GET("/stock/low", mw.RequirePermission(rbac.PermCatalogRead), h.LowStock)
+	r.GET("/stock/adjustments", mw.RequirePermission(rbac.PermCatalogRead), h.ListAdjustments)
+	r.GET("/stock/product/:id", mw.RequirePermission(rbac.PermCatalogRead), h.ProductStock)
+	r.POST("/stock/adjust", mw.RequirePermission(rbac.PermStockMove), h.Adjust)
+	r.POST("/stock/transfer", mw.RequirePermission(rbac.PermStockMove), h.Transfer)
 	// There is no /stock/convert. Stock is one pool in the product's base unit,
 	// so there is nothing to convert it into: a sale or a receipt states its own
 	// unit and multiplies at that moment. See the stock service for the longer
 	// version.
-	r.POST("/stock/reserve", h.Reserve)
-	r.POST("/stock/release", h.Release)
+	r.POST("/stock/reserve", mw.RequirePermission(rbac.PermStockMove), h.Reserve)
+	r.POST("/stock/release", mw.RequirePermission(rbac.PermStockMove), h.Release)
 
-	r.GET("/losses", h.ListLosses)
-	r.POST("/losses", h.RecordLoss)
+	r.GET("/losses", mw.RequirePermission(rbac.PermLossRead), h.ListLosses)
+	r.POST("/losses", mw.RequirePermission(rbac.PermLossWrite), h.RecordLoss)
 
-	r.GET("/expiry/expiring", h.Expiring)
-	r.GET("/expiry/expired", h.Expired)
+	r.GET("/expiry/expiring", mw.RequirePermission(rbac.PermExpiryRead), h.Expiring)
+	r.GET("/expiry/expired", mw.RequirePermission(rbac.PermExpiryRead), h.Expired)
 }
 
 // ---------------------------------------------------------------------------

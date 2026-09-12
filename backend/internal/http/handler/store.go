@@ -6,8 +6,10 @@ import (
 
 	domain "gbos/internal/domain/store"
 	userdomain "gbos/internal/domain/user"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/store"
 
 	"github.com/gin-gonic/gin"
@@ -31,18 +33,18 @@ func NewStore(svc *service.Service) *Store {
 // storeAdminTarget. The middleware has already decided which store this caller
 // may touch, and a path that names a different one is refused.
 func (h *Store) Register(r gin.IRoutes) {
-	r.GET("/stores", h.List)
-	r.POST("/stores", h.Create)
-	r.GET("/stores/:id", h.Get)
-	r.PUT("/stores/:id", h.Update)
-	r.POST("/stores/:id/deactivate", h.Deactivate)
+	r.GET("/stores", mw.RequirePermission(rbac.PermCatalogRead), h.List)
+	r.POST("/stores", mw.RequirePermission(rbac.PermStoreCreate), h.Create)
+	r.GET("/stores/:id", mw.RequirePermission(rbac.PermCatalogRead), h.Get)
+	r.PUT("/stores/:id", mw.RequirePermission(rbac.PermStoreUpdate), h.Update)
+	r.POST("/stores/:id/deactivate", mw.RequirePermission(rbac.PermStoreUpdate), h.Deactivate)
 
 	// Terminals are nested under their store because a terminal only means
 	// anything inside one: its code is a segment of every invoice number the
 	// counter issues.
-	r.GET("/stores/:id/terminals", h.ListTerminals)
-	r.POST("/stores/:id/terminals", h.RegisterTerminal)
-	r.POST("/stores/:id/terminals/:terminal_id/deactivate", h.DeactivateTerminal)
+	r.GET("/stores/:id/terminals", mw.RequirePermission(rbac.PermCatalogRead), h.ListTerminals)
+	r.POST("/stores/:id/terminals", mw.RequirePermission(rbac.PermStoreUpdate), h.RegisterTerminal)
+	r.POST("/stores/:id/terminals/:terminal_id/deactivate", mw.RequirePermission(rbac.PermStoreUpdate), h.DeactivateTerminal)
 }
 
 // ---------------------------------------------------------------------------

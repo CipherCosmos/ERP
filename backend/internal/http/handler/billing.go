@@ -8,8 +8,10 @@ import (
 	domain "gbos/internal/domain/billing"
 	"gbos/internal/domain/money"
 	stockdomain "gbos/internal/domain/stock"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	repo "gbos/internal/repo/postgres"
 	service "gbos/internal/service/billing"
 
@@ -35,12 +37,12 @@ func NewBilling(svc *service.Service) *Billing {
 // Register mounts the sales routes. Every one is store-scoped, so they belong
 // behind the store middleware.
 func (h *Billing) Register(r gin.IRoutes) {
-	r.POST("/invoices", h.Create)
-	r.GET("/invoices", h.List)
-	r.GET("/invoices/gstr1", h.GSTR1)
-	r.POST("/invoices/gstr1/mark-filed", h.MarkGSTR1Filed)
-	r.GET("/invoices/:id", h.Get)
-	r.POST("/invoices/:id/void", h.Void)
+	r.POST("/invoices", mw.RequirePermission(rbac.PermInvoiceCreate), h.Create)
+	r.GET("/invoices", mw.RequirePermission(rbac.PermInvoiceRead), h.List)
+	r.GET("/invoices/gstr1", mw.RequirePermission(rbac.PermReportView), h.GSTR1)
+	r.POST("/invoices/gstr1/mark-filed", mw.RequirePermission(rbac.PermGSTR1File), h.MarkGSTR1Filed)
+	r.GET("/invoices/:id", mw.RequirePermission(rbac.PermInvoiceRead), h.Get)
+	r.POST("/invoices/:id/void", mw.RequirePermission(rbac.PermInvoiceVoid), h.Void)
 }
 
 type saleLineRequest struct {

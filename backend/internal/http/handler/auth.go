@@ -26,6 +26,11 @@ func NewAuth(svc *service.Service) *Auth {
 // RegisterAuthenticated mounts the routes that require a session. Login is
 // mounted separately, because it is how a session is obtained.
 func (h *Auth) RegisterAuthenticated(r gin.IRoutes) {
+	// These two carry no permission, deliberately: they act on the caller's own
+	// session and nothing else. Gating them would mean a role that cannot sign
+	// out or change its own password, which is worse than useless — a shop that
+	// suspects a cashier's password is known could not have them change it.
+	// TestEveryRouteCarriesAPermission lists them as the only exemptions.
 	r.POST("/auth/logout", h.Logout)
 	r.POST("/auth/change-password", h.ChangePassword)
 	r.GET("/auth/users", mw.RequirePermission(rbac.PermUserList), h.ListUsers)
@@ -56,6 +61,13 @@ func (h *Auth) Login(c *gin.Context) {
 		return
 	}
 
+	// permissions ships with the session so the client can hide the controls it
+	// would only be refused on, without keeping its own copy of the matrix. The
+	// web client did keep one, as a role list per screen, and the two had drifted
+	// in both directions — a warehouse hand who may write off damage had no menu
+	// entry for it, and a helper whose job is reading the reports could not see
+	// them. This is advisory only: the server refuses on its own account either
+	// way, and a client that ignores this list gets 403s rather than access.
 	c.JSON(http.StatusOK, gin.H{
 		"token": token,
 		"user": gin.H{
@@ -65,6 +77,7 @@ func (h *Auth) Login(c *gin.Context) {
 			"store_id":  user.StoreID,
 			"is_active": user.IsActive,
 		},
+		"permissions": rbac.PermissionsFor(string(user.Role)),
 	})
 }
 

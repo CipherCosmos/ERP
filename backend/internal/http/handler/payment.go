@@ -8,9 +8,11 @@ import (
 	billingdomain "gbos/internal/domain/billing"
 	"gbos/internal/domain/money"
 	domain "gbos/internal/domain/payment"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
 	platform "gbos/internal/platform/postgres"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/payment"
 
 	"github.com/gin-gonic/gin"
@@ -32,9 +34,9 @@ func NewPayment(svc *service.Service) *Payment {
 // behind the store middleware: an invoice id on its own is otherwise a bearer
 // token for another shop's money.
 func (h *Payment) Register(r gin.IRoutes) {
-	r.POST("/payments/split", h.Settle)
-	r.GET("/payments/invoice/:id", h.ForInvoice)
-	r.GET("/payments/settlement", h.Settlement)
+	r.POST("/payments/split", mw.RequirePermission(rbac.PermPaymentSplit), h.Settle)
+	r.GET("/payments/invoice/:id", mw.RequirePermission(rbac.PermPaymentRead), h.ForInvoice)
+	r.GET("/payments/settlement", mw.RequirePermission(rbac.PermPaymentRead), h.Settlement)
 }
 
 // paymentTenderRequest is one part of a settlement: this much, this way.

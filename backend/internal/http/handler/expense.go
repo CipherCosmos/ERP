@@ -7,8 +7,10 @@ import (
 
 	domain "gbos/internal/domain/expense"
 	"gbos/internal/domain/money"
+	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
 	"gbos/internal/platform/httperr"
+	"gbos/internal/rbac"
 	service "gbos/internal/service/expense"
 
 	"github.com/gin-gonic/gin"
@@ -31,15 +33,15 @@ func NewExpense(svc *service.Service) *Expense {
 // alongside /expenses itself and never under a wildcard, so gin's route tree
 // has no static-versus-parameter collision to panic on at start-up.
 func (h *Expense) Register(r gin.IRoutes) {
-	r.GET("/expenses", h.List)
-	r.POST("/expenses", h.Create)
-	r.GET("/expenses/categories", h.ListCategories)
+	r.GET("/expenses", mw.RequirePermission(rbac.PermExpenseRead), h.List)
+	r.POST("/expenses", mw.RequirePermission(rbac.PermExpenseWrite), h.Create)
+	r.GET("/expenses/categories", mw.RequirePermission(rbac.PermExpenseRead), h.ListCategories)
 	// There is no category list in the schema and nothing seeds one, so
 	// without this route a fresh installation can never record an expense at
 	// all: the category is a required foreign key with no way to create a
 	// target for it.
-	r.POST("/expenses/categories", h.CreateCategory)
-	r.GET("/expenses/summary", h.Summary)
+	r.POST("/expenses/categories", mw.RequirePermission(rbac.PermExpenseWrite), h.CreateCategory)
+	r.GET("/expenses/summary", mw.RequirePermission(rbac.PermExpenseRead), h.Summary)
 }
 
 func (h *Expense) ListCategories(c *gin.Context) {
