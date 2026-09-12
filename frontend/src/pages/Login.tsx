@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { authApi, storeApi } from '../services/api';
+import { authApi, storeApi, terminalApi } from '../services/api';
 import { useAppStore } from '../stores/appStore';
 
 interface LoginForm {
@@ -12,6 +12,7 @@ export default function Login() {
   const navigate = useNavigate();
   const setUser = useAppStore((s) => s.setUser);
   const setStore = useAppStore((s) => s.setStore);
+  const setTerminal = useAppStore((s) => s.setTerminal);
   const [form, setForm] = useState<LoginForm>({ username: '', password: '' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,6 +32,15 @@ export default function Login() {
         setStore(storeRes.data as any);
       } catch {
         setStore(null);
+      }
+      // Pick up the counter this device bills from. Every invoice carries it,
+      // because each terminal owns its own number series.
+      try {
+        const terminals = await terminalApi.list(data.user.store_id);
+        const active = (terminals.data || []).find((t) => t.is_active) || null;
+        setTerminal(active);
+      } catch {
+        setTerminal(null);
       }
       navigate('/billing');
     } catch (err: any) {

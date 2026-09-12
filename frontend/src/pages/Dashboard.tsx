@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi } from '../services/api';
@@ -40,13 +40,9 @@ export default function Dashboard() {
     if (!user || user.role === 'cashier') {
       navigate('/billing');
     }
-  }, [user]);
+  }, [user, navigate]);
 
-  useEffect(() => {
-    if (store) loadDashboard();
-  }, [store, range]);
-
-  const getRangeDates = () => {
+  const getRangeDates = useCallback(() => {
     const now = new Date();
     const end = now.toISOString().slice(0, 10);
     let start = end;
@@ -64,9 +60,9 @@ export default function Dashboard() {
       start = d.toISOString().slice(0, 10);
     }
     return { start, end };
-  };
+  }, [range]);
 
-  const loadDashboard = async () => {
+  const loadDashboard = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
@@ -86,7 +82,13 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [store, range, getRangeDates]);
+
+  // Re-runs when the range dropdown changes, because loadDashboard is rebuilt
+  // with it — the same behaviour the old [store, range] dependency list had.
+  useEffect(() => {
+    if (store) loadDashboard();
+  }, [store, loadDashboard]);
 
   if (!user || user.role === 'cashier') return null;
 

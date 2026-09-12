@@ -23,6 +23,15 @@ export interface Store {
   updated_at: string;
 }
 
+export interface Terminal {
+  id: string;
+  store_id: string;
+  /** Code appears in every invoice number this counter issues, e.g. INV/T1/2026-27/00001 */
+  code: string;
+  name: string;
+  is_active: boolean;
+}
+
 export interface Category {
   id: string;
   name: string;
@@ -152,11 +161,38 @@ export interface InvoiceItem {
   unit_cost_at_sale?: number;
 }
 
+/**
+ * A unit a product may be sold in: loose by the kilo, a 5 kg bag, a 25 kg sack.
+ * `qty_in_base` is how many of the product's stocking unit one amounts to, and
+ * is what turns a sale into a stock movement.
+ */
+export interface SaleUnit {
+  id: string;
+  label: string;
+  qty_in_base: number;
+  sell_price: number;
+  has_price?: boolean;
+  barcode?: string;
+}
+
 export interface CartItem {
   product: Product;
+  /**
+   * The unit this line is being sold in. A cart line is identified by product
+   * AND unit, never by product alone: two sacks and 250 g of the same rice are
+   * two lines at two prices, and merging them on product id would silently
+   * price one of them wrong.
+   */
+  unit: SaleUnit;
+  /** How many of `unit` — 2 sacks, not 50 kg. Base quantity is derived. */
   quantity: number;
   batch_no?: string;
   discount: number;
+}
+
+/** The key that identifies a cart line. */
+export function cartLineKey(productId: string, unitId: string): string {
+  return `${productId}::${unitId}`;
 }
 
 export interface CreditEntry {

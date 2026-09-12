@@ -1,7 +1,32 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { paymentApi } from '../services/api';
+import { formatDate, formatMoney } from '../utils/format';
+
+/**
+ * The settlement endpoint reports one row per payment mode rather than a fixed
+ * set of columns, so the screen renders whatever modes come back. These labels
+ * only make the server's lowercase keys presentable; an unknown mode still
+ * shows, capitalised.
+ */
+interface SettlementMode {
+  payment_mode: string;
+  amount: number;
+  count: number;
+}
+
+const MODE_LABELS: Record<string, string> = {
+  cash: 'Cash',
+  upi: 'UPI',
+  card: 'Card',
+  credit: 'Credit',
+  bank: 'Bank / transfer',
+  cheque: 'Cheque',
+};
+
+const modeLabel = (mode: string) =>
+  MODE_LABELS[mode] || mode.charAt(0).toUpperCase() + mode.slice(1);
 
 export default function Settlement() {
   const navigate = useNavigate();
@@ -10,15 +35,9 @@ export default function Settlement() {
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (!user || !store) {
-      navigate('/login');
-      return;
-    }
-    loadReport();
-  }, [user, store, date]);
-
-  const loadReport = async () => {
+  // Memoised so the effect can depend on it. It re-creates when the selected
+  // date changes, which is what re-runs the effect and refetches the report.
+  const loadReport = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
@@ -29,7 +48,15 @@ export default function Settlement() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [store, date]);
+
+  useEffect(() => {
+    if (!user || !store) {
+      navigate('/login');
+      return;
+    }
+    loadReport();
+  }, [user, store, navigate, loadReport]);
 
   if (!report) return <div style={{ padding: '2rem' }}>Loading...</div>;
 
@@ -43,15 +70,16 @@ export default function Settlement() {
       <div style={styles.dateSelect}>
         <label>Date: </label>
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={styles.input} />
+        {loading && <span style={styles.hint}>Refreshing…</span>}
       </div>
 
       <div style={styles.summaryCard}>
-        <h2 style={styles.cardTitle}>{report.date}</h2>
-        
+        <h2 style={styles.cardTitle}>{formatDate(report.date)}</h2>
+
         <div style={styles.statGrid}>
           <div style={styles.statBox}>
             <span style={styles.statLabel}>Total Sales</span>
-            <span style={styles.statValue}>₹{report.total_sales?.toFixed(2)}</span>
+            <span style={styles.statValue}>{formatMoney(Number(report.total_sales ?? 0))}</span>
           </div>
           <div style={styles.statBox}>
             <span style={styles.statLabel}>Total Invoices</span>
@@ -60,9 +88,6 @@ export default function Settlement() {
         </div>
 
         <h3 style={styles.sectionTitle}>Payment Mode Breakup</h3>
-        {report.split_breakdown_used && (
-          <p style={styles.hint}>Includes split-tender lines from invoice payments where recorded.</p>
-        )}
 
         <div style={styles.breakupTable}>
           <div style={styles.tableHeader}>
@@ -70,41 +95,29 @@ export default function Settlement() {
             <span>Count</span>
             <span>Amount</span>
           </div>
-          <div style={styles.tableRow}>
-            <span>Cash</span>
-            <span>{report.cash_count}</span>
-            <span>₹{report.cash_total?.toFixed(2)}</span>
-          </div>
-          <div style={styles.tableRow}>
-            <span>UPI</span>
-            <span>{report.upi_count}</span>
-            <span>₹{report.upi_total?.toFixed(2)}</span>
-          </div>
-          <div style={styles.tableRow}>
-            <span>Card</span>
-            <span>{report.card_count}</span>
-            <span>₹{report.card_total?.toFixed(2)}</span>
-          </div>
-          <div style={styles.tableRow}>
-            <span>Credit</span>
-            <span>{report.credit_count}</span>
-            <span>₹{report.credit_total?.toFixed(2)}</span>
-          </div>
-          <div style={styles.tableRow}>
-            <span>Bank / transfer</span>
-            <span>{report.bank_count ?? 0}</span>
-            <span>₹{(report.bank_total ?? 0).toFixed(2)}</span>
-          </div>
+          {((report.modes || []) as SettlementMode[]).length === 0 ? (
+            <div style={styles.tableRow}>
+              <span style={styles.hint}>No payments recorded for this date.</span>
+            </div>
+          ) : (
+            ((report.modes || []) as SettlementMode[]).map((m) => (
+              <div key={m.payment_mode} style={styles.tableRow}>
+                <span>{modeLabel(m.payment_mode)}</span>
+                <span>{m.count ?? 0}</span>
+                <span>{formatMoney(Number(m.amount ?? 0))}</span>
+              </div>
+            ))
+          )}
         </div>
 
         <div style={styles.finalSection}>
           <div style={styles.finalRow}>
             <span>Returns</span>
-            <span style={styles.negative}>-₹{report.returns_total?.toFixed(2)}</span>
+            <span style={styles.negative}>-{formatMoney(Number(report.refunds_total ?? 0))}</span>
           </div>
           <div style={styles.finalRow}>
             <span>Net Collections</span>
-            <span style={styles.highlight}>₹{report.net_collections?.toFixed(2)}</span>
+            <span style={styles.highlight}>{formatMoney(Number(report.net_collections ?? 0))}</span>
           </div>
         </div>
       </div>

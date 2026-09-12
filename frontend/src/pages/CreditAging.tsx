@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { reportApi } from '../services/api';
+import { formatMoney } from '../utils/format';
 
 export default function CreditAging() {
   const navigate = useNavigate();
@@ -10,15 +11,7 @@ export default function CreditAging() {
   const [totalOutstanding, setTotalOutstanding] = useState(0);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (!user || !store) {
-      navigate('/login');
-      return;
-    }
-    loadReport();
-  }, [user, store]);
-
-  const loadReport = async () => {
+  const loadReport = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
@@ -30,7 +23,15 @@ export default function CreditAging() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [store]);
+
+  useEffect(() => {
+    if (!user || !store) {
+      navigate('/login');
+      return;
+    }
+    loadReport();
+  }, [user, store, navigate, loadReport]);
 
   return (
     <div style={styles.container}>
@@ -42,7 +43,7 @@ export default function CreditAging() {
       <div style={styles.summaryCard}>
         <div style={styles.summaryRow}>
           <span style={styles.summaryLabel}>Total Outstanding</span>
-          <span style={styles.summaryValue}>₹{totalOutstanding.toFixed(2)}</span>
+          <span style={styles.summaryValue}>{formatMoney(totalOutstanding)}</span>
         </div>
       </div>
 
@@ -62,14 +63,21 @@ export default function CreditAging() {
             {report.map((r) => (
               <tr key={r.customer_id}>
                 <td>{r.customer_name}</td>
-                <td style={{ fontWeight: 'bold' }}>₹{r.total_due?.toFixed(2)}</td>
-                <td style={{ color: r.current > 0 ? '#2e7d32' : '#666' }}>₹{r.current?.toFixed(2)}</td>
-                <td style={{ color: r.days_30 > 0 ? '#ed6c02' : '#666' }}>₹{r.days_30?.toFixed(2)}</td>
-                <td style={{ color: r.days_60 > 0 ? '#d32f2f' : '#666' }}>₹{r.days_60?.toFixed(2)}</td>
-                <td style={{ color: r.over_90 > 0 ? '#9c27b0' : '#666' }}>₹{r.over_90?.toFixed(2)}</td>
+                <td style={{ fontWeight: 'bold' }}>{formatMoney(r.total_due)}</td>
+                <td style={{ color: r.current > 0 ? '#2e7d32' : '#666' }}>{formatMoney(r.current)}</td>
+                <td style={{ color: r.days_30 > 0 ? '#ed6c02' : '#666' }}>{formatMoney(r.days_30)}</td>
+                <td style={{ color: r.days_60 > 0 ? '#d32f2f' : '#666' }}>{formatMoney(r.days_60)}</td>
+                <td style={{ color: r.over_90 > 0 ? '#9c27b0' : '#666' }}>{formatMoney(r.over_90)}</td>
               </tr>
             ))}
-            {report.length === 0 && (
+            {loading && (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: '2rem' }}>
+                  Loading...
+                </td>
+              </tr>
+            )}
+            {!loading && report.length === 0 && (
               <tr>
                 <td colSpan={6} style={{ textAlign: 'center', padding: '2rem' }}>
                   No outstanding credit

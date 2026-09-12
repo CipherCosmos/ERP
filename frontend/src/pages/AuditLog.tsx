@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { auditApi } from '../services/api';
@@ -16,48 +16,50 @@ interface AuditEntry {
   created_at: string;
 }
 
-const TABLE_OPTIONS = [
-  '',
-  'products',
-  'categories',
-  'invoices',
-  'invoice_items',
-  'customers',
-  'stock',
-  'purchases',
-  'vendors',
-  'expenses',
-  'returns',
-  'losses',
-  'payments',
-];
-
 export default function AuditLog() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
   const [entries, setEntries] = useState<AuditEntry[]>([]);
+  // The resources the trail actually mentions, as reported by the server. A
+  // list maintained here instead would be wrong the moment a route is added or
+  // renamed, and wrong in the silent direction: a filter that matches nothing.
+  const [tables, setTables] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [tableFilter, setTableFilter] = useState('');
   const [limit, setLimit] = useState('50');
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // Both filters are Apply-gated: nothing re-queries until the button is
+  // pressed. That is why they are read through a ref rather than listed as
+  // dependencies of loadEntries — a dependency there would rebuild the loader
+  // on every keystroke in the Limit box, and the mount effect below would fire
+  // a query for each one.
+  const filtersRef = useRef({ tableFilter, limit });
   useEffect(() => {
-    if (!user || !store) {
-      navigate('/login');
-      return;
-    }
-    loadEntries();
-  }, [user, store]);
+    filtersRef.current = { tableFilter, limit };
+  }, [tableFilter, limit]);
 
-  const loadEntries = async () => {
+  const loadTables = useCallback(async () => {
+    if (!store) return;
+    try {
+      const { data } = await auditApi.tables(store.id);
+      setTables(data);
+    } catch (err) {
+      // The filter degrades to "All tables" rather than the screen failing.
+      console.error('Failed to load audit table names:', err);
+    }
+  }, [store]);
+
+  const loadEntries = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
+      const { tableFilter: table, limit: rowLimit } = filtersRef.current;
       const params: { store_id: string; table?: string; limit?: string } = {
         store_id: store.id,
       };
-      if (tableFilter) params.table = tableFilter;
-      if (limit) params.limit = limit;
+      if (table) params.table = table;
+      if (rowLimit) params.limit = rowLimit;
       const { data } = await auditApi.list(params);
       setEntries(data);
     } catch (err) {
@@ -65,7 +67,16 @@ export default function AuditLog() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [store]);
+
+  useEffect(() => {
+    if (!user || !store) {
+      navigate('/login');
+      return;
+    }
+    loadEntries();
+    loadTables();
+  }, [user, store, navigate, loadEntries, loadTables]);
 
   const handleApplyFilters = () => {
     setExpandedId(null);
@@ -113,7 +124,7 @@ export default function AuditLog() {
             style={styles.select}
           >
             <option value="">All tables</option>
-            {TABLE_OPTIONS.filter(Boolean).map((t) => (
+            {tables.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>

@@ -1,29 +1,36 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi, storeApi } from '../services/api';
 import { Store } from '../types';
+import { formatMoney } from '../utils/format';
 
+/**
+ * The shape the multi-store endpoint actually returns. Note that it reports one
+ * combined GST figure per store, not a CGST/SGST/IGST split — the split lives on
+ * the GST reports, not here.
+ */
 interface MultiStoreMetrics {
-  total_revenue: number;
-  total_cgst: number;
-  total_sgst: number;
-  total_igst: number;
-  total_invoices: number;
+  date_range?: { start: string; end: string };
+  totals: {
+    revenue: number;
+    gst: number;
+    invoice_count: number;
+  };
   stores: Array<{
     store_id: string;
     store_name: string;
     revenue: number;
-    cgst: number;
-    sgst: number;
-    igst: number;
+    gst: number;
     invoice_count: number;
   }>;
 }
 
 export default function MultiStoreDashboard() {
   const navigate = useNavigate();
-  const { user, store } = useAppStore();
+  // This screen reports across every store, so it never reads the till's own
+  // store from the app store — only the owner check and the store list matter.
+  const { user } = useAppStore();
 
   const [metrics, setMetrics] = useState<MultiStoreMetrics | null>(null);
   const [stores, setStores] = useState<Store[]>([]);
@@ -37,28 +44,39 @@ export default function MultiStoreDashboard() {
     }
   }, [user, navigate]);
 
-  const loadData = async () => {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [storesRes, metricsRes] = await Promise.all([
-        storeApi.list(),
-        analyticsApi.multiStore({
-          store_ids: selectedStores.join(','),
-          range,
-        }),
-      ]);
-      setStores(storesRes.data || []);
+      const storesRes = await storeApi.list();
+      const allStores = storesRes.data || [];
+      setStores(allStores);
+
+      // "All Stores" is an empty selection here, but the server will not accept
+      // an empty store_ids — it asks to be told which stores to include, and
+      // answers a blank one with a 400. So spell out every store instead.
+      const ids = selectedStores.length > 0 ? selectedStores : allStores.map((s) => s.id);
+      if (ids.length === 0) {
+        setMetrics(null);
+        return;
+      }
+
+      const metricsRes = await analyticsApi.multiStore({
+        store_ids: ids.join(','),
+        range,
+      });
       setMetrics(metricsRes.data);
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
       setLoading(false);
     }
-  };
+    // `stores` is written by this loader, never read from state here, so it must
+    // stay out of the dependency list or the effect below would re-fire forever.
+  }, [selectedStores, range]);
 
   useEffect(() => {
     loadData();
-  }, [selectedStores, range]);
+  }, [loadData]);
 
   if (!user || user.role !== 'owner') {
     return (
@@ -131,17 +149,15 @@ export default function MultiStoreDashboard() {
           <div style={styles.summaryCards}>
             <div style={styles.card}>
               <div style={styles.cardLabel}>Total Revenue</div>
-              <div style={styles.cardValue}>₹{Number(metrics.total_revenue).toFixed(2)}</div>
+              <div style={styles.cardValue}>{formatMoney(Number(metrics.totals?.revenue ?? 0))}</div>
             </div>
             <div style={styles.card}>
               <div style={styles.cardLabel}>Total GST</div>
-              <div style={styles.cardValue}>
-                ₹{(Number(metrics.total_cgst) + Number(metrics.total_sgst) + Number(metrics.total_igst)).toFixed(2)}
-              </div>
+              <div style={styles.cardValue}>{formatMoney(Number(metrics.totals?.gst ?? 0))}</div>
             </div>
             <div style={styles.card}>
               <div style={styles.cardLabel}>Total Invoices</div>
-              <div style={styles.cardValue}>{metrics.total_invoices}</div>
+              <div style={styles.cardValue}>{metrics.totals?.invoice_count ?? 0}</div>
             </div>
           </div>
 
@@ -150,20 +166,16 @@ export default function MultiStoreDashboard() {
               <tr>
                 <th style={styles.th}>Store</th>
                 <th style={styles.th}>Revenue</th>
-                <th style={styles.th}>CGST</th>
-                <th style={styles.th}>SGST</th>
-                <th style={styles.th}>IGST</th>
+                <th style={styles.th}>GST</th>
                 <th style={styles.th}>Invoices</th>
               </tr>
             </thead>
             <tbody>
-              {metrics.stores.map((storeMetric) => (
+              {(metrics.stores || []).map((storeMetric) => (
                 <tr key={storeMetric.store_id}>
                   <td style={styles.td}>{storeMetric.store_name}</td>
-                  <td style={styles.td}>₹{Number(storeMetric.revenue).toFixed(2)}</td>
-                  <td style={styles.td}>₹{Number(storeMetric.cgst).toFixed(2)}</td>
-                  <td style={styles.td}>₹{Number(storeMetric.sgst).toFixed(2)}</td>
-                  <td style={styles.td}>₹{Number(storeMetric.igst).toFixed(2)}</td>
+                  <td style={styles.td}>{formatMoney(Number(storeMetric.revenue ?? 0))}</td>
+                  <td style={styles.td}>{formatMoney(Number(storeMetric.gst ?? 0))}</td>
                   <td style={styles.td}>{storeMetric.invoice_count}</td>
                 </tr>
               ))}

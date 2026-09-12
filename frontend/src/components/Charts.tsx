@@ -64,7 +64,24 @@ export function BarChart({ data, height = 220, width = 500 }: BarChartProps) {
   const chartW = width - padding.left - padding.right;
   const chartH = height - padding.top - padding.bottom;
   const barGap = 8;
-  const barW = Math.max(4, (chartW - barGap * (data.length + 1)) / data.length);
+
+  // A bar's width is capped, not simply the available space divided by the
+  // number of bars. Without the cap a single category produces one bar 464px
+  // wide — a solid block filling the plot area, which reads as a broken chart
+  // rather than as a chart of one thing. Shops routinely have one or two
+  // categories when they start, so this is the first thing they see.
+  const MAX_BAR_W = 56;
+  const barW = Math.min(MAX_BAR_W, Math.max(4, (chartW - barGap * (data.length + 1)) / data.length));
+
+  // Centre the bars when they no longer fill the width, so a chart of two sits
+  // in the middle instead of hugging the left edge.
+  const groupW = data.length * barW + barGap * (data.length - 1);
+  const startX = padding.left + Math.max(barGap, (chartW - groupW) / 2);
+
+  // Rotate the axis labels only when they would otherwise collide. At four bars
+  // or fewer there is room to set them straight, and a horizontal label is far
+  // easier to read than one at 25 degrees.
+  const rotateLabels = data.length > 4 || barW < 40;
 
   return (
     <div style={{ width: '100%', overflowX: 'auto' }}>
@@ -91,7 +108,7 @@ export function BarChart({ data, height = 220, width = 500 }: BarChartProps) {
 
         {data.map((d, i) => {
           const barH = (d.value / maxVal) * chartH;
-          const x = padding.left + barGap + i * (barW + barGap);
+          const x = startX + i * (barW + barGap);
           const y = padding.top + chartH - barH;
           const fill = d.color || PALETTE[i % PALETTE.length];
 
@@ -120,11 +137,15 @@ export function BarChart({ data, height = 220, width = 500 }: BarChartProps) {
                 x={x + barW / 2}
                 y={padding.top + chartH + 14}
                 textAnchor="middle"
-                fontSize={9}
-                fill="#777"
-                transform={`rotate(-25, ${x + barW / 2}, ${padding.top + chartH + 14})`}
+                fontSize={rotateLabels ? 9 : 11}
+                fill="#64748b"
+                transform={
+                  rotateLabels
+                    ? `rotate(-25, ${x + barW / 2}, ${padding.top + chartH + 14})`
+                    : undefined
+                }
               >
-                {d.label.length > 12 ? d.label.slice(0, 11) + '\u2026' : d.label}
+                {d.label.length > 16 ? d.label.slice(0, 15) + '\u2026' : d.label}
               </text>
             </g>
           );

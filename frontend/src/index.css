@@ -1,0 +1,87 @@
+/*
+ * Base styles for the whole app.
+ *
+ * There were none. The document had no background of its own, so the browser
+ * painted its own canvas behind it — and on any machine with the OS set to dark
+ * mode that canvas is near-black, while every heading in this app is
+ * rgb(15,23,42). The result was dark text on a dark ground in every gap between
+ * the white cards, on every screen. It went unnoticed because it only shows up
+ * for a viewer whose system is dark.
+ *
+ * The app commits to a light look deliberately: this is a point-of-sale screen
+ * read under shop lighting, often on a cheap panel, and white surfaces with
+ * near-black text are the most legible thing available. Committing means
+ * painting it explicitly rather than inheriting it, so the pages hold whatever
+ * the host is set to.
+ */
+
+:root {
+  /* color-scheme tells the browser to render form controls, scrollbars and
+     other built-in chrome in light, so a dark-mode viewer does not get a black
+     dropdown inside a white dialog. */
+  color-scheme: light;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #f4f6f8;
+  color: #0f172a;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100vh;
+  background: #f4f6f8;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Form controls do not inherit the page font by default, so a select in a
+   dialog rendered in the browser's own UI font next to inputs that did not. */
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* A visible focus ring. Half this application is meant to be driven from a
+   keyboard at a counter, and the browser default is easy to lose against a
+   white card. */
+:focus-visible {
+  outline: 2px solid #1d4ed8;
+  outline-offset: 2px;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+table {
+  border-collapse: collapse;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

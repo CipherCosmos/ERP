@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi } from '../services/api';
@@ -21,6 +21,13 @@ export default function Reports() {
   const { user, store } = useAppStore();
   const [activeTab, setActiveTab] = useState<'category' | 'products' | 'hourly' | 'payment'>('category');
   const [reportData, setReportData] = useState<any>(null);
+  /**
+   * Which tab the rows in reportData were fetched for. Clicking a tab re-renders
+   * before the effect can refetch, so without this the new tab reads the previous
+   * tab's rows — and a category row has no `product`/`hour`/`mode`, so the chart
+   * label comes back undefined and the whole page throws on `label.length`.
+   */
+  const [dataTab, setDataTab] = useState<'category' | 'products' | 'hourly' | 'payment' | null>(null);
   const [loading, setLoading] = useState(false);
   const [startDate, setStartDate] = useState(new Date().toISOString().slice(0, 10));
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10));
@@ -29,13 +36,12 @@ export default function Reports() {
     if (!user || user.role === 'cashier') {
       navigate('/billing');
     }
-  }, [user]);
+  }, [user, navigate]);
 
-  useEffect(() => {
-    if (store) loadReport();
-  }, [store, activeTab, startDate, endDate]);
-
-  const loadReport = async () => {
+  // Memoised so the load effect can list it. It re-creates when the tab or the
+  // date range changes — that is what refetches, exactly as before. The params
+  // object is built inside the callback, so it is not a render-time reference.
+  const loadReport = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
@@ -58,19 +64,26 @@ export default function Reports() {
           res = { data: null };
       }
       setReportData(res.data);
+      setDataTab(activeTab);
     } catch (err) {
       console.error('Failed to load report:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [store, activeTab, startDate, endDate]);
+
+  useEffect(() => {
+    if (store) loadReport();
+  }, [store, loadReport]);
 
   if (!user || user.role === 'cashier') return null;
 
-  const categoryData = reportData as SalesReport[] | null;
-  const productsData = reportData as TopProduct[] | null;
-  const hourlyData = reportData as { hour: string; count: number; sales: number }[] | null;
-  const paymentData = reportData as { mode: string; count: number; total: number }[] | null;
+  // Only read the rows when they belong to the tab being drawn.
+  const shownData = dataTab === activeTab ? reportData : null;
+  const categoryData = shownData as SalesReport[] | null;
+  const productsData = shownData as TopProduct[] | null;
+  const hourlyData = shownData as { hour: string; count: number; sales: number }[] | null;
+  const paymentData = shownData as { mode: string; count: number; total: number }[] | null;
 
   return (
     <div style={styles.container}>

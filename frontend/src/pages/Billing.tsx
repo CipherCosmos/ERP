@@ -1,13 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi } from '../services/api';
-import {
-  enqueuePendingInvoice,
-  flushPendingInvoiceQueue,
-  getPendingInvoiceCount,
-} from '../services/offlineInvoiceQueue';
-import { Product, Customer } from '../types';
+import { flushPendingInvoiceQueue, getPendingInvoiceCount } from '../services/offlineInvoiceQueue';
+import { Product, Customer, SaleUnit } from '../types';
+import { formatMoney } from '../utils/format';
 
 function mapBarcodeLookupToProduct(data: Record<string, unknown>): Product {
   return {
@@ -37,9 +34,51 @@ function lineUnitPrice(product: Product, useWholesale: boolean): number {
   return product.sell_price;
 }
 
+/**
+ * The ways this product may leave the counter, priced for this customer.
+ *
+ * The server sends `units` as {unit, price, has_price} triples ordered default
+ * first then smallest to largest — a counter reaches for loose far more often
+ * than for a sack. A unit with no price is deliberately kept and marked rather
+ * than hidden: a unit that silently vanishes looks like a missing product,
+ * while one shown as unpriced says exactly what to go and fix.
+ */
+function sellableUnits(product: any, useWholesale: boolean): SaleUnit[] {
+  const raw = Array.isArray(product?.units) ? product.units : [];
+  const units: SaleUnit[] = raw
+    .filter((x: any) => x?.unit?.is_active !== false && x?.unit?.is_sellable !== false)
+    .map((x: any) => {
+      const ws = x.price?.wholesale_sell_price ?? 0;
+      const sell = useWholesale && ws > 0 ? ws : (x.price?.sell_price ?? 0);
+      return {
+        id: x.unit.id,
+        label: x.unit.label,
+        qty_in_base: x.unit.qty_in_base ?? 1,
+        sell_price: sell,
+        has_price: !!x.has_price,
+        barcode: x.unit.barcode ?? '',
+      };
+    });
+  if (units.length > 0) return units;
+  // A product from an older response shape, or one whose units never loaded:
+  // fall back to the product's own price as a single unnamed unit so the till
+  // keeps working rather than refusing to sell anything.
+  return [{
+    id: (product?.default_product_unit_id as string) ?? '',
+    label: 'each',
+    qty_in_base: 1,
+    sell_price: lineUnitPrice(product as Product, useWholesale),
+    has_price: true,
+  }];
+}
+
+/** The key identifying a cart line: product AND unit. */
+const lineKeyOf = (item: { product: { id: string }; unit?: { id: string } }) =>
+  `${item.product.id}::${item.unit?.id ?? ''}`;
+
 export default function Billing() {
   const navigate = useNavigate();
-  const { user, store, cart, addToCart, updateCartQuantity, removeFromCart, clearCart } = useAppStore();
+  const { user, store, cart, addToCart, updateCartQuantity, updateCartDiscount, removeFromCart, clearCart } = useAppStore();
   const [search, setSearch] = useState('');
   const [products, setProducts] = useState<Product[]>([]);
   const [filteredProducts, setFilteredProducts] = useState<Product[]>([]);
@@ -50,6 +89,49 @@ export default function Billing() {
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [useWholesalePrices, setUseWholesalePrices] = useState(false);
   const barcodeRef = useRef<HTMLInputElement>(null);
+  const [checkingOut, setCheckingOut] = useState(false);
+  /**
+   * One key per attempt at this cart, held until the sale succeeds. A retry
+   * after a timeout reuses it, so the server returns the original bill instead
+   * of raising a second one — which is what stops a double-tapped Checkout
+   * charging the customer twice.
+   */
+  const checkoutKey = useRef<string>('');
+  /** Set when a product sells in more than one unit and the counter must choose. */
+  const [unitPicker, setUnitPicker] = useState<{ product: Product; units: SaleUnit[] } | null>(null);
+
+  /**
+   * Cash handed over. The change is the one sum a cashier does in their head
+   * on every cash sale, and getting it wrong costs the shop real money — so
+   * the till does it.
+   */
+  const [tendered, setTendered] = useState('');
+  /** A discount off the whole bill, in rupees. Apportioned across lines by the
+   *  server before tax, as CGST s.15(3)(a) requires. */
+  const [billDiscount, setBillDiscount] = useState('');
+  /** Bills parked mid-sale — the customer went back for something they forgot. */
+  const [heldBills, setHeldBills] = useState<{ id: string; at: number; cart: any[]; customerId: string; billDiscount: string }[]>(
+    () => {
+      try {
+        return JSON.parse(localStorage.getItem('gbos-held-bills') || '[]');
+      } catch {
+        return [];
+      }
+    }
+  );
+  const [showHeld, setShowHeld] = useState(false);
+  /** The line whose discount is being edited, if any. */
+  const [discountFor, setDiscountFor] = useState<string | null>(null);
+
+  const loadProducts = useCallback(async () => {
+    if (!store) return;
+    try {
+      const { data } = await productApi.list({ store_id: store.id });
+      setProducts(data);
+    } catch (err) {
+      console.error('Failed to load products:', err);
+    }
+  }, [store]);
 
   useEffect(() => {
     if (!user) {
@@ -57,7 +139,7 @@ export default function Billing() {
       return;
     }
     loadProducts();
-  }, [user]);
+  }, [user, navigate, loadProducts]);
 
   useEffect(() => {
     if (!store) return;
@@ -65,7 +147,7 @@ export default function Billing() {
       .list(store.id)
       .then((res) => setCustomers((res.data as Customer[]) || []))
       .catch(() => setCustomers([]));
-  }, [store?.id]);
+  }, [store]);
 
   useEffect(() => {
     const c = customers.find((x) => x.id === selectedCustomerId);
@@ -94,7 +176,7 @@ export default function Billing() {
     syncQueued();
     window.addEventListener('online', syncQueued);
     return () => window.removeEventListener('online', syncQueued);
-  }, [store?.id, user?.id]);
+  }, [store, user]);
 
   useEffect(() => {
     if (search.length >= 2) {
@@ -109,23 +191,143 @@ export default function Billing() {
     }
   }, [search, products]);
 
-  const loadProducts = async () => {
-    if (!store) return;
+  /**
+   * Put a product in the cart. When it sells only one way that is immediate;
+   * when it sells several the counter is asked which, because guessing at the
+   * unit means guessing at the price.
+   */
+  const addProduct = (product: Product, unitId?: string, qty = 1) => {
+    const units = sellableUnits(product, useWholesalePrices);
+    const chosen = unitId ? units.find((u) => u.id === unitId) : undefined;
+    if (chosen) {
+      addToCart({ product, unit: chosen, quantity: qty, discount: 0 });
+      return;
+    }
+    if (units.length === 1) {
+      addToCart({ product, unit: units[0], quantity: qty, discount: 0 });
+      return;
+    }
+    setUnitPicker({ product, units });
+  };
+
+  /**
+   * Keyboard shortcuts.
+   *
+   * A counter runs on a keyboard and a scanner; reaching for a mouse between
+   * every customer is what makes a queue. The whole screen previously had one
+   * key handler in 7,600 lines. F-keys are used because a barcode scanner types
+   * digits and Enter, so anything bound to a plain character would fire from a
+   * scan.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Never steal a key from a field the cashier is typing in, except the
+      // F-keys, which no field wants.
+      const inField = /^(INPUT|SELECT|TEXTAREA)$/.test((e.target as HTMLElement)?.tagName || '');
+      switch (e.key) {
+        case 'F2':
+          e.preventDefault();
+          barcodeRef.current?.focus();
+          barcodeRef.current?.select();
+          break;
+        case 'F4':
+          e.preventDefault();
+          document.getElementById('bill-discount')?.focus();
+          break;
+        case 'F6':
+          e.preventDefault();
+          document.getElementById('tendered')?.focus();
+          break;
+        case 'F7':
+          e.preventDefault();
+          holdBillRef.current?.();
+          break;
+        case 'F8':
+          e.preventDefault();
+          setShowHeld((v) => !v);
+          break;
+        case 'F9':
+          e.preventDefault();
+          checkoutRef.current?.();
+          break;
+        case 'Escape':
+          if (!inField) {
+            e.preventDefault();
+            setShowHeld(false);
+            setUnitPicker(null);
+          }
+          break;
+        default:
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // The handlers are reached through refs so the listener above can be
+  // registered once rather than re-bound on every cart change.
+  const holdBillRef = useRef<() => void>();
+  const checkoutRef = useRef<() => void>();
+
+  const persistHeld = (bills: typeof heldBills) => {
+    setHeldBills(bills);
     try {
-      const { data } = await productApi.list({ store_id: store.id });
-      setProducts(data);
-    } catch (err) {
-      console.error('Failed to load products:', err);
+      localStorage.setItem('gbos-held-bills', JSON.stringify(bills));
+    } catch {
+      /* a full or private-mode storage must not stop a sale */
     }
   };
+
+  /**
+   * Park the cart so the counter can serve the next customer.
+   *
+   * A shop needs this constantly — someone goes back for an item, or pays by
+   * card that will not read. Without it the cashier either holds up the queue
+   * or throws the basket away and re-scans it.
+   */
+  const holdBill = () => {
+    if (cart.length === 0) return;
+    persistHeld([
+      ...heldBills,
+      { id: String(Date.now()), at: Date.now(), cart: [...cart], customerId: selectedCustomerId, billDiscount },
+    ]);
+    clearCart();
+    setSelectedCustomerId('');
+    setBillDiscount('');
+    setTendered('');
+    barcodeRef.current?.focus();
+  };
+
+  const recallBill = (id: string) => {
+    const bill = heldBills.find((b) => b.id === id);
+    if (!bill) return;
+    // Anything in the cart now is parked in turn rather than discarded.
+    const rest = heldBills.filter((b) => b.id !== id);
+    if (cart.length > 0) {
+      rest.push({ id: String(Date.now()), at: Date.now(), cart: [...cart], customerId: selectedCustomerId, billDiscount });
+    }
+    clearCart();
+    bill.cart.forEach((line: any) => addToCart(line));
+    setSelectedCustomerId(bill.customerId || '');
+    // Restore the bill-level discount too. Resuming at a different total than
+    // the one already quoted to the customer is worse than not holding at all.
+    setBillDiscount(bill.billDiscount || '');
+    persistHeld(rest);
+    setShowHeld(false);
+    barcodeRef.current?.focus();
+  };
+
+  holdBillRef.current = holdBill;
 
   const handleBarcodeScan = async (barcode: string) => {
     const trimmed = barcode.trim();
     if (!trimmed || !store) return;
 
+    // A unit's own barcode is not on the product row, so a local hit can only
+    // ever be the product's own code — the server is asked for the rest.
     const local = products.find((p) => p.barcode === trimmed);
     if (local) {
-      addToCart({ product: local, quantity: 1, discount: 0 });
+      addProduct(local);
       setSearch('');
       return;
     }
@@ -134,8 +336,28 @@ export default function Billing() {
       const { data } = await barcodeApi.lookup(trimmed, store.id);
       if (data && typeof data === 'object' && 'id' in data) {
         const d = data as Record<string, unknown>;
-        const packingQty = Number(d.packing_qty) || 1;
-        addToCart({ product: mapBarcodeLookupToProduct(d), quantity: packingQty, discount: 0 });
+        const product = mapBarcodeLookupToProduct(d);
+        // The lookup says which unit the code belonged to. Scanning the sack's
+        // barcode must ring up a sack at the sack's price, not one loose kilo.
+        const scanned = d.scanned_unit as Record<string, unknown> | undefined;
+        const scannedPrice = d.scanned_price as Record<string, unknown> | undefined;
+        if (scanned?.id) {
+          const ws = Number(scannedPrice?.wholesale_sell_price) || 0;
+          addToCart({
+            product,
+            unit: {
+              id: String(scanned.id),
+              label: String(scanned.label ?? 'each'),
+              qty_in_base: Number(scanned.qty_in_base) || 1,
+              sell_price: useWholesalePrices && ws > 0 ? ws : Number(scannedPrice?.sell_price) || 0,
+              has_price: d.scanned_has_price !== false,
+            },
+            quantity: 1,
+            discount: 0,
+          });
+        } else {
+          addProduct(product);
+        }
         setSearch('');
         return;
       }
@@ -146,7 +368,7 @@ export default function Billing() {
     try {
       const { data } = await productApi.list({ store_id: store.id, barcode: trimmed });
       if (data.length > 0) {
-        addToCart({ product: data[0], quantity: 1, discount: 0 });
+        addProduct(data[0]);
       }
     } catch (err) {
       console.error('Product not found:', err);
@@ -168,9 +390,25 @@ export default function Billing() {
       return store.gstin.substring(0, 2) !== customer.gstin.substring(0, 2);
     })();
 
+    // The bill discount is shared across lines in proportion to what each is
+    // worth, BEFORE tax — CGST s.15(3)(a) allows a discount to reduce the
+    // taxable value only if it is recorded on the invoice, so it cannot simply
+    // be subtracted from the total afterwards. The server apportions it the
+    // same way and its figures are the ones charged; this is the counter's
+    // preview of them.
+    const billOff = Math.max(0, Number(billDiscount) || 0);
+    const grossAll = cart.reduce((sum, it) => {
+      const r = it.unit?.sell_price ?? lineUnitPrice(it.product, useWholesalePrices);
+      return sum + r * it.quantity - (it.discount || 0);
+    }, 0);
+
     cart.forEach((item) => {
-      const rate = lineUnitPrice(item.product, useWholesalePrices);
-      const itemTotal = rate * item.quantity;
+      // The rate belongs to the unit on the line, not to the product. A sack
+      // and a loose kilo of the same rice are two different prices.
+      const rate = item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices);
+      const net = rate * item.quantity - (item.discount || 0);
+      const share = grossAll > 0 ? (billOff * net) / grossAll : 0;
+      const itemTotal = Math.max(0, net - share);
       const gstAmount = (itemTotal * item.product.gst_rate) / 100;
 
       if (isInterState) {
@@ -197,6 +435,7 @@ export default function Billing() {
   };
 
   const handleCheckout = async () => {
+    if (checkingOut) return;
     if (cart.length === 0 || !store || !user) return;
 
     if (!useSplitPayment && paymentMode === 'credit' && !selectedCustomerId) {
@@ -204,39 +443,48 @@ export default function Billing() {
       return;
     }
 
-    const { subtotal, cgst, sgst, igst, roundOff, total } = calculateTotals();
+    if (!checkoutKey.current) {
+      checkoutKey.current = crypto.randomUUID();
+    }
+    const terminal = useAppStore.getState().terminal;
+    if (!terminal) {
+      alert('This device is not registered to a counter. Sign out and in again, or add a terminal under Settings.');
+      return;
+    }
+
+    const { total } = calculateTotals();
 
     if (useSplitPayment) {
       const paidAmount = splitPayments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-      if (Math.abs(paidAmount - total) > 0.01) {
+      // Compared in whole paise rather than with a tolerance. `0.1 + 0.2` is
+      // not `0.3` in binary floating point, which is the only reason a
+      // tolerance was ever needed here; rounding to the smallest unit the
+      // currency actually has makes the comparison exact. It also matches the
+      // server, which requires the split to equal the bill to the paisa — so a
+      // shortfall is now caught at the counter instead of at the till.
+      if (Math.round(paidAmount * 100) !== Math.round(total * 100)) {
         alert(`Split payments (₹${paidAmount.toFixed(2)}) must equal total (₹${total.toFixed(2)})`);
         return;
       }
     }
 
+    // The server prices the sale from its own price list and each product's own
+    // tax rate, and returns the authoritative figures. The totals computed above
+    // are for the on-screen preview only.
     const invoiceBody = {
-      store_id: store.id,
+      terminal_id: terminal.id,
       customer_id: selectedCustomerId || undefined,
-      invoice_date: new Date().toISOString(),
-      sub_total: subtotal,
-      cgst,
-      sgst,
-      igst,
-      discount: 0,
-      round_off: roundOff,
-      total,
-      status: 'completed',
       payment_mode: useSplitPayment ? 'split' : paymentMode,
-      items: cart.map((item) => {
-        const rate = lineUnitPrice(item.product, useWholesalePrices);
-        return {
-          product_id: item.product.id,
-          quantity: item.quantity,
-          rate,
-          discount: item.discount,
-          total: rate * item.quantity,
-        };
-      }),
+      round_total: true,
+      discount: Math.max(0, Number(billDiscount) || 0),
+      items: cart.map((item) => ({
+        product_id: item.product.id,
+        // unit_qty is what the customer asked for — 2 sacks, not 50 kg. The
+        // server multiplies by the unit's size to move stock.
+        product_unit_id: item.unit?.id || undefined,
+        unit_qty: item.quantity,
+        discount: item.discount || 0,
+      })),
     };
 
     const splitLines =
@@ -246,8 +494,10 @@ export default function Billing() {
             .map((p) => ({ payment_mode: p.mode, amount: parseFloat(p.amount) }))
         : undefined;
 
+    setCheckingOut(true);
     try {
-      const { data: invoice } = await invoiceApi.create(invoiceBody as any);
+      const { data } = await invoiceApi.create(invoiceBody as any, checkoutKey.current);
+      const invoice = data.invoice;
 
       if (splitLines && splitLines.length > 0) {
         await paymentApi.addSplitPayments({
@@ -256,8 +506,24 @@ export default function Billing() {
         });
       }
 
+      checkoutKey.current = '';
+
       // Print receipt
-      printReceipt(invoice, cart);
+      // The server's lines, not the cart: the paper the customer holds has to
+      // match the books. HSN is not on the line, so it comes from the product
+      // the counter already has loaded.
+      const printed = ((data as any).items ?? []).map((l: any) => {
+        const p = products.find((x) => x.id === l.product_id);
+        return {
+          ...l,
+          // POST /invoices returns product_name empty — only the GET path joins
+          // it — and HSN is not on the line at all. Both come from the
+          // catalogue already in hand so the paper is complete either way.
+          product_name: l.product_name || p?.name || '',
+          hsn_code: (p as any)?.hsn_code ?? '',
+        };
+      });
+      printReceipt(invoice, printed);
 
       clearCart();
       setPaymentMode('cash');
@@ -265,6 +531,12 @@ export default function Billing() {
       setSplitPayments([{ mode: 'cash', amount: '' }]);
       setSelectedCustomerId('');
       useAppStore.getState().setSyncPending(getPendingInvoiceCount());
+      // Reset the counter for the next customer. Leaving the bill discount set
+      // hands the next person the previous one's concession silently, and a
+      // stale "cash received" makes the change due read as nonsense.
+      setBillDiscount('');
+      setTendered('');
+      setDiscountFor(null);
       alert('Billing completed!');
     } catch (err: any) {
       console.error('Checkout failed:', err);
@@ -273,22 +545,21 @@ export default function Billing() {
       const networkFail =
         !err?.response && (code === 'ERR_NETWORK' || code === 'ECONNABORTED' || err?.message === 'Network Error');
       if (offline || networkFail) {
-        enqueuePendingInvoice({
-          invoiceBody: invoiceBody as Record<string, unknown>,
-          splitPayments: splitLines,
-        });
-        useAppStore.getState().setSyncPending(getPendingInvoiceCount());
-        clearCart();
-        setPaymentMode('cash');
-        setUseSplitPayment(false);
-        setSplitPayments([{ mode: 'cash', amount: '' }]);
-        setSelectedCustomerId('');
-        alert('Saved offline — invoice will sync when connection is back.');
+        // The cart is deliberately kept. Offline billing is not supported yet,
+        // and the queue this used to write to was never read by anything — a
+        // cashier was told the sale was safe while it was quietly lost. Better
+        // to say plainly that nothing was recorded.
+        alert('No connection — this sale was NOT recorded. Check the network and press Checkout again.');
         return;
       }
-      alert(err?.response?.data?.error || 'Billing failed. Please try again.');
+      const message = err?.response?.data?.message || err?.response?.data?.error;
+      alert(message || 'Billing failed. Please try again.');
+    } finally {
+      setCheckingOut(false);
     }
   };
+
+  checkoutRef.current = handleCheckout;
 
   const addSplitPayment = () => {
     setSplitPayments([...splitPayments, { mode: 'cash', amount: '' }]);
@@ -306,77 +577,94 @@ export default function Billing() {
     }
   };
 
-  const printReceipt = (invoice: any, items: any[]) => {
-    const { cgst, sgst, igst } = calculateTotals();
-    const customer = selectedCustomerId ? customers.find(c => c.id === selectedCustomerId) : null;
+  /**
+   * Print the bill the customer takes away.
+   *
+   * It prints the SERVER's invoice and lines, not the cart. The two should
+   * agree, but the paper in the customer's hand has to match the books exactly,
+   * and only one of the two is authoritative. The previous version rebuilt the
+   * figures client-side from `calculateTotals()` and priced each line with
+   * `lineUnitPrice(item.product)` — the product's price rather than the price of
+   * the unit actually sold — so a 25 kg sack printed at the loose per-kilo rate.
+   *
+   * It is also a tax invoice, which has statutory content. Under CGST Rule 46 a
+   * registered supplier's invoice must carry the words "Tax Invoice", the
+   * supplier's name and GSTIN, a consecutive serial number, the date, the
+   * recipient's GSTIN where registered, the HSN code, the taxable value and the
+   * tax under each head. The previous version printed "RECEIPT" with no GSTIN
+   * and no HSN at all, which is not a document a shop can legally issue.
+   */
+  const printReceipt = (invoice: any, lines: any[]) => {
+    const customer = selectedCustomerId ? customers.find((c) => c.id === selectedCustomerId) : null;
+    const gstin = (store as any)?.gstin ?? '';
+    const esc = (v: unknown) =>
+      String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
+    const rs = (n: number) => `₹${Number(n ?? 0).toFixed(2)}`;
+    const qty = (n: number) => String(Number(n ?? 0)).replace(/\.?0+$/, '');
 
-    const receiptHtml = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <title>Receipt ${invoice.invoice_no}</title>
-        <style>
-          body { font-family: monospace; width: 80mm; margin: 0; padding: 10px; }
-          .header { text-align: center; font-weight: bold; margin-bottom: 10px; }
-          .line { border-bottom: 1px dashed #000; margin: 5px 0; }
-          table { width: 100%; font-size: 12px; }
-          th, td { padding: 4px; text-align: left; }
-          .text-right { text-align: right; }
-          .total { font-weight: bold; }
-        </style>
-      </head>
-      <body>
-        <div class="header">RECEIPT</div>
-        <div>${store?.name}</div>
-        <div class="line"></div>
-        <div>Invoice: ${invoice.invoice_no}</div>
-        <div>Date: ${new Date(invoice.invoice_date).toLocaleString()}</div>
-        ${customer ? `<div>Customer: ${customer.name}</div>` : '<div>Customer: Walk-in</div>'}
-        <div class="line"></div>
-        <table>
-          <thead>
-            <tr>
-              <th>Item</th>
-              <th class="text-right">Qty</th>
-              <th class="text-right">Rate</th>
-              <th class="text-right">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${items.map(item => `
-              <tr>
-                <td>${item.product.name}</td>
-                <td class="text-right">${item.quantity}</td>
-                <td class="text-right">₹${lineUnitPrice(item.product, useWholesalePrices).toFixed(2)}</td>
-                <td class="text-right">₹${(lineUnitPrice(item.product, useWholesalePrices) * item.quantity).toFixed(2)}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-        <div class="line"></div>
-        <table>
-          <tr>
-            <td>Subtotal:</td>
-            <td class="text-right">₹${calculateTotals().subtotal.toFixed(2)}</td>
-          </tr>
-          ${cgst > 0 ? `<tr><td>CGST:</td><td class="text-right">₹${cgst.toFixed(2)}</td></tr>` : ''}
-          ${sgst > 0 ? `<tr><td>SGST:</td><td class="text-right">₹${sgst.toFixed(2)}</td></tr>` : ''}
-          ${igst > 0 ? `<tr><td>IGST:</td><td class="text-right">₹${igst.toFixed(2)}</td></tr>` : ''}
-          <tr class="total">
-            <td>Total:</td>
-            <td class="text-right">₹${calculateTotals().total.toFixed(2)}</td>
-          </tr>
-        </table>
-        <div class="line"></div>
-        <div style="text-align: center; font-size: 11px; margin-top: 10px;">
-          Thank you!
-        </div>
-      </body>
-      </html>
-    `;
+    const taxLine = (label: string, amount: number) =>
+      amount > 0 ? `<tr><td>${label}</td><td class="r">${rs(amount)}</td></tr>` : '';
 
-    const printWindow = window.open('', '_blank', 'height=400,width=300');
+    const receiptHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>${esc(invoice.invoice_no)}</title>
+<style>
+  @page { margin: 4mm; }
+  body { font-family: ui-monospace, "SF Mono", Menlo, monospace; width: 76mm; margin: 0; font-size: 11px; color: #000; }
+  .c { text-align: center; }
+  .r { text-align: right; }
+  .b { font-weight: 700; }
+  .rule { border-top: 1px dashed #000; margin: 4px 0; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 1px 0; vertical-align: top; }
+  .small { font-size: 10px; }
+  .title { font-size: 13px; letter-spacing: 1px; }
+</style></head><body>
+  <div class="c b title">TAX INVOICE</div>
+  <div class="c b">${esc(store?.name)}</div>
+  ${(store as any)?.address ? `<div class="c small">${esc((store as any).address)}</div>` : ''}
+  ${(store as any)?.phone ? `<div class="c small">Ph: ${esc((store as any).phone)}</div>` : ''}
+  ${gstin ? `<div class="c small">GSTIN: ${esc(gstin)}</div>` : ''}
+  <div class="rule"></div>
+  <table class="small">
+    <tr><td>Invoice</td><td class="r b">${esc(invoice.invoice_no)}</td></tr>
+    <tr><td>Date</td><td class="r">${new Date(invoice.invoice_date ?? Date.now()).toLocaleString('en-IN')}</td></tr>
+    <tr><td>Customer</td><td class="r">${esc(customer?.name ?? 'Walk-in')}</td></tr>
+    ${customer?.gstin ? `<tr><td>Cust GSTIN</td><td class="r">${esc(customer.gstin)}</td></tr>` : ''}
+  </table>
+  <div class="rule"></div>
+  <table>
+    <tr class="b"><th style="text-align:left">Item</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr>
+    ${lines
+      .map((l: any) => {
+        // The unit is what the customer asked for — "2 x 25 kg sack" — and the
+        // rate is the price of one of those, so rate x qty is the amount shown.
+        const unit = l.unit_label ? ` ${esc(l.unit_label)}` : '';
+        const hsn = l.hsn_code ? `<div class="small">HSN ${esc(l.hsn_code)}</div>` : '';
+        return `<tr><td>${esc(l.product_name ?? '')}${hsn}</td>` +
+          `<td class="r">${qty(l.unit_qty ?? l.quantity)}${unit}</td>` +
+          `<td class="r">${rs(l.rate)}</td>` +
+          `<td class="r">${rs(l.total)}</td></tr>`;
+      })
+      .join('')}
+  </table>
+  <div class="rule"></div>
+  <table>
+    <tr><td>Taxable value</td><td class="r">${rs(invoice.sub_total)}</td></tr>
+    ${invoice.discount > 0 ? `<tr><td>Discount</td><td class="r">- ${rs(invoice.discount)}</td></tr>` : ''}
+    ${taxLine('CGST', invoice.cgst)}
+    ${taxLine('SGST', invoice.sgst)}
+    ${taxLine('IGST', invoice.igst)}
+    ${invoice.round_off ? `<tr><td>Round off</td><td class="r">${rs(invoice.round_off)}</td></tr>` : ''}
+    <tr class="b"><td>TOTAL</td><td class="r">${rs(invoice.total)}</td></tr>
+    <tr><td>Paid by</td><td class="r">${esc(invoice.payment_mode)}</td></tr>
+    ${tendered ? `<tr><td>Cash</td><td class="r">${rs(Number(tendered))}</td></tr>
+    <tr class="b"><td>Change</td><td class="r">${rs(Number(tendered) - Number(invoice.total))}</td></tr>` : ''}
+  </table>
+  <div class="rule"></div>
+  <div class="c small">Thank you — goods once sold are taken back only as per store policy.</div>
+</body></html>`;
+
+    const printWindow = window.open('', '_blank', 'height=600,width=380');
     if (printWindow) {
       printWindow.document.write(receiptHtml);
       printWindow.document.close();
@@ -413,12 +701,15 @@ export default function Billing() {
                 key={p.id}
                 style={styles.suggestionItem}
                 onClick={() => {
-                  addToCart({ product: p, quantity: 1, discount: 0 });
+                  // Through addProduct, not addToCart: a line with no unit has
+                  // no price and no way to move stock. The search list was
+                  // missed when the tiles were converted.
+                  addProduct(p);
                   setSearch('');
                 }}
               >
                 <span>{p.name}</span>
-                <span>₹{lineUnitPrice(p, useWholesalePrices).toFixed(2)}</span>
+                <span>{formatMoney(lineUnitPrice(p, useWholesalePrices))}</span>
               </div>
             ))}
           </div>
@@ -429,7 +720,7 @@ export default function Billing() {
             <div
               key={p.id}
               style={styles.productCard}
-              onClick={() => addToCart({ product: p, quantity: 1, discount: 0 })}
+              onClick={() => addProduct(p)}
             >
               {p.image_url && (
                 <img
@@ -440,7 +731,7 @@ export default function Billing() {
                 />
               )}
               <div style={styles.productName}>{p.name}</div>
-              <div style={styles.productPrice}>₹{lineUnitPrice(p, useWholesalePrices).toFixed(2)}</div>
+              <div style={styles.productPrice}>{formatMoney(lineUnitPrice(p, useWholesalePrices))}</div>
             </div>
           ))}
         </div>
@@ -451,20 +742,64 @@ export default function Billing() {
 
         <div style={styles.cartItems}>
           {cart.map((item) => (
-            <div key={item.product.id} style={styles.cartItem}>
+            <div key={lineKeyOf(item)} style={styles.cartItem}>
               <div style={styles.cartItemInfo}>
                 <div style={styles.cartItemName}>{item.product.name}</div>
                 <div style={styles.cartItemPrice}>
-                  ₹{lineUnitPrice(item.product, useWholesalePrices).toFixed(2)} × {item.quantity}
+                  {formatMoney((item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices)))} × {item.quantity}
+                  {item.unit?.label && <span style={styles.cartItemUnit}> {item.unit.label}</span>}
+                  {/* What actually leaves the shelf, when it differs from what
+                      the customer asked for: 2 sacks is 50 kg of stock. */}
+                  {item.unit && item.unit.qty_in_base !== 1 && (
+                    <span style={styles.cartItemBase}>
+                      {' '}= {(item.quantity * item.unit.qty_in_base).toFixed(3).replace(/\.?0+$/, '')} base
+                    </span>
+                  )}
                 </div>
               </div>
               <div style={styles.cartItemActions}>
+                {/* A discount off this line. The counter gives these constantly
+                    — a damaged label, a regular customer — and the field was
+                    hardcoded to zero, so the only way to honour one was to
+                    change the price for everybody. */}
+                {discountFor === lineKeyOf(item) ? (
+                  <input
+                    type="number"
+                    autoFocus
+                    min={0}
+                    value={item.discount || ''}
+                    placeholder="₹ off"
+                    onChange={(e) => {
+                      const v = Math.max(0, parseFloat(e.target.value) || 0);
+                      updateCartDiscount(lineKeyOf(item), v);
+                    }}
+                    onBlur={() => setDiscountFor(null)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === 'Escape') setDiscountFor(null);
+                    }}
+                    style={{ ...styles.qtyInput, width: '64px' }}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setDiscountFor(lineKeyOf(item))}
+                    title="Discount this line"
+                    style={{
+                      ...styles.qtyBtn,
+                      width: 'auto',
+                      padding: '0 6px',
+                      color: item.discount ? '#b45309' : '#64748b',
+                      fontWeight: item.discount ? 700 : 400,
+                    }}
+                  >
+                    {item.discount ? `-₹${item.discount}` : '%'}
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     const newQty = item.product.allow_decimal
                       ? item.quantity - 0.5
                       : item.quantity - 1;
-                    updateCartQuantity(item.product.id, Math.max(0.5, newQty));
+                    updateCartQuantity(lineKeyOf(item), Math.max(0.5, newQty));
                   }}
                   style={styles.qtyBtn}
                 >
@@ -475,7 +810,7 @@ export default function Billing() {
                   value={item.quantity}
                   onChange={(e) => {
                     const val = parseFloat(e.target.value) || 0;
-                    if (val > 0) updateCartQuantity(item.product.id, val);
+                    if (val > 0) updateCartQuantity(lineKeyOf(item), val);
                   }}
                   step={item.product.allow_decimal ? '0.5' : '1'}
                   style={{...styles.qtyInput, width: '60px'}}
@@ -485,14 +820,14 @@ export default function Billing() {
                     const newQty = item.product.allow_decimal
                       ? item.quantity + 0.5
                       : item.quantity + 1;
-                    updateCartQuantity(item.product.id, newQty);
+                    updateCartQuantity(lineKeyOf(item), newQty);
                   }}
                   style={styles.qtyBtn}
                 >
                   +
                 </button>
                 <button
-                  onClick={() => removeFromCart(item.product.id)}
+                  onClick={() => removeFromCart(lineKeyOf(item))}
                   style={styles.removeBtn}
                 >
                   ✕
@@ -505,28 +840,74 @@ export default function Billing() {
         <div style={styles.totals}>
           <div style={styles.totalRow}>
             <span>Subtotal</span>
-            <span>₹{subtotal.toFixed(2)}</span>
+            <span>{formatMoney(subtotal)}</span>
           </div>
           {cgst > 0 && <div style={styles.totalRow}>
             <span>CGST</span>
-            <span>₹{cgst.toFixed(2)}</span>
+            <span>{formatMoney(cgst)}</span>
           </div>}
           {sgst > 0 && <div style={styles.totalRow}>
             <span>SGST</span>
-            <span>₹{sgst.toFixed(2)}</span>
+            <span>{formatMoney(sgst)}</span>
           </div>}
           {igst > 0 && <div style={styles.totalRow}>
             <span>IGST</span>
-            <span>₹{igst.toFixed(2)}</span>
+            <span>{formatMoney(igst)}</span>
           </div>}
           <div style={styles.totalRow}>
             <span>Round Off</span>
-            <span>₹{roundOff.toFixed(2)}</span>
+            <span>{formatMoney(roundOff)}</span>
           </div>
           <div style={styles.grandTotal}>
             <span>Total</span>
-            <span>₹{total.toFixed(2)}</span>
+            <span>{formatMoney(total)}</span>
           </div>
+
+          <div style={styles.counterRow}>
+            <label style={styles.counterLabel} htmlFor="bill-discount">Bill discount</label>
+            <input
+              id="bill-discount"
+              type="number"
+              min={0}
+              value={billDiscount}
+              placeholder="0.00"
+              onChange={(e) => setBillDiscount(e.target.value)}
+              style={styles.counterInput}
+            />
+          </div>
+
+          {/* Cash and change. Shown only when cash is actually being taken —
+              on a card or UPI sale there is nothing to count out. */}
+          {!useSplitPayment && paymentMode === 'cash' && total > 0 && (
+            <>
+              <div style={styles.counterRow}>
+                <label style={styles.counterLabel} htmlFor="tendered">Cash received</label>
+                <input
+                  id="tendered"
+                  type="number"
+                  min={0}
+                  value={tendered}
+                  placeholder={total.toFixed(2)}
+                  onChange={(e) => setTendered(e.target.value)}
+                  style={styles.counterInput}
+                />
+              </div>
+              {Number(tendered) > 0 && (
+                <div
+                  style={{
+                    ...styles.change,
+                    // Short is the case worth shouting about: handing over goods
+                    // for less than the bill is money gone.
+                    background: Number(tendered) + 0.005 < total ? '#fef2f2' : '#f0fdf4',
+                    color: Number(tendered) + 0.005 < total ? '#b91c1c' : '#15803d',
+                  }}
+                >
+                  <span>{Number(tendered) + 0.005 < total ? 'Short by' : 'Change due'}</span>
+                  <span>{formatMoney(Math.abs(Number(tendered) - total))}</span>
+                </div>
+              )}
+            </>
+          )}
         </div>
 
         <div style={styles.paymentSection}>
@@ -597,7 +978,7 @@ export default function Billing() {
               </button>
               <div style={styles.totalRow}>
                 <span>Total</span>
-                <span>₹{getPaymentAmount().toFixed(2)}</span>
+                <span>{formatMoney(getPaymentAmount())}</span>
               </div>
             </div>
           ) : (
@@ -614,9 +995,70 @@ export default function Billing() {
             </select>
           )}
 
+          <div style={styles.counterActions}>
+            <button
+              onClick={holdBill}
+              disabled={cart.length === 0}
+              style={{ ...styles.holdBtn, opacity: cart.length === 0 ? 0.45 : 1 }}
+              title="Park this bill (F7)"
+            >
+              Hold
+            </button>
+            <button
+              onClick={() => setShowHeld((v) => !v)}
+              style={styles.holdBtn}
+              title="Parked bills (F8)"
+            >
+              Parked{heldBills.length ? ` (${heldBills.length})` : ''}
+            </button>
+          </div>
+
           <button onClick={handleCheckout} style={styles.checkoutBtn}>
             Checkout
           </button>
+
+          <div style={styles.keyHints}>
+            F2 scan · F4 discount · F6 cash · F7 hold · F8 parked · F9 checkout
+          </div>
+
+          {showHeld && (
+            <div style={styles.heldPanel}>
+              {heldBills.length === 0 ? (
+                <div style={styles.heldEmpty}>No parked bills.</div>
+              ) : (
+                heldBills.map((b) => {
+                  const worth = b.cart.reduce(
+                    (sum: number, l: any) => sum + (l.unit?.sell_price ?? 0) * l.quantity - (l.discount || 0),
+                    0
+                  );
+                  return (
+                    <div key={b.id} style={styles.heldRow}>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>
+                          {b.cart.length} item{b.cart.length === 1 ? '' : 's'} · {formatMoney(worth)}
+                        </div>
+                        <div style={styles.heldWhen}>
+                          parked {new Date(b.at).toLocaleTimeString('en-IN')}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.25rem' }}>
+                        <button onClick={() => recallBill(b.id)} style={styles.recallBtn}>
+                          Resume
+                        </button>
+                        <button
+                          onClick={() => persistHeld(heldBills.filter((x) => x.id !== b.id))}
+                          style={styles.discardBtn}
+                          title="Discard this parked bill"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
         </div>
 
         <button
@@ -626,6 +1068,57 @@ export default function Billing() {
           ← Back to Menu
         </button>
       </div>
+
+      {/*
+        Choosing the unit.
+
+        This is the counter's version of the whole units change: the same rice
+        goes out as 250 g weighed into a bag or as a 25 kg sack, at different
+        prices, and the till has to ask which. The per-base figure is shown
+        because a cashier comparing a bag against loose needs the comparison
+        made for them, not the arithmetic.
+      */}
+      {unitPicker && (
+        <div style={styles.pickerBackdrop} onClick={() => setUnitPicker(null)} role="presentation">
+          <div
+            style={styles.pickerPanel}
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Choose a unit for ${unitPicker.product.name}`}
+          >
+            <div style={styles.pickerHead}>
+              <strong>{unitPicker.product.name}</strong>
+              <span style={styles.pickerHint}>How is it going out?</span>
+            </div>
+            {unitPicker.units.map((u) => (
+              <button
+                key={u.id}
+                style={{ ...styles.pickerRow, opacity: u.has_price === false ? 0.55 : 1 }}
+                disabled={u.has_price === false}
+                onClick={() => {
+                  addToCart({ product: unitPicker.product, unit: u, quantity: 1, discount: 0 });
+                  setUnitPicker(null);
+                  barcodeRef.current?.focus();
+                }}
+              >
+                <span style={{ fontWeight: 600 }}>{u.label}</span>
+                <span style={styles.pickerRate}>
+                  {u.has_price === false ? 'no price set' : `₹${u.sell_price.toFixed(2)}`}
+                  {u.has_price !== false && u.qty_in_base !== 1 && (
+                    <span style={styles.pickerPerBase}>
+                      {' '}· {formatMoney((u.sell_price / u.qty_in_base))} per base
+                    </span>
+                  )}
+                </span>
+              </button>
+            ))}
+            <button style={styles.pickerCancel} onClick={() => setUnitPicker(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -722,6 +1215,72 @@ const styles: Record<string, React.CSSProperties> = {
   cartItemName: {
     fontWeight: '500',
   },
+  pickerBackdrop: {
+    position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.45)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '1rem',
+  },
+  pickerPanel: {
+    background: '#fff', borderRadius: '10px', padding: '1rem',
+    minWidth: '20rem', maxWidth: '28rem', width: '100%',
+    boxShadow: '0 8px 24px rgba(15,23,42,0.2)', display: 'flex', flexDirection: 'column', gap: '0.5rem',
+  },
+  pickerHead: { display: 'flex', flexDirection: 'column', gap: '0.125rem', marginBottom: '0.25rem' },
+  pickerHint: { fontSize: '0.8125rem', color: '#64748b' },
+  pickerRow: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem',
+    padding: '0.75rem 0.875rem', border: '1px solid #cbd5e1', borderRadius: '6px',
+    background: '#fff', cursor: 'pointer', textAlign: 'left', fontSize: '1rem',
+  },
+  pickerRate: { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  pickerPerBase: { color: '#64748b', fontSize: '0.8125rem' },
+  pickerCancel: {
+    padding: '0.5rem', border: 'none', background: 'transparent',
+    color: '#64748b', cursor: 'pointer', fontSize: '0.875rem',
+  },
+  counterActions: { display: 'flex', gap: '0.5rem', marginTop: '0.75rem' },
+  holdBtn: {
+    flex: 1, padding: '0.5rem', fontSize: '0.875rem', cursor: 'pointer',
+    border: '1px solid #cbd5e1', borderRadius: '6px', background: '#fff', color: '#0f172a',
+  },
+  keyHints: {
+    marginTop: '0.5rem', fontSize: '0.6875rem', color: '#94a3b8',
+    textAlign: 'center', lineHeight: 1.5,
+  },
+  heldPanel: {
+    marginTop: '0.5rem', border: '1px solid #e2e8f0', borderRadius: '6px',
+    background: '#f8fafc', maxHeight: '12rem', overflowY: 'auto',
+  },
+  heldEmpty: { padding: '0.75rem', fontSize: '0.8125rem', color: '#64748b', textAlign: 'center' },
+  heldRow: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    gap: '0.5rem', padding: '0.5rem 0.625rem', borderBottom: '1px solid #e2e8f0', fontSize: '0.8125rem',
+  },
+  heldWhen: { fontSize: '0.6875rem', color: '#94a3b8' },
+  recallBtn: {
+    padding: '0.25rem 0.5rem', fontSize: '0.8125rem', cursor: 'pointer',
+    border: '1px solid #1d4ed8', background: '#1d4ed8', color: '#fff', borderRadius: '4px',
+  },
+  discardBtn: {
+    padding: '0.25rem 0.5rem', fontSize: '0.8125rem', cursor: 'pointer',
+    border: '1px solid #cbd5e1', background: '#fff', color: '#64748b', borderRadius: '4px',
+  },
+  counterRow: {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    gap: '0.5rem', marginTop: '0.5rem',
+  },
+  counterLabel: { fontSize: '0.8125rem', color: '#475569' },
+  counterInput: {
+    width: '7rem', padding: '0.375rem 0.5rem', fontSize: '0.9375rem',
+    textAlign: 'right', fontVariantNumeric: 'tabular-nums',
+    border: '1px solid #cbd5e1', borderRadius: '4px',
+  },
+  change: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    marginTop: '0.5rem', padding: '0.5rem 0.625rem', borderRadius: '6px',
+    fontWeight: 700, fontSize: '1rem', fontVariantNumeric: 'tabular-nums',
+  },
+  cartItemUnit: { color: '#1d4ed8', fontWeight: 600 },
+  cartItemBase: { color: '#94a3b8' },
   cartItemPrice: {
     color: '#666',
     fontSize: '0.875rem',
@@ -776,7 +1335,16 @@ const styles: Record<string, React.CSSProperties> = {
     paddingTop: '0.5rem',
   },
   paymentSection: {
+    // A column, not a row. These are stacked controls — the customer, two
+    // checkboxes, the payment mode and Checkout — inside a 360px panel, and as
+    // a row they were crushed into four unreadable columns with every label
+    // wrapping over three lines. Worse, the row overflowed the panel and pushed
+    // the Checkout button past the right edge of the window, so the till's one
+    // essential button sat off-screen. The children already carry marginBottom,
+    // which only ever made sense in a column: the direction was simply never
+    // stated and defaulted to row.
     display: 'flex',
+    flexDirection: 'column',
     gap: '0.5rem',
     marginTop: '1rem',
   },

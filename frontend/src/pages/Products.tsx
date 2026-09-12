@@ -1,411 +1,782 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { productApi, categoryApi, barcodeApi, uomApi } from '../services/api';
+import { categoryApi, productApi, uomApi } from '../services/api';
+import { DataTable, Column } from '../components/DataTable';
+import { Modal } from '../components/Modal';
+import { Checkbox, Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
+import { badge, color, font, space, ui } from '../theme';
+import { formatMoney, formatQty } from '../utils/format';
 
-interface Product {
-  id: string;
-  name: string;
-  name_hi: string;
-  name_kn: string;
-  category_id: string;
-  category_name?: string;
-  hsn_code: string;
-  barcode: string;
-  uom_id: string;
-  uom_name?: string;
-  base_unit_qty: number;
-  gst_rate: number;
-  allow_decimal: boolean;
-  min_stock: number;
-  sell_price: number;
-  mrp: number;
-  cost_price?: number;
-  wholesale_sell_price?: number;
-  stock?: number;
-}
-
-interface Category {
-  id: string;
-  name: string;
-}
-
-interface UOM {
-  id: string;
-  code: string;
-  name: string;
-}
-
-interface PackingUnit {
+interface UnitRow {
   id: string;
   product_id: string;
+  uom_id: string | null;
   label: string;
-  qty_in_parent: number;
-  barcode?: string;
-  parent_unit_id?: string;
+  qty_in_base: number;
+  barcode: string;
+  is_default: boolean;
+  is_sellable: boolean;
+  is_purchasable: boolean;
+  is_active: boolean;
   sort_order: number;
 }
 
+interface PricedUnit {
+  unit: UnitRow;
+  price: { sell_price: number; wholesale_sell_price: number; mrp: number; cost_price: number };
+  has_price: boolean;
+}
+
+interface ProductRow {
+  id: string;
+  name: string;
+  category_id: string;
+  category_name: string;
+  barcode: string;
+  uom_id: string;
+  gst_rate: number;
+  hsn_code: string;
+  brand: string;
+  is_active: boolean;
+  allow_decimal: boolean;
+  min_stock: number;
+  stock: number;
+  mrp: number;
+  cost_price: number;
+  sell_price: number;
+  default_product_unit_id: string;
+  units: PricedUnit[];
+}
+
+/**
+ * The catalogue.
+ *
+ * This is where the units work becomes visible. A product is stocked in one
+ * base unit and sold in as many as the shop likes — loose by the kilo, a 5 kg
+ * bag, a 25 kg sack — and each of those carries its own price and its own
+ * barcode. Getting that on screen is the point: the schema could not express
+ * bulk at all before, and a shop cannot use what it cannot see.
+ *
+ * The per-kilo figure beside each pack price is doing real work. A pack that
+ * costs more per kilo than the loose scoop is nearly always a typo, and it is
+ * invisible unless something divides for you.
+ */
 export default function Products() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
-  const [products, setProducts] = useState<Product[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [uoms, setUoms] = useState<UOM[]>([]);
+
+  const [products, setProducts] = useState<ProductRow[]>([]);
+  const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [uoms, setUoms] = useState<{ id: string; code: string; name: string }[]>([]);
   const [loading, setLoading] = useState(false);
-  const [search, setSearch] = useState('');
-  const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState({
-    name: '', name_hi: '', name_kn: '', category_id: '', hsn_code: '', barcode: '',
-    uom_id: '', base_unit_qty: 1, gst_rate: 0, allow_decimal: false, min_stock: 0
-  });
-  const [priceForm, setPriceForm] = useState({ mrp: 0, cost_price: 0, sell_price: 0, wholesale_sell_price: 0 });
-  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
-  const [unitsProduct, setUnitsProduct] = useState<Product | null>(null);
-  const [packingUnits, setPackingUnits] = useState<PackingUnit[]>([]);
-  const [unitsLoading, setUnitsLoading] = useState(false);
-  const [unitForm, setUnitForm] = useState({ label: '', qty_in_parent: 1, barcode: '', sort_order: 0 });
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [showInactive, setShowInactive] = useState(false);
 
-  useEffect(() => {
-    if (!user || user.role === 'cashier') {
-      navigate('/billing');
-    }
-  }, [user]);
+  const [editing, setEditing] = useState<ProductRow | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [detailTab, setDetailTab] = useState<'details' | 'units'>('details');
+  const [form, setForm] = useState<Record<string, any>>({});
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    if (store) {
-      loadProducts();
-      loadCategories();
-      loadUoms();
-    }
-  }, [store, search]);
+  // Unit editor -------------------------------------------------------------
+  const [unitDraft, setUnitDraft] = useState<Partial<UnitRow> | null>(null);
+  const [unitError, setUnitError] = useState<string | null>(null);
+  const [priceDraft, setPriceDraft] = useState<{ unit: UnitRow; sell: string; wholesale: string; mrp: string; cost: string } | null>(null);
 
-  const loadProducts = async () => {
+  const loadProducts = useCallback(async () => {
     if (!store) return;
     setLoading(true);
     try {
-      const { data } = await productApi.list({ store_id: store.id, search: search || undefined });
-      setProducts(data || []);
+      const { data } = await productApi.list({ store_id: store.id });
+      setProducts(data as unknown as ProductRow[]);
     } catch (err) {
       console.error('Failed to load products:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, [store]);
 
-  const loadCategories = async () => {
+  const loadCategories = useCallback(async () => {
+    if (!store) return;
     try {
       const { data } = await categoryApi.list(store.id);
-      setCategories(data || []);
+      setCategories(data as { id: string; name: string }[]);
     } catch (err) {
       console.error('Failed to load categories:', err);
     }
-  };
+  }, [store]);
 
-  const loadUoms = async () => {
+  const loadUoms = useCallback(async () => {
     try {
       const { data } = await uomApi.list();
-      setUoms(data || []);
+      setUoms(data as { id: string; code: string; name: string }[]);
     } catch (err) {
-      console.error('Failed to load UOMs:', err);
+      console.error('Failed to load units of measure:', err);
     }
+  }, []);
+
+  useEffect(() => {
+    if (!user || !store) {
+      navigate('/login');
+      return;
+    }
+    loadProducts();
+    loadCategories();
+    loadUoms();
+  }, [user, store, navigate, loadProducts, loadCategories, loadUoms]);
+
+  /** Refresh one product in place, so editing units does not reset the table. */
+  const refreshEditing = useCallback(async () => {
+    if (!store || !editing) return;
+    const { data } = await productApi.get(editing.id, store.id);
+    setEditing(data as ProductRow);
+    await loadProducts();
+  }, [store, editing, loadProducts]);
+
+  const openNew = () => {
+    setForm({
+      name: '',
+      category_id: categories[0]?.id ?? '',
+      uom_id: uoms.find((u) => u.code === 'NOS')?.id ?? uoms[0]?.id ?? '',
+      gst_rate: 5,
+      hsn_code: '',
+      barcode: '',
+      brand: '',
+      allow_decimal: false,
+      min_stock: 0,
+      sell_price: 0,
+      cost_price: 0,
+      mrp: 0,
+    });
+    setEditing(null);
+    setCreating(true);
+    setDetailTab('details');
+    setSaveError(null);
   };
 
-  const handleCreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      await productApi.create(form as any);
-      setShowModal(false);
-      setForm({ name: '', name_hi: '', name_kn: '', category_id: '', hsn_code: '', barcode: '', uom_id: '', base_unit_qty: 1, gst_rate: 0, allow_decimal: false, min_stock: 0 });
-      loadProducts();
-    } catch (err) {
-      console.error('Failed to create product:', err);
-    }
+  const openEdit = (p: ProductRow) => {
+    setForm({
+      name: p.name,
+      category_id: p.category_id,
+      uom_id: p.uom_id,
+      gst_rate: p.gst_rate,
+      hsn_code: p.hsn_code ?? '',
+      barcode: p.barcode ?? '',
+      brand: p.brand ?? '',
+      allow_decimal: !!p.allow_decimal,
+      min_stock: p.min_stock ?? 0,
+    });
+    setEditing(p);
+    setCreating(false);
+    setDetailTab('details');
+    setSaveError(null);
   };
 
-  const handleSetPrice = async (productId: string) => {
+  const close = () => {
+    setEditing(null);
+    setCreating(false);
+    setUnitDraft(null);
+    setPriceDraft(null);
+    setSaveError(null);
+  };
+
+  const saveProduct = async () => {
     if (!store) return;
-    try {
-      await productApi.setPrice({ product_id: productId, store_id: store.id, ...priceForm });
-      setSelectedProduct(null);
-      setPriceForm({ mrp: 0, cost_price: 0, sell_price: 0, wholesale_sell_price: 0 });
-      loadProducts();
-    } catch (err) {
-      console.error('Failed to set price:', err);
+    if (!form.name?.trim()) {
+      setSaveError('A product needs a name.');
+      return;
     }
-  };
-
-  const openPackingUnits = async (p: Product) => {
-    setUnitsProduct(p);
-    setUnitForm({ label: '', qty_in_parent: 1, barcode: '', sort_order: 0 });
-    setUnitsLoading(true);
+    setBusy(true);
+    setSaveError(null);
     try {
-      const { data } = await productApi.listPackingUnits(p.id);
-      setPackingUnits((data as PackingUnit[]) || []);
-    } catch (err) {
-      console.error(err);
-      setPackingUnits([]);
+      if (editing) {
+        await productApi.update(editing.id, form as any);
+      } else {
+        await productApi.create({ ...form, store_id: store.id } as any);
+      }
+      close();
+      await loadProducts();
+    } catch (err: any) {
+      setSaveError(err?.response?.data?.error || 'Could not save this product.');
     } finally {
-      setUnitsLoading(false);
+      setBusy(false);
     }
   };
 
-  const handleCreatePackingUnit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!unitsProduct || !unitForm.label.trim()) return;
+  const saveUnit = async () => {
+    if (!editing || !unitDraft) return;
+    const qty = Number(unitDraft.qty_in_base);
+    if (!unitDraft.label?.trim()) {
+      setUnitError('Give the unit a label — what staff call it.');
+      return;
+    }
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setUnitError('Say how many stocking units one of these is. A 25 kg sack is 25.');
+      return;
+    }
+    setBusy(true);
+    setUnitError(null);
     try {
-      await productApi.createPackingUnit(unitsProduct.id, {
-        label: unitForm.label.trim(),
-        qty_in_parent: unitForm.qty_in_parent || 1,
-        barcode: unitForm.barcode.trim() || undefined,
-        sort_order: unitForm.sort_order,
+      const payload = {
+        label: unitDraft.label.trim(),
+        qty_in_base: qty,
+        barcode: unitDraft.barcode?.trim() || undefined,
+        is_sellable: unitDraft.is_sellable !== false,
+        is_purchasable: unitDraft.is_purchasable !== false,
+      };
+      if (unitDraft.id) {
+        await productApi.updateUnit(editing.id, unitDraft.id, payload);
+      } else {
+        await productApi.createUnit(editing.id, payload);
+      }
+      setUnitDraft(null);
+      await refreshEditing();
+    } catch (err: any) {
+      setUnitError(err?.response?.data?.error || 'Could not save this unit.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePrice = async () => {
+    if (!editing || !store || !priceDraft) return;
+    setBusy(true);
+    try {
+      await productApi.setPrice({
+        product_id: editing.id,
+        product_unit_id: priceDraft.unit.id,
+        store_id: store.id,
+        sell_price: Number(priceDraft.sell) || 0,
+        wholesale_sell_price: Number(priceDraft.wholesale) || 0,
+        mrp: Number(priceDraft.mrp) || 0,
+        cost_price: Number(priceDraft.cost) || 0,
       });
-      setUnitForm({ label: '', qty_in_parent: 1, barcode: '', sort_order: 0 });
-      const { data } = await productApi.listPackingUnits(unitsProduct.id);
-      setPackingUnits((data as PackingUnit[]) || []);
-    } catch (err) {
-      console.error('Failed to add packing unit:', err);
+      setPriceDraft(null);
+      await refreshEditing();
+    } catch (err: any) {
+      window.alert(err?.response?.data?.error || 'Could not save this price.');
+    } finally {
+      setBusy(false);
     }
   };
 
-  const handleGenerateBarcode = async () => {
+  const makeDefault = async (u: UnitRow) => {
+    if (!editing) return;
     try {
-      const { data } = await barcodeApi.generate({ category_id: form.category_id || undefined });
-      setForm({ ...form, barcode: (data as { barcode?: string }).barcode || '' });
-    } catch (err) {
-      console.error('Failed to generate barcode:', err);
+      await productApi.setDefaultUnit(editing.id, u.id);
+      await refreshEditing();
+    } catch (err: any) {
+      window.alert(err?.response?.data?.error || 'Could not change the default unit.');
     }
   };
 
-  if (!user || user.role === 'cashier') return null;
+  const rows = useMemo(() => {
+    let r = products;
+    if (!showInactive) r = r.filter((p) => p.is_active);
+    if (categoryFilter) r = r.filter((p) => p.category_id === categoryFilter);
+    return r;
+  }, [products, categoryFilter, showInactive]);
+
+  const lowStock = useMemo(() => products.filter((p) => p.is_active && p.min_stock > 0 && p.stock <= p.min_stock), [products]);
+  const multiUnit = useMemo(() => products.filter((p) => (p.units?.length ?? 0) > 1), [products]);
+
+  const baseUnitCode = (p: ProductRow) => uoms.find((u) => u.id === p.uom_id)?.code ?? '';
+
+  const columns: Column<ProductRow>[] = [
+    {
+      key: 'name',
+      header: 'Product',
+      render: (p) => (
+        <div>
+          <div style={{ fontWeight: 600 }}>{p.name}</div>
+          <div style={styles.sub}>
+            {p.brand ? `${p.brand} · ` : ''}
+            {p.category_name || 'Uncategorised'}
+            {p.barcode ? ` · ${p.barcode}` : ''}
+          </div>
+        </div>
+      ),
+      value: (p) => `${p.name} ${p.brand ?? ''} ${p.category_name ?? ''} ${p.barcode ?? ''}`,
+    },
+    {
+      key: 'units',
+      header: 'Sold as',
+      // The heart of the screen: how many ways this product leaves the shop.
+      render: (p) => {
+        const us = p.units ?? [];
+        if (us.length <= 1) return <span style={styles.muted}>{baseUnitCode(p) || 'single unit'}</span>;
+        return (
+          <div style={{ display: 'flex', gap: space.xs, flexWrap: 'wrap' }}>
+            {us.slice(0, 4).map((x) => (
+              <span key={x.unit.id} style={badge(x.has_price ? 'info' : 'warning')} title={x.has_price ? '' : 'No price set'}>
+                {x.unit.label}
+              </span>
+            ))}
+            {us.length > 4 && <span style={styles.muted}>+{us.length - 4}</span>}
+          </div>
+        );
+      },
+      value: (p) => p.units?.length ?? 0,
+    },
+    {
+      key: 'sell_price',
+      header: 'Price',
+      numeric: true,
+      render: (p) => (
+        <div>
+          <div style={{ fontWeight: 600 }}>{formatMoney(p.sell_price)}</div>
+          <div style={styles.sub}>per {baseUnitCode(p) || 'unit'}</div>
+        </div>
+      ),
+      value: (p) => p.sell_price,
+    },
+    {
+      key: 'stock',
+      header: 'Stock',
+      numeric: true,
+      render: (p) => {
+        const low = p.min_stock > 0 && p.stock <= p.min_stock;
+        return (
+          <span style={{ fontWeight: 600, color: low ? color.danger : p.stock > 0 ? color.text : color.textFaint }}>
+            {formatQty(p.stock, baseUnitCode(p))}
+          </span>
+        );
+      },
+      value: (p) => p.stock,
+    },
+    { key: 'gst_rate', header: 'GST', numeric: true, render: (p) => `${p.gst_rate}%`, value: (p) => p.gst_rate },
+    {
+      key: 'is_active',
+      header: '',
+      sortable: false,
+      width: '5rem',
+      render: (p) =>
+        p.is_active ? (
+          <button style={{ ...ui.button, padding: '0.25rem 0.625rem', fontSize: font.size.sm }} onClick={(e) => { e.stopPropagation(); openEdit(p); }}>
+            Edit
+          </button>
+        ) : (
+          <span style={badge('neutral')}>Inactive</span>
+        ),
+    },
+  ];
+
+  const detail = editing;
 
   return (
-    <div style={styles.container}>
+    <div style={ui.page}>
       <div style={styles.header}>
-        <h1>Products</h1>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>← Back</button>
+        <button onClick={() => navigate('/')} style={ui.button}>← Back</button>
+        <h1 style={styles.h1}>Products</h1>
       </div>
 
-      <div style={styles.toolbar}>
-        <input type="text" placeholder="Search products..." value={search} onChange={e => setSearch(e.target.value)} style={styles.searchInput} />
-        <button onClick={() => setShowModal(true)} style={styles.addBtn}>+ Add Product</button>
+      <div style={styles.summary}>
+        <Stat label="Products" value={String(products.filter((p) => p.is_active).length)} />
+        <Stat label="Sold in more than one unit" value={String(multiUnit.length)} />
+        <Stat label="At or below minimum" value={String(lowStock.length)} tone={lowStock.length ? 'danger' : undefined} />
       </div>
 
-      {loading ? (
-        <p>Loading...</p>
-      ) : (
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>Name</th>
-              <th style={styles.th}>Barcode</th>
-              <th style={styles.th}>Category</th>
-              <th style={styles.th}>HSN</th>
-              <th style={styles.th}>GST %</th>
-              <th style={styles.th}>MRP</th>
-              <th style={styles.th}>Sell Price</th>
-              <th style={styles.th}>Stock</th>
-              <th style={styles.th}>Units</th>
-              <th style={styles.th}>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {products.map((p) => (
-              <tr key={p.id} style={styles.tr}>
-                <td style={styles.td}>{p.name}</td>
-                <td style={styles.td}>{p.barcode}</td>
-                <td style={styles.td}>{p.category_name || '-'}</td>
-                <td style={styles.td}>{p.hsn_code || '-'}</td>
-                <td style={styles.td}>{p.gst_rate}%</td>
-                <td style={styles.td}>₹{p.mrp.toFixed(2)}</td>
-                <td style={styles.td}>₹{p.sell_price.toFixed(2)}</td>
-                <td style={styles.td}>{(p.stock || 0).toFixed(2)}</td>
-                <td style={styles.td}>
-                  <button type="button" onClick={() => openPackingUnits(p)} style={styles.unitsBtn}>
-                    Packing units
-                  </button>
-                </td>
-                <td style={styles.td}>
-                  <button onClick={() => { setSelectedProduct(p); setPriceForm({ mrp: p.mrp, cost_price: p.cost_price || 0, sell_price: p.sell_price, wholesale_sell_price: p.wholesale_sell_price || 0 }); }} style={styles.priceBtn}>Set Price</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
+      <DataTable
+        rows={rows}
+        columns={columns}
+        rowKey={(p) => p.id}
+        loading={loading}
+        onRowClick={openEdit}
+        searchPlaceholder="Search name, brand, category or barcode…"
+        empty={categoryFilter ? 'No products in this category.' : 'No products yet.'}
+        rowTone={(p) => (p.min_stock > 0 && p.stock <= p.min_stock ? 'warning' : undefined)}
+        toolbar={
+          <>
+            <Select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              placeholder="All categories"
+              options={categories.map((c) => ({ value: c.id, label: c.name }))}
+              style={{ width: 'auto' }}
+            />
+            <label style={{ display: 'flex', alignItems: 'center', gap: space.xs, fontSize: font.size.sm, whiteSpace: 'nowrap' }}>
+              <input type="checkbox" checked={showInactive} onChange={(e) => setShowInactive(e.target.checked)} />
+              Show inactive
+            </label>
+            <button style={ui.buttonPrimary} onClick={openNew}>+ New product</button>
+          </>
+        }
+      />
 
-      {showModal && (
-        <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>Add Product</h2>
-            <form onSubmit={handleCreate}>
-              <div style={styles.formRow}>
-                <input type="text" placeholder="Name *" value={form.name} onChange={e => setForm({...form, name: e.target.value})} style={styles.input} required />
-                <input type="text" placeholder="Name (Hindi)" value={form.name_hi} onChange={e => setForm({...form, name_hi: e.target.value})} style={styles.input} />
-              </div>
-              <div style={styles.formRow}>
-                <input type="text" placeholder="Name (Kannada)" value={form.name_kn} onChange={e => setForm({...form, name_kn: e.target.value})} style={styles.input} />
-                <select value={form.category_id} onChange={e => setForm({...form, category_id: e.target.value})} style={styles.input} required>
-                  <option value="">Select Category *</option>
-                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
-              <div style={styles.formRow}>
-                <input type="text" placeholder="HSN Code" value={form.hsn_code} onChange={e => setForm({...form, hsn_code: e.target.value})} style={styles.input} />
-                <input type="text" placeholder="Barcode" value={form.barcode} onChange={e => setForm({...form, barcode: e.target.value})} style={styles.input} />
-                <button type="button" onClick={handleGenerateBarcode} style={styles.genBtn}>Generate</button>
-              </div>
-              <div style={styles.formRow}>
-                <select value={form.uom_id} onChange={e => setForm({...form, uom_id: e.target.value})} style={styles.input} required>
-                  <option value="">Unit *</option>
-                  {uoms.map(u => <option key={u.id} value={u.id}>{u.name} ({u.code})</option>)}
-                </select>
-                <input type="number" placeholder="GST Rate %" value={form.gst_rate} onChange={e => setForm({...form, gst_rate: parseFloat(e.target.value) || 0})} style={styles.input} />
-              </div>
-              <div style={styles.formRow}>
-                <input type="number" placeholder="Base Qty" value={form.base_unit_qty} onChange={e => setForm({...form, base_unit_qty: parseFloat(e.target.value) || 1})} style={styles.input} />
-                <input type="number" placeholder="Min Stock" value={form.min_stock} onChange={e => setForm({...form, min_stock: parseFloat(e.target.value) || 0})} style={styles.input} />
-              </div>
-              <label style={styles.checkbox}>
-                <input type="checkbox" checked={form.allow_decimal} onChange={e => setForm({...form, allow_decimal: e.target.checked})} />
-                Allow Decimal Quantity
-              </label>
-              <div style={styles.modalActions}>
-                <button type="button" onClick={() => setShowModal(false)} style={styles.cancelBtn}>Cancel</button>
-                <button type="submit" style={styles.submitBtn}>Save</button>
-              </div>
-            </form>
+      <Modal
+        open={creating || !!detail}
+        title={detail ? detail.name : 'New product'}
+        subtitle={detail ? `Stocked in ${baseUnitCode(detail) || 'its base unit'} · ${formatQty(detail.stock, baseUnitCode(detail))} on hand` : undefined}
+        width="52rem"
+        onClose={close}
+        footer={
+          detailTab === 'details' ? (
+            <>
+              <button style={ui.button} onClick={close} disabled={busy}>Cancel</button>
+              <button style={ui.buttonPrimary} onClick={saveProduct} disabled={busy}>
+                {busy ? 'Saving…' : detail ? 'Save changes' : 'Create product'}
+              </button>
+            </>
+          ) : (
+            <button style={ui.button} onClick={close}>Done</button>
+          )
+        }
+      >
+        {detail && (
+          <div style={styles.tabs}>
+            <button style={detailTab === 'details' ? styles.tabActive : styles.tab} onClick={() => setDetailTab('details')}>
+              Details
+            </button>
+            <button style={detailTab === 'units' ? styles.tabActive : styles.tab} onClick={() => setDetailTab('units')}>
+              Units &amp; prices ({detail.units?.length ?? 0})
+            </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {unitsProduct && (
-        <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>Packing units — {unitsProduct.name}</h2>
-            <p style={styles.hint}>Optional alternate barcodes (e.g. case/piece). Lookup uses these when stock is summed on the base product.</p>
-            {unitsLoading ? (
-              <p>Loading…</p>
-            ) : (
-              <table style={{ ...styles.table, marginBottom: '1rem' }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Label</th>
-                    <th style={styles.th}>Qty in parent</th>
-                    <th style={styles.th}>Barcode</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {packingUnits.length === 0 ? (
-                    <tr>
-                      <td colSpan={3} style={styles.td}>
-                        No packing units yet.
+        {(!detail || detailTab === 'details') && (
+          <>
+            <FormError error={saveError} />
+            <FormGrid>
+              <Field label="Name" required htmlFor="p-name">
+                <TextInput id="p-name" autoFocus value={form.name ?? ''} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              </Field>
+              <Field label="Brand" htmlFor="p-brand">
+                <TextInput id="p-brand" value={form.brand ?? ''} onChange={(e) => setForm({ ...form, brand: e.target.value })} />
+              </Field>
+              <Field label="Category" required htmlFor="p-cat">
+                <Select
+                  id="p-cat"
+                  value={form.category_id ?? ''}
+                  onChange={(e) => setForm({ ...form, category_id: e.target.value })}
+                  placeholder="Choose…"
+                  options={categories.map((c) => ({ value: c.id, label: c.name }))}
+                />
+              </Field>
+              <Field
+                label="Stocking unit"
+                required
+                hint={creating ? 'Stock is counted in this. Everything else converts to it.' : 'Changing this does not restate existing stock.'}
+                htmlFor="p-uom"
+              >
+                <Select
+                  id="p-uom"
+                  value={form.uom_id ?? ''}
+                  onChange={(e) => setForm({ ...form, uom_id: e.target.value })}
+                  options={uoms.map((u) => ({ value: u.id, label: `${u.name} (${u.code})` }))}
+                />
+              </Field>
+              <Field label="GST rate %" required htmlFor="p-gst">
+                <NumberInput id="p-gst" min={0} max={100} value={form.gst_rate ?? 0} onChange={(e) => setForm({ ...form, gst_rate: Number(e.target.value) })} />
+              </Field>
+              <Field label="HSN code" hint="Printed on the tax invoice." htmlFor="p-hsn">
+                <TextInput id="p-hsn" value={form.hsn_code ?? ''} onChange={(e) => setForm({ ...form, hsn_code: e.target.value })} />
+              </Field>
+              <Field label="Barcode" hint="The product's own code. Packs get their own." htmlFor="p-bc">
+                <TextInput id="p-bc" value={form.barcode ?? ''} onChange={(e) => setForm({ ...form, barcode: e.target.value })} />
+              </Field>
+              <Field label="Reorder at" hint="Flagged on this screen when stock falls to here." htmlFor="p-min">
+                <NumberInput id="p-min" min={0} value={form.min_stock ?? 0} onChange={(e) => setForm({ ...form, min_stock: Number(e.target.value) })} />
+              </Field>
+            </FormGrid>
+
+            <Checkbox
+              label="Can be sold in fractions"
+              hint="On for anything weighed or measured. Off for pieces — half a bar of soap is not a sale."
+              checked={!!form.allow_decimal}
+              onChange={(v) => setForm({ ...form, allow_decimal: v })}
+            />
+
+            {creating && (
+              <>
+                <div style={styles.divider}>Opening price, for the stocking unit</div>
+                <FormGrid>
+                  <Field label="Selling price" required htmlFor="p-sell">
+                    <NumberInput id="p-sell" min={0} value={form.sell_price ?? 0} onChange={(e) => setForm({ ...form, sell_price: Number(e.target.value) })} />
+                  </Field>
+                  <Field label="Cost price" htmlFor="p-cost">
+                    <NumberInput id="p-cost" min={0} value={form.cost_price ?? 0} onChange={(e) => setForm({ ...form, cost_price: Number(e.target.value) })} />
+                  </Field>
+                  <Field label="MRP" hint="Zero if not a packaged commodity." htmlFor="p-mrp">
+                    <NumberInput id="p-mrp" min={0} value={form.mrp ?? 0} onChange={(e) => setForm({ ...form, mrp: Number(e.target.value) })} />
+                  </Field>
+                </FormGrid>
+                <div style={styles.note}>
+                  Bags, sacks and pouches are added afterwards, under <strong>Units &amp; prices</strong> — each with its own
+                  price and barcode.
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {detail && detailTab === 'units' && (
+          <>
+            <div style={styles.note}>
+              Stock is one pool of <strong>{formatQty(detail.stock, baseUnitCode(detail))}</strong>. Every unit below draws
+              from it, so selling a sack and selling loose can never disagree about what is on the shelf.
+            </div>
+
+            <table style={styles.unitTable}>
+              <thead>
+                <tr>
+                  <th style={styles.uth}>Unit</th>
+                  <th style={{ ...styles.uth, textAlign: 'right' }}>Size</th>
+                  <th style={{ ...styles.uth, textAlign: 'right' }}>Price</th>
+                  <th style={{ ...styles.uth, textAlign: 'right' }}>Per {baseUnitCode(detail) || 'unit'}</th>
+                  <th style={styles.uth}>Barcode</th>
+                  <th style={styles.uth} />
+                </tr>
+              </thead>
+              <tbody>
+                {(detail.units ?? []).map(({ unit, price, has_price }) => {
+                  const perBase = has_price && unit.qty_in_base > 0 ? price.sell_price / unit.qty_in_base : null;
+                  const looseRate = detail.sell_price;
+                  // A pack dearer per kilo than the loose scoop is nearly always
+                  // a mistyped price, and nothing else on the screen shows it.
+                  const dearer = perBase !== null && looseRate > 0 && unit.qty_in_base > 1 && perBase > looseRate;
+                  return (
+                    <tr key={unit.id} style={styles.utr}>
+                      <td style={styles.utd}>
+                        <span style={{ fontWeight: 600 }}>{unit.label}</span>
+                        {unit.is_default && <span style={{ ...badge('info'), marginLeft: space.xs }}>default</span>}
+                        {!unit.is_sellable && <span style={{ ...badge('neutral'), marginLeft: space.xs }}>buy only</span>}
+                        {!unit.is_active && <span style={{ ...badge('neutral'), marginLeft: space.xs }}>retired</span>}
+                      </td>
+                      <td style={{ ...styles.utd, ...ui.numeric }}>
+                        {formatQty(unit.qty_in_base, baseUnitCode(detail))}
+                      </td>
+                      <td style={{ ...styles.utd, ...ui.numeric }}>
+                        {has_price ? formatMoney(price.sell_price) : <span style={badge('warning')}>no price</span>}
+                      </td>
+                      <td style={{ ...styles.utd, ...ui.numeric, color: dearer ? color.danger : color.textMuted }}>
+                        {perBase !== null ? formatMoney(perBase) : '—'}
+                        {dearer && <div style={styles.sub}>dearer than loose</div>}
+                      </td>
+                      <td style={{ ...styles.utd, fontFamily: font.mono, fontSize: font.size.sm }}>{unit.barcode || '—'}</td>
+                      <td style={{ ...styles.utd, textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button
+                          style={{ ...ui.button, padding: '0.125rem 0.5rem', fontSize: font.size.xs }}
+                          onClick={() =>
+                            setPriceDraft({
+                              unit,
+                              sell: String(price?.sell_price ?? 0),
+                              wholesale: String(price?.wholesale_sell_price ?? 0),
+                              mrp: String(price?.mrp ?? 0),
+                              cost: String(price?.cost_price ?? 0),
+                            })
+                          }
+                        >
+                          Price
+                        </button>{' '}
+                        <button
+                          style={{ ...ui.button, padding: '0.125rem 0.5rem', fontSize: font.size.xs }}
+                          onClick={() => { setUnitDraft(unit); setUnitError(null); }}
+                        >
+                          Edit
+                        </button>{' '}
+                        {!unit.is_default && unit.is_sellable && unit.is_active && (
+                          <button
+                            style={{ ...ui.button, padding: '0.125rem 0.5rem', fontSize: font.size.xs }}
+                            onClick={() => makeDefault(unit)}
+                          >
+                            Make default
+                          </button>
+                        )}
                       </td>
                     </tr>
-                  ) : (
-                    packingUnits.map((u) => (
-                      <tr key={u.id}>
-                        <td style={styles.td}>{u.label}</td>
-                        <td style={styles.td}>{u.qty_in_parent}</td>
-                        <td style={styles.td}>{u.barcode || '—'}</td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            )}
-            <form onSubmit={handleCreatePackingUnit}>
-              <h3 style={{ fontSize: '1rem', margin: '0 0 0.5rem' }}>Add unit</h3>
-              <div style={styles.formRow}>
-                <input
-                  type="text"
-                  placeholder="Label (e.g. Case of 12)"
-                  value={unitForm.label}
-                  onChange={(e) => setUnitForm({ ...unitForm, label: e.target.value })}
-                  style={styles.input}
-                  required
-                />
-                <input
-                  type="number"
-                  placeholder="Qty in parent"
-                  value={unitForm.qty_in_parent}
-                  onChange={(e) => setUnitForm({ ...unitForm, qty_in_parent: parseFloat(e.target.value) || 1 })}
-                  style={styles.input}
-                  min={0.01}
-                  step={0.01}
-                />
-              </div>
-              <div style={styles.formRow}>
-                <input
-                  type="text"
-                  placeholder="Barcode (optional)"
-                  value={unitForm.barcode}
-                  onChange={(e) => setUnitForm({ ...unitForm, barcode: e.target.value })}
-                  style={styles.input}
-                />
-                <input
-                  type="number"
-                  placeholder="Sort order"
-                  value={unitForm.sort_order}
-                  onChange={(e) => setUnitForm({ ...unitForm, sort_order: parseInt(e.target.value, 10) || 0 })}
-                  style={styles.input}
-                />
-              </div>
-              <div style={styles.modalActions}>
-                <button type="button" onClick={() => setUnitsProduct(null)} style={styles.cancelBtn}>
-                  Close
-                </button>
-                <button type="submit" style={styles.submitBtn}>
-                  Add unit
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+                  );
+                })}
+              </tbody>
+            </table>
 
-      {selectedProduct && (
-        <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>Set Price - {selectedProduct.name}</h2>
-            <div style={styles.formRow}>
-              <input type="number" placeholder="MRP" value={priceForm.mrp} onChange={e => setPriceForm({...priceForm, mrp: parseFloat(e.target.value) || 0})} style={styles.input} />
-              <input type="number" placeholder="Cost Price" value={priceForm.cost_price} onChange={e => setPriceForm({...priceForm, cost_price: parseFloat(e.target.value) || 0})} style={styles.input} />
-              <input type="number" placeholder="Sell Price *" value={priceForm.sell_price} onChange={e => setPriceForm({...priceForm, sell_price: parseFloat(e.target.value) || 0})} style={styles.input} />
-              <input type="number" placeholder="Wholesale sell" value={priceForm.wholesale_sell_price} onChange={e => setPriceForm({...priceForm, wholesale_sell_price: parseFloat(e.target.value) || 0})} style={styles.input} />
+            <div>
+              <button
+                style={ui.buttonPrimary}
+                onClick={() => {
+                  setUnitDraft({ label: '', qty_in_base: undefined, barcode: '', is_sellable: true, is_purchasable: true });
+                  setUnitError(null);
+                }}
+              >
+                + Add a unit
+              </button>
             </div>
-            <div style={styles.modalActions}>
-              <button onClick={() => setSelectedProduct(null)} style={styles.cancelBtn}>Cancel</button>
-              <button onClick={() => handleSetPrice(selectedProduct.id)} style={styles.submitBtn}>Save Price</button>
-            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* Unit editor ------------------------------------------------------ */}
+      <Modal
+        open={!!unitDraft}
+        title={unitDraft?.id ? `Edit ${unitDraft.label}` : 'Add a unit'}
+        subtitle={detail ? `Sizes are in ${baseUnitCode(detail) || 'the stocking unit'} — a 25 kg sack of a product stocked in kg is 25.` : undefined}
+        width="34rem"
+        onClose={() => setUnitDraft(null)}
+        footer={
+          <>
+            <button style={ui.button} onClick={() => setUnitDraft(null)} disabled={busy}>Cancel</button>
+            <button style={ui.buttonPrimary} onClick={saveUnit} disabled={busy}>{busy ? 'Saving…' : 'Save unit'}</button>
+          </>
+        }
+      >
+        <FormError error={unitError} />
+        <FormGrid>
+          <Field label="Label" required hint="What staff call it: “25 kg sack”." htmlFor="u-label">
+            <TextInput
+              id="u-label"
+              autoFocus
+              value={unitDraft?.label ?? ''}
+              onChange={(e) => setUnitDraft({ ...(unitDraft ?? {}), label: e.target.value })}
+            />
+          </Field>
+          <Field
+            label={`Size in ${detail ? baseUnitCode(detail) || 'base units' : 'base units'}`}
+            required
+            hint="A 250 g pouch of something stocked in kg is 0.25."
+            htmlFor="u-qty"
+          >
+            <NumberInput
+              id="u-qty"
+              min={0}
+              value={unitDraft?.qty_in_base ?? ''}
+              onChange={(e) => setUnitDraft({ ...(unitDraft ?? {}), qty_in_base: Number(e.target.value) })}
+            />
+          </Field>
+        </FormGrid>
+        <Field label="Barcode" hint="Its own code, so a scan picks this unit and its price.">
+          <TextInput
+            value={unitDraft?.barcode ?? ''}
+            onChange={(e) => setUnitDraft({ ...(unitDraft ?? {}), barcode: e.target.value })}
+          />
+        </Field>
+        <FormGrid>
+          <Checkbox
+            label="Can be sold"
+            checked={unitDraft?.is_sellable !== false}
+            onChange={(v) => setUnitDraft({ ...(unitDraft ?? {}), is_sellable: v })}
+          />
+          <Checkbox
+            label="Can be bought"
+            hint="A supplier's pallet you never sell whole."
+            checked={unitDraft?.is_purchasable !== false}
+            onChange={(v) => setUnitDraft({ ...(unitDraft ?? {}), is_purchasable: v })}
+          />
+        </FormGrid>
+      </Modal>
+
+      {/* Price editor ----------------------------------------------------- */}
+      <Modal
+        open={!!priceDraft}
+        title={`Price — ${priceDraft?.unit.label ?? ''}`}
+        subtitle={
+          priceDraft && detail
+            ? `One ${priceDraft.unit.label} is ${formatQty(priceDraft.unit.qty_in_base, baseUnitCode(detail))}`
+            : undefined
+        }
+        width="34rem"
+        onClose={() => setPriceDraft(null)}
+        footer={
+          <>
+            <button style={ui.button} onClick={() => setPriceDraft(null)} disabled={busy}>Cancel</button>
+            <button style={ui.buttonPrimary} onClick={savePrice} disabled={busy}>{busy ? 'Saving…' : 'Save price'}</button>
+          </>
+        }
+      >
+        <FormGrid>
+          <Field label="Selling price" required htmlFor="pr-sell">
+            <NumberInput
+              id="pr-sell"
+              autoFocus
+              min={0}
+              value={priceDraft?.sell ?? ''}
+              onChange={(e) => setPriceDraft(priceDraft ? { ...priceDraft, sell: e.target.value } : null)}
+            />
+          </Field>
+          <Field label="Wholesale price" hint="Charged to wholesale customers. Zero to use the normal price." htmlFor="pr-ws">
+            <NumberInput
+              id="pr-ws"
+              min={0}
+              value={priceDraft?.wholesale ?? ''}
+              onChange={(e) => setPriceDraft(priceDraft ? { ...priceDraft, wholesale: e.target.value } : null)}
+            />
+          </Field>
+          <Field label="Cost price" htmlFor="pr-cost">
+            <NumberInput
+              id="pr-cost"
+              min={0}
+              value={priceDraft?.cost ?? ''}
+              onChange={(e) => setPriceDraft(priceDraft ? { ...priceDraft, cost: e.target.value } : null)}
+            />
+          </Field>
+          <Field label="MRP" hint="Selling above it is an offence, so the server refuses. Zero if unpackaged." htmlFor="pr-mrp">
+            <NumberInput
+              id="pr-mrp"
+              min={0}
+              value={priceDraft?.mrp ?? ''}
+              onChange={(e) => setPriceDraft(priceDraft ? { ...priceDraft, mrp: e.target.value } : null)}
+            />
+          </Field>
+        </FormGrid>
+        {priceDraft && detail && priceDraft.unit.qty_in_base > 0 && Number(priceDraft.sell) > 0 && (
+          <div style={styles.note}>
+            That works out at <strong>{formatMoney(Number(priceDraft.sell) / priceDraft.unit.qty_in_base)}</strong> per{' '}
+            {baseUnitCode(detail) || 'unit'}
+            {detail.sell_price > 0 && <> — loose is {formatMoney(detail.sell_price)}.</>}
           </div>
-        </div>
-      )}
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: string; tone?: 'danger' }) {
+  return (
+    <div style={{ ...ui.card, padding: space.lg, flex: '1 1 10rem' }}>
+      <div style={styles.statLabel}>{label}</div>
+      <div style={{ ...styles.statValue, color: tone === 'danger' ? color.danger : color.text }}>{value}</div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  toolbar: { display: 'flex', gap: '1rem', marginBottom: '1rem' },
-  searchInput: { flex: 1, padding: '0.75rem', border: '1px solid #ddd', borderRadius: '4px' },
-  addBtn: { padding: '0.75rem 1.5rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  table: { width: '100%', background: 'white', borderCollapse: 'collapse', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', fontSize: '0.875rem' },
-  th: { padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #ddd', background: '#f9f9f9' },
-  td: { padding: '0.75rem', borderBottom: '1px solid #eee' },
-  tr: { borderBottom: '1px solid #eee' },
-  priceBtn: { padding: '0.25rem 0.5rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' },
-  unitsBtn: { padding: '0.25rem 0.5rem', background: '#5c6bc0', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.75rem' },
-  modal: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
-  modalContent: { background: 'white', padding: '1.5rem', borderRadius: '8px', width: '560px', maxWidth: '90%', maxHeight: '90vh', overflow: 'auto' },
-  hint: { color: '#666', fontSize: '0.8rem', margin: '0 0 0.75rem' },
-  formRow: { display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', flexWrap: 'wrap' },
-  input: { flex: 1, minWidth: '120px', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' },
-  genBtn: { padding: '0.5rem 1rem', background: '#ff9800', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  checkbox: { display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' },
-  modalActions: { display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' },
-  cancelBtn: { padding: '0.75rem 1.5rem', background: '#ddd', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  submitBtn: { padding: '0.75rem 1.5rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
+  header: { display: 'flex', alignItems: 'center', gap: space.lg, marginBottom: space.lg },
+  h1: { margin: 0, fontSize: font.size.xxl },
+  summary: { display: 'flex', gap: space.lg, marginBottom: space.lg, flexWrap: 'wrap' },
+  statLabel: { fontSize: font.size.xs, textTransform: 'uppercase', letterSpacing: '0.04em', color: color.textMuted, fontWeight: 700 },
+  statValue: { marginTop: space.xs, fontSize: font.size.xl, fontWeight: 700, fontVariantNumeric: 'tabular-nums' },
+  sub: { fontSize: font.size.xs, color: color.textMuted },
+  muted: { color: color.textFaint, fontSize: font.size.sm },
+  tabs: { display: 'flex', gap: space.xs },
+  tab: { ...ui.button, borderRadius: '999px', padding: '0.25rem 0.75rem', fontSize: font.size.sm },
+  tabActive: { ...ui.buttonPrimary, borderRadius: '999px', padding: '0.25rem 0.75rem', fontSize: font.size.sm },
+  divider: {
+    paddingTop: space.md,
+    borderTop: `1px solid ${color.border}`,
+    fontSize: font.size.xs,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    fontWeight: 700,
+    color: color.textMuted,
+  },
+  note: {
+    padding: space.md,
+    background: color.primarySoft,
+    border: `1px solid ${color.primary}22`,
+    borderRadius: '6px',
+    fontSize: font.size.md,
+  },
+  unitTable: { width: '100%', borderCollapse: 'collapse', fontSize: font.size.md },
+  uth: {
+    textAlign: 'left',
+    padding: `${space.sm} ${space.md}`,
+    fontSize: font.size.xs,
+    textTransform: 'uppercase',
+    letterSpacing: '0.04em',
+    fontWeight: 700,
+    color: color.textMuted,
+    borderBottom: `1px solid ${color.border}`,
+  },
+  utr: { borderBottom: `1px solid ${color.border}` },
+  utd: { padding: `${space.sm} ${space.md}`, verticalAlign: 'middle' },
 };

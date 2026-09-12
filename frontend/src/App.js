@@ -1,5 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { useAppStore } from './stores/appStore';
+import { storeApi } from './services/api';
 import Login from './pages/Login';
 import Billing from './pages/Billing';
 import Inventory from './pages/Inventory';
@@ -28,7 +30,41 @@ import VendorPayments from './pages/VendorPayments';
 import PurchaseReturns from './pages/PurchaseReturns';
 import MultiStoreDashboard from './pages/MultiStoreDashboard';
 
+/**
+ * Re-read the signed-in store from the server once per app load.
+ *
+ * The store record is persisted in localStorage so a reload does not lose the
+ * session, but that copy then never changed. A shop that entered its GSTIN in
+ * Settings on the office machine went on printing GSTIN-less tax invoices at
+ * every till until somebody happened to sign out and in again — and the GSTIN
+ * is statutory content on the bill, so those were not documents the shop could
+ * legally issue. The same staleness reached the store name and address printed
+ * on every receipt.
+ *
+ * A failure here is deliberately ignored: the cached copy is what the counter
+ * had a moment ago, and an offline till must keep billing.
+ */
+function useFreshStore() {
+  const store = useAppStore((s) => s.store);
+  const setStore = useAppStore((s) => s.setStore);
+  const storeId = store?.id;
+  useEffect(() => {
+    if (!storeId) return;
+    let cancelled = false;
+    storeApi
+      .get(storeId)
+      .then(({ data }) => {
+        if (!cancelled && data?.id) setStore(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [storeId, setStore]);
+}
+
 function App() {
+  useFreshStore();
   return (
     <BrowserRouter>
       <Routes>

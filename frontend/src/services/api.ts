@@ -1,5 +1,5 @@
-import axios from 'axios';
-import { Product, Store, Customer, Invoice } from '../types';
+import axios, { AxiosResponse } from 'axios';
+import { Product, Store, Customer, Invoice, Terminal } from '../types';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || '/api/v1',
@@ -17,6 +17,42 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+/**
+ * The server reports a failure as a structured envelope:
+ *
+ *   {"error": {"code": "validation_failed",
+ *              "message": "The request contains invalid fields.",
+ *              "fields": {"name": "this field is required"}}}
+ *
+ * Screens read `err.response.data.error` and put it straight into a message
+ * string or a JSX expression. An object there renders as `[object Object]` in
+ * an alert, and in JSX React refuses it outright — "Objects are not valid as a
+ * React child" — which unmounts the page. So the Settings screen white-screened
+ * on exactly the validation errors it exists to show.
+ *
+ * Flattening it once here fixes all six call sites, and keeps the field-level
+ * detail: a caller that wants the structure still has it on `error.details`.
+ */
+function describeError(payload: any): string {
+  if (typeof payload === 'string') return payload;
+  if (!payload || typeof payload !== 'object') return '';
+
+  const parts: string[] = [];
+  if (typeof payload.message === 'string' && payload.message) {
+    parts.push(payload.message);
+  }
+  // Field errors are the actionable half — "name is required" is what the user
+  // has to act on, and the generic message above never carries it.
+  const fields = payload.fields;
+  if (fields && typeof fields === 'object') {
+    const detail = Object.entries(fields)
+      .map(([name, problem]) => `${name}: ${problem}`)
+      .join(', ');
+    if (detail) parts.push(detail);
+  }
+  return parts.join(' — ');
+}
+
 api.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -25,12 +61,63 @@ api.interceptors.response.use(
       localStorage.removeItem('storeId');
       window.location.href = '/login';
     }
+    const data = error.response?.data;
+    if (data && typeof data === 'object' && 'error' in data) {
+      const described = describeError(data.error);
+      if (described) {
+        // Keep the original structure reachable rather than discarding it.
+        data.details = data.error;
+        data.error = described;
+      }
+    }
     return Promise.reject(error);
   }
 );
 
+/**
+ * The API returns every collection inside a named envelope, e.g.
+ * `{"products": [...]}` rather than a bare `[...]`. Screens read `data` as the
+ * collection itself, so the unwrapping happens here — in the one place every
+ * response passes through — instead of in each of the twenty-nine pages.
+ *
+ * A missing key yields an empty list rather than undefined, so a screen that
+ * maps over the result cannot crash on an unexpected response.
+ */
+function list<T>(request: Promise<AxiosResponse<any>>, key: string): Promise<AxiosResponse<T[]>> {
+  return request.then((res) => ({
+    ...res,
+    data: Array.isArray(res.data) ? res.data : (res.data?.[key] ?? []),
+  }));
+}
+
+/** field unwraps a single named value from a response envelope. */
+function field<T>(request: Promise<AxiosResponse<any>>, key: string): Promise<AxiosResponse<T>> {
+  return request.then((res) => ({
+    ...res,
+    data: res.data?.[key] !== undefined ? res.data[key] : res.data,
+  }));
+}
+
+/**
+ * documentWithLines unwraps a header-plus-lines response — `{"purchase_order": {...},
+ * "items": [...]}` — into one object carrying both.
+ *
+ * Using `field` here instead returns the header alone and silently drops the
+ * lines. That disabled four features at once with no error anywhere: the
+ * purchase-order detail view, receiving against a PO, creating a GRN from a PO,
+ * and the GRN detail view all rendered "no items" for documents that had them.
+ * A dropped key is invisible, which is why the unwrapping belongs in one place
+ * that knows the shape.
+ */
+function documentWithLines<T>(request: Promise<AxiosResponse<any>>, key: string): Promise<AxiosResponse<T>> {
+  return request.then((res) => ({
+    ...res,
+    data: { ...(res.data?.[key] ?? res.data), items: res.data?.items ?? [] },
+  }));
+}
+
 export const storeApi = {
-  list: () => api.get('/stores'),
+  list: () => list<Store>(api.get('/stores'), 'stores'),
   get: (id: string) => api.get(`/stores/${id}`),
   update: (
     id: string,
@@ -38,12 +125,31 @@ export const storeApi = {
   ) => api.put(`/stores/${id}`, data),
 };
 
+export const terminalApi = {
+  /**
+   * Terminals are new. Each one owns an invoice series, so a sale has to say
+   * which counter raised it — the number printed on the bill carries the
+   * terminal's code.
+   */
+  list: (storeId: string) => list<Terminal>(api.get(`/stores/${storeId}/terminals`), 'terminals'),
+  create: (storeId: string, data: { code: string; name: string }) =>
+    api.post(`/stores/${storeId}/terminals`, data),
+  /**
+   * Retiring a counter. There is no delete: a terminal's code is embedded in
+   * every invoice number it ever issued (INV/T1/2026-27/00001), so the row has
+   * to outlive the counter for those bills to remain explicable.
+   */
+  deactivate: (storeId: string, terminalId: string) =>
+    api.post(`/stores/${storeId}/terminals/${terminalId}/deactivate`),
+};
+
 export const authApi = {
   login: (username: string, password: string) =>
     api.post('/auth/login', { username, password }),
+  logout: () => api.post('/auth/logout'),
   register: (username: string, password: string, role: string, storeId: string) =>
     api.post('/auth/register', { username, password, role, store_id: storeId }),
-  listUsers: (storeId: string) => api.get('/auth/users', { params: { store_id: storeId } }),
+  listUsers: (storeId: string) => list<any>(api.get('/auth/users', { params: { store_id: storeId } }), 'users'),
   deactivateUser: (id: string) => api.post(`/auth/users/${id}/deactivate`),
   activateUser: (id: string) => api.post(`/auth/users/${id}/activate`),
   changePassword: (oldPassword: string, newPassword: string) =>
@@ -51,46 +157,93 @@ export const authApi = {
 };
 
 export const categoryApi = {
-  list: (storeId: string) => api.get(`/categories?store_id=${storeId}`),
+  list: (storeId: string) => list<any>(api.get('/categories', { params: { store_id: storeId } }), 'categories'),
   create: (data: { name: string; name_hi?: string; name_kn?: string; hsn_code?: string }) =>
     api.post('/categories', data),
 };
 
 export const productApi = {
   list: (params: { store_id: string; category_id?: string; barcode?: string; search?: string }) =>
-    api.get('/products', { params }),
-  get: (id: string, storeId: string) => api.get(`/products/${id}?store_id=${storeId}`),
-  listPackingUnits: (productId: string) => api.get(`/products/${productId}/packing-units`),
-  createPackingUnit: (
+    list<Product>(api.get('/products', { params }), 'products'),
+  get: (id: string, storeId: string) => api.get(`/products/${id}`, { params: { store_id: storeId } }),
+  /**
+   * The units a product may be transacted in: loose by the kilo, a 5 kg bag, a
+   * 25 kg sack. `qty_in_base` is how many of the product's own stocking unit
+   * one of these amounts to, which is what turns a sale into a stock movement.
+   */
+  listUnits: (productId: string) => list<any>(api.get(`/products/${productId}/units`), 'units'),
+  createUnit: (
     productId: string,
-    data: { label: string; qty_in_parent?: number; barcode?: string; parent_unit_id?: string; sort_order?: number }
-  ) => api.post(`/products/${productId}/packing-units`, data),
-  create: (data: Partial<Product>) =>
-    api.post('/products', data),
-  update: (id: string, data: Partial<Product>) =>
-    api.put(`/products/${id}`, data),
-  setPrice: (data: { product_id: string; store_id: string; mrp: number; cost_price: number; sell_price: number; wholesale_sell_price?: number }) =>
-    api.post('/products/price', data),
+    data: {
+      label: string;
+      qty_in_base: number;
+      uom_id?: string;
+      barcode?: string;
+      is_default?: boolean;
+      is_sellable?: boolean;
+      is_purchasable?: boolean;
+      sort_order?: number;
+    }
+  ) => api.post(`/products/${productId}/units`, data),
+  updateUnit: (productId: string, unitId: string, data: Record<string, unknown>) =>
+    api.put(`/products/${productId}/units/${unitId}`, data),
+  setDefaultUnit: (productId: string, unitId: string) =>
+    api.post(`/products/${productId}/units/${unitId}/default`),
+  deactivateUnit: (productId: string, unitId: string) =>
+    api.post(`/products/${productId}/units/${unitId}/deactivate`),
+  activateUnit: (productId: string, unitId: string) =>
+    api.post(`/products/${productId}/units/${unitId}/activate`),
+  /** Every unit with its price, including units that have none yet. */
+  prices: (productId: string, storeId: string) =>
+    list<any>(api.get(`/products/${productId}/prices`, { params: { store_id: storeId } }), 'prices'),
+  create: (data: Partial<Product>) => api.post('/products', data),
+  update: (id: string, data: Partial<Product>) => api.put(`/products/${id}`, data),
+  deactivate: (id: string) => api.post(`/products/${id}/deactivate`),
+  activate: (id: string) => api.post(`/products/${id}/activate`),
+  /**
+   * A price belongs to a unit, not to a product. That is the change that lets a
+   * 25 kg sack cost less per kilo than the loose scoop — which is the whole
+   * reason a shop sells bulk.
+   */
+  setPrice: (data: {
+    product_id: string;
+    product_unit_id: string;
+    store_id: string;
+    mrp: number;
+    cost_price: number;
+    sell_price: number;
+    wholesale_sell_price?: number;
+  }) => api.post('/products/price', data),
 };
 
 export const invoiceApi = {
   list: (params: { store_id: string; start_date?: string; end_date?: string; customer_id?: string }) =>
-    api.get('/invoices', { params }),
+    list<Invoice>(api.get('/invoices', { params }), 'invoices'),
   get: (id: string) => api.get(`/invoices/${id}`),
-  create: (data: Partial<Invoice>) =>
-    api.post('/invoices', data),
+  /**
+   * A sale now carries the terminal that raised it and, optionally, an
+   * idempotency key. The key is what makes a retried request safe: the same
+   * key returns the original bill rather than raising a second one, which is
+   * how a double-tapped Checkout stops producing two invoices.
+   */
+  create: (data: Partial<Invoice> & { terminal_id: string }, idempotencyKey?: string) =>
+    api.post('/invoices', data, {
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    }),
   void: (id: string) => api.post(`/invoices/${id}/void`),
+  // Returns the envelope {month, invoices}: the screen reads both.
   exportGSTR1: (storeId: string, month: string) =>
-    api.get(`/invoices/gstr1?store_id=${storeId}&month=${month}`),
+    api.get('/invoices/gstr1', { params: { store_id: storeId, month } }),
   markGSTR1Filed: (storeId: string, month: string) =>
     api.post('/invoices/gstr1/mark-filed', { store_id: storeId, month }),
 };
 
 export const customerApi = {
   list: (storeId: string, search?: string) =>
-    api.get(`/customers?store_id=${storeId}&search=${search || ''}`),
-  create: (data: Partial<Customer>) =>
-    api.post('/customers', data),
+    list<Customer>(api.get('/customers', { params: { store_id: storeId, search: search || undefined } }), 'customers'),
+  get: (id: string) => api.get(`/customers/${id}`),
+  outstanding: (id: string) => field<number>(api.get(`/customers/${id}/outstanding`), 'outstanding'),
+  create: (data: Partial<Customer>) => api.post('/customers', data),
   update: (id: string, data: Partial<Pick<Customer, 'name' | 'name_hi' | 'phone' | 'address' | 'gstin' | 'credit_limit' | 'is_wholesale'>>) =>
     api.put(`/customers/${id}`, data),
 };
@@ -98,157 +251,221 @@ export const customerApi = {
 export const barcodeApi = {
   lookup: (barcode: string, storeId: string) =>
     api.get(`/barcodes/lookup/${encodeURIComponent(barcode)}`, { params: { store_id: storeId } }),
-  generate: (data: { category_id?: string; product_id?: string; prefix?: string }) =>
-    api.post('/barcodes/generate', data),
+
+  /**
+   * Suggests an in-store barcode for loose goods that arrive without one.
+   * The 89 prefix is India's GS1 country code, so a suggestion is not mistaken
+   * for a manufacturer's own number. It is only a suggestion: the shopkeeper
+   * can overwrite it, and the database's unique index rejects a collision.
+   */
+  suggest: (): string => {
+    let digits = '';
+    for (let i = 0; i < 11; i += 1) {
+      digits += Math.floor(Math.random() * 10).toString();
+    }
+    return `89${digits}`;
+  },
 };
 
 export const vendorApi = {
-  list: (search?: string) => api.get('/vendors', { params: search ? { search } : {} }),
+  /**
+   * `include_inactive` is what makes a deactivated vendor reachable again: the
+   * listing hides them by default, so without it deactivation is a one-way door
+   * from the screen that offers it.
+   *
+   * `limit` is passed through because the server defaults to 100 and the
+   * screens search only what arrived — a silent cap is worse than a stated one.
+   */
+  list: (params?: { search?: string; include_inactive?: boolean; limit?: number }) =>
+    list<any>(api.get('/vendors', { params: params ?? {} }), 'vendors'),
   get: (id: string) => api.get(`/vendors/${id}`),
   create: (data: {
-    name: string;
-    phone?: string;
-    address?: string;
-    gstin?: string;
-    state?: string;
-    credit_days?: number;
-    credit_limit?: number;
+    name: string; phone?: string; address?: string; gstin?: string;
+    state?: string; credit_days?: number; credit_limit?: number;
   }) => api.post('/vendors', data),
   update: (id: string, data: {
-    name?: string;
-    phone?: string;
-    address?: string;
-    gstin?: string;
-    state?: string;
-    credit_days?: number;
-    credit_limit?: number;
+    name?: string; phone?: string; address?: string; gstin?: string;
+    state?: string; credit_days?: number; credit_limit?: number;
   }) => api.put(`/vendors/${id}`, data),
+  deactivate: (id: string) => api.post(`/vendors/${id}/deactivate`),
 };
 
 export const paymentApi = {
   addSplitPayments: (data: { invoice_id: string; payments: { payment_mode: string; amount: number; reference?: string }[] }) =>
     api.post('/payments/split', data),
   getInvoicePayments: (invoiceId: string) =>
-    api.get(`/payments/invoice/${invoiceId}`),
+    list<any>(api.get(`/payments/invoice/${invoiceId}`), 'payments'),
   getSettlement: (params: { store_id: string; date?: string }) =>
     api.get('/payments/settlement', { params }),
 };
 
 export const returnApi = {
-  list: (storeId: string) => api.get(`/returns?store_id=${storeId}`),
+  list: (storeId: string) => list<any>(api.get('/returns', { params: { store_id: storeId } }), 'returns'),
   create: (data: { product_id: string; quantity: number; amount: number; reason: string; refund_mode?: string; store_id: string; invoice_id?: string }) =>
     api.post('/returns', data),
-  approve: (id: string, storeId: string) => api.post(`/returns/${id}/approve?store_id=${storeId}`),
+  approve: (id: string, storeId: string) => api.post(`/returns/${id}/approve`, null, { params: { store_id: storeId } }),
 };
 
 export const lossApi = {
-  list: (params: { store_id: string; loss_type?: string }) => api.get('/losses', { params }),
+  list: (params: { store_id: string; loss_type?: string }) => list<any>(api.get('/losses', { params }), 'losses'),
   create: (data: { product_id: string; store_id: string; batch_no?: string; quantity: number; loss_type: string; reason?: string }) =>
     api.post('/losses', data),
 };
 
 export const stockApi = {
-  list: (storeId: string) => api.get('/stock', { params: { store_id: storeId } }),
-  low: (storeId: string) => api.get('/stock/low', { params: { store_id: storeId } }),
-  adjustments: (storeId: string) => api.get('/stock/adjustments', { params: { store_id: storeId } }),
+  list: (storeId: string) => list<any>(api.get('/stock', { params: { store_id: storeId } }), 'stock'),
+  low: (storeId: string) => list<any>(api.get('/stock/low', { params: { store_id: storeId } }), 'low_stock'),
+  adjustments: (storeId: string) => list<any>(api.get('/stock/adjustments', { params: { store_id: storeId } }), 'adjustments'),
+  productStock: (productId: string, storeId: string) =>
+    list<any>(api.get(`/stock/product/${productId}`, { params: { store_id: storeId } }), 'batches'),
+  /**
+   * Move stock in or out.
+   *
+   * Give EITHER `quantity` in the product's base unit, OR `product_unit_id`
+   * with `unit_qty` — "book in 8 sacks" rather than "book in 200". The server
+   * multiplies by the unit's size and records what was actually meant, so the
+   * history reads "8 x 25 kg sack" instead of a bare 200.
+   */
   adjust: (data: {
-    product_id: string;
-    store_id: string;
-    batch_no?: string;
-    quantity: number;
-    type: string;
-    reason: string;
-    cost_price?: number;
-    expiry_date?: string;
-    mfg_date?: string;
+    product_id: string; store_id: string; batch_no?: string;
+    quantity?: number; product_unit_id?: string; unit_qty?: number;
+    type: string; reason: string; cost_price?: number; expiry_date?: string; mfg_date?: string;
   }) => api.post('/stock/adjust', data),
-  transfer: (data: {
-    product_id: string;
-    from_store_id: string;
-    to_store_id: string;
-    quantity: number;
-    batch_no?: string;
-  }) => api.post('/stock/transfer', data),
-  convert: (data: {
-    product_id: string;
-    store_id: string;
-    from_batch_no: string;
-    to_unit_id: string;
-    quantity: number;
-  }) => api.post('/stock/convert', data),
+  /**
+   * Move a batch to another store.
+   *
+   * The source goes in the query string, NOT the body. The server takes it from
+   * the store the middleware already authorised and ignores any store id in the
+   * body — deliberately, so a caller cannot name a shop it may not touch. Sent
+   * as `from_store_id` in the body it was silently discarded, and the transfer
+   * came out of whichever store the user happened to be signed in to while the
+   * screen showed them moving another's stock.
+   */
+  transfer: (data: { product_id: string; from_store_id?: string; to_store_id: string; quantity: number; batch_no?: string; reason?: string }) =>
+    api.post(
+      '/stock/transfer',
+      { product_id: data.product_id, to_store_id: data.to_store_id, quantity: data.quantity, batch_no: data.batch_no, reason: data.reason },
+      data.from_store_id ? { params: { store_id: data.from_store_id } } : undefined
+    ),
 };
 
+// `convert` is deliberately absent. It used to split a batch into another unit,
+// which made sense when each pack had its own stock. Stock is now a single pool
+// in the base unit, so there is nothing to convert between — and the endpoint
+// is gone from the server, so keeping the method here would only aim a button
+// at a 404.
+
 export const uomApi = {
-  list: () => api.get('/uoms'),
+  list: (familyId?: string) => list<any>(api.get('/uoms', { params: { family_id: familyId } }), 'units'),
+  create: (data: { code: string; name: string; decimal_places?: number; family_id: string; factor_to_base: number }) =>
+    api.post('/uoms', data),
+  update: (id: string, data: { name?: string; decimal_places?: number; factor_to_base?: number }) =>
+    api.put(`/uoms/${id}`, data),
+  deactivate: (id: string) => api.post(`/uoms/${id}/deactivate`),
+  activate: (id: string) => api.post(`/uoms/${id}/activate`),
+};
+
+/**
+ * Unit families group the units that can convert between each other — weight,
+ * volume, count, length, area, and whatever a trade adds. Units convert only
+ * within a family, which is what makes selling rice by the litre impossible
+ * rather than merely discouraged.
+ */
+export const unitFamilyApi = {
+  list: () => list<any>(api.get('/unit-families'), 'families'),
+  create: (data: { code: string; name: string }) => api.post('/unit-families', data),
+  update: (id: string, data: { name: string }) => api.put(`/unit-families/${id}`, data),
+  setBaseUnit: (id: string, uomId: string) => api.post(`/unit-families/${id}/base-unit`, { uom_id: uomId }),
 };
 
 export const analyticsApi = {
   dashboard: (params: { store_id: string; range?: string }) =>
     api.get('/analytics/dashboard', { params }),
   salesByCategory: (params: { store_id: string; start_date: string; end_date: string }) =>
-    api.get('/analytics/sales/category', { params }),
+    list<any>(api.get('/analytics/sales/category', { params }), 'categories'),
   topProducts: (params: { store_id: string; start_date: string; end_date: string; limit?: number }) =>
-    api.get('/analytics/sales/top', { params }),
+    list<any>(api.get('/analytics/sales/top', { params }), 'products'),
   hourlySales: (params: { store_id: string; date: string }) =>
-    api.get('/analytics/sales/hourly', { params }),
+    list<any>(api.get('/analytics/sales/hourly', { params }), 'hours'),
   paymentBreakup: (params: { store_id: string; start_date: string; end_date: string }) =>
-    api.get('/analytics/sales/payment', { params }),
+    list<any>(api.get('/analytics/sales/payment', { params }), 'payment_modes'),
   multiStore: (params: { store_ids?: string; range?: string }) =>
     api.get('/analytics/multi-store', { params }),
 };
 
 export const purchaseApi = {
-  list: (params: { store_id: string; status?: string }) => api.get('/purchases', { params }),
-  get: (id: string) => api.get(`/purchases/${id}`),
+  list: (params: { store_id: string; status?: string; vendor_id?: string; limit?: number }) =>
+    list<any>(api.get('/purchases', { params }), 'purchase_orders'),
+  get: (id: string) => documentWithLines<any>(api.get(`/purchases/${id}`), 'purchase_order'),
+  /**
+   * An order is placed in the unit the shop actually buys in — ten sacks, not
+   * two hundred and fifty kilos — so `unit_qty` counts buying units and `rate`
+   * is the price of one of them. `quantity` is the legacy alias for `unit_qty`,
+   * kept so an older caller still works.
+   *
+   * `uom_id` is a unit of MEASURE and is not `product_unit_id`; they are
+   * different things and setting one for the other silently prices the line
+   * against the wrong pack.
+   */
   create: (data: {
-    store_id: string;
-    vendor_id: string;
-    order_date: string;
-    expected_date?: string;
-    items: { product_id: string; quantity: number; uom_id?: string; rate: number; discount?: number; total?: number }[];
+    store_id: string; vendor_id: string; terminal_id: string; order_date: string; expected_date?: string;
+    items: {
+      product_id: string;
+      product_unit_id?: string;
+      unit_qty: number;
+      quantity?: number;
+      uom_id?: string;
+      rate: number;
+      discount?: number;
+      total?: number;
+    }[];
   }) => api.post('/purchases', data),
+  /**
+   * Receiving. Quantities are counted in `product_unit_id`, which defaults to
+   * the unit the order line was placed in, so a clerk confirming ten sacks
+   * against the paperwork in their hand means ten sacks. `cost_price` is per
+   * buying unit and the server divides it down to the stocking unit.
+   */
   receive: (data: {
-    po_id: string;
-    store_id: string;
-    items: { product_id: string; quantity: number; batch_no?: string; cost_price?: number }[];
+    po_id: string; store_id: string;
+    items: {
+      product_id: string;
+      product_unit_id?: string;
+      received_qty: number;
+      rejected_qty?: number;
+      accepted_qty?: number;
+      reason?: string;
+      quantity?: number;
+      batch_no?: string;
+      cost_price?: number;
+    }[];
   }) => api.post('/purchases/receive', data),
   cancel: (id: string) => api.post(`/purchases/cancel/${id}`),
 };
 
-export const syncApi = {
-  pending: (storeId: string) => api.get('/sync/pending', { params: { store_id: storeId } }),
-  markSynced: (record_ids: string[]) => api.post('/sync/mark', { record_ids }),
-  push: (data: {
-    table_name: string;
-    record_id: string;
-    operation: string;
-    store_id: string;
-    data?: unknown;
-  }) => api.post('/sync/push', data),
-  resolveConflict: (data: { table_name: string; record_id: string; resolution: 'local_wins' | 'remote_wins' }) =>
-    api.post('/sync/conflict', data),
-};
-
 export const expiryApi = {
   expiring: (params: { store_id: string; days?: string }) =>
-    api.get('/expiry/expiring', { params }),
-  expired: (params: { store_id: string }) => api.get('/expiry/expired', { params }),
+    list<any>(api.get('/expiry/expiring', { params }), 'batches'),
+  expired: (params: { store_id: string }) => list<any>(api.get('/expiry/expired', { params }), 'batches'),
 };
 
 export const grnApi = {
-  list: (params: { store_id: string; po_id?: string }) => api.get('/grn', { params }),
-  get: (id: string) => api.get(`/grn/${id}`),
+  list: (params: { store_id: string; po_id?: string; limit?: number }) =>
+    list<any>(api.get('/grn', { params }), 'goods_receipts'),
+  get: (id: string) => documentWithLines<any>(api.get(`/grn/${id}`), 'goods_receipt'),
+  /** The same operation as purchaseApi.receive, and the same unit rules. */
   create: (data: {
-    po_id: string;
-    received_date: string;
-    notes?: string;
+    po_id: string; received_date: string; notes?: string;
     items: {
       product_id: string;
+      product_unit_id?: string;
       ordered_qty?: number;
       received_qty: number;
       accepted_qty?: number;
       rejected_qty?: number;
       reason?: string;
+      batch_no?: string;
+      cost_price?: number;
     }[];
   }) => api.post('/grn', data),
 };
@@ -256,63 +473,65 @@ export const grnApi = {
 export const reportApi = {
   getProfitLoss: (params: { store_id: string; start_date?: string; end_date?: string }) =>
     api.get('/reports/profit-loss', { params }),
-  getCreditAging: (params: { store_id: string }) =>
-    api.get('/reports/credit-aging', { params }),
-  getGSTR3B: (params: { store_id: string; month: string }) =>
-    api.get('/reports/gstr-3b', { params }),
+  getCreditAging: (params: { store_id: string }) => api.get('/reports/credit-aging', { params }),
+  getGSTR3B: (params: { store_id: string; month: string }) => api.get('/reports/gstr-3b', { params }),
 };
 
 export const auditApi = {
   list: (params: { store_id: string; user_id?: string; table?: string; limit?: string }) =>
-    api.get('/audit', { params }),
+    list<any>(api.get('/audit', { params }), 'entries'),
+  // The resources the trail mentions, for the filter to offer. Asking the
+  // server keeps the options from drifting out of step with what it records.
+  tables: (storeId: string) =>
+    list<string>(api.get('/audit/tables', { params: { store_id: storeId } }), 'tables'),
 };
 
 export const creditApi = {
-  list: (params: { store_id: string; customer_id?: string }) => api.get('/credit', { params }),
-  payment: (data: { customer_id: string; amount: number; method: string; notes?: string }) =>
+  list: (params: { store_id: string; customer_id?: string }) =>
+    list<any>(api.get('/credit', { params }), 'entries'),
+  overdue: (storeId: string) => list<any>(api.get('/credit/overdue', { params: { store_id: storeId } }), 'customers'),
+  payment: (data: { customer_id: string; amount: number; method?: string; notes?: string }) =>
     api.post('/credit/payment', data),
 };
 
 export const expenseApi = {
-  list: (params: { store_id: string; start_date?: string; end_date?: string; category_id?: string }) =>
-    api.get('/expenses', { params }),
+  list: (params: { store_id: string; start_date?: string; end_date?: string; category_id?: string; limit?: number }) =>
+    list<any>(api.get('/expenses', { params }), 'expenses'),
   create: (data: { store_id: string; category_id: string; amount: number; description?: string; expense_date: string }) =>
     api.post('/expenses', data),
-  getCategories: () => api.get('/expenses/categories'),
+  getCategories: () => list<any>(api.get('/expenses/categories'), 'categories'),
+  /**
+   * Without this an expense could not be recorded at all on a fresh install:
+   * every expense needs a category, and there was no way to make the first one.
+   */
+  createCategory: (data: { name: string; description?: string }) =>
+    api.post('/expenses/categories', data),
   getSummary: (params: { store_id: string; start_date?: string; end_date?: string }) =>
     api.get('/expenses/summary', { params }),
 };
 
 export const vendorPaymentApi = {
-  list: (params: { store_id: string; vendor_id?: string }) =>
-    api.get('/vendor-payments', { params }),
+  list: (params: { store_id: string; vendor_id?: string; limit?: number }) =>
+    list<any>(api.get('/vendor-payments', { params }), 'payments'),
   create: (data: {
-    vendor_id: string;
-    po_id?: string;
-    amount: number;
-    payment_mode: string;
-    reference?: string;
-    payment_date: string;
-    notes?: string;
-    store_id: string;
+    vendor_id: string; po_id?: string; amount: number; payment_mode: string;
+    reference?: string; payment_date: string; notes?: string; store_id: string;
   }) => api.post('/vendor-payments', data),
   summary: (params: { store_id: string; start_date?: string; end_date?: string }) =>
     api.get('/vendor-payments/summary', { params }),
 };
 
 export const purchaseReturnApi = {
-  list: (params: { store_id: string; vendor_id?: string }) =>
-    api.get('/purchase-returns', { params }),
+  list: (params: { store_id: string; vendor_id?: string; status?: string; limit?: number }) =>
+    list<any>(api.get('/purchase-returns', { params }), 'purchase_returns'),
+  get: (id: string, storeId: string) =>
+    documentWithLines<any>(api.get(`/purchase-returns/${id}`, { params: { store_id: storeId } }), 'purchase_return'),
   create: (data: {
-    po_id?: string;
-    vendor_id: string;
-    store_id: string;
-    return_date: string;
-    reason?: string;
+    po_id?: string; vendor_id: string; store_id: string; return_date: string; reason?: string;
     items: { product_id: string; quantity: number; rate: number }[];
   }) => api.post('/purchase-returns', data),
   approve: (id: string, storeId: string) =>
-    api.post(`/purchase-returns/${id}/approve?store_id=${storeId}`),
+    api.post(`/purchase-returns/${id}/approve`, null, { params: { store_id: storeId } }),
 };
 
 export default api;
