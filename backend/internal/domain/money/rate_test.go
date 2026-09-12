@@ -137,7 +137,7 @@ func TestRateUnmarshalJSONAvoidsFloat(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestRateScanFromDriverForms covers what a NUMERIC column actually hands back:
-// []byte or string from pgx, and a float64 from the legacy SQLite REAL column.
+// []byte or string from pgx. A float64 is refused.
 func TestRateScanFromDriverForms(t *testing.T) {
 	tests := []struct {
 		name string
@@ -147,7 +147,6 @@ func TestRateScanFromDriverForms(t *testing.T) {
 		{"bytes", []byte("5.00"), "5"},
 		{"string", "12.50", "12.5"},
 		{"int64", int64(18), "18"},
-		{"float64 from a legacy REAL column", 5.000000000000001, "5"},
 		{"null is zero", nil, "0"},
 		{"blank is zero", "", "0"},
 	}

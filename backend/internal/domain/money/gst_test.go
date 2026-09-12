@@ -342,9 +342,8 @@ func TestRateHelpers(t *testing.T) {
 		want string
 	}{
 		{"from int", RateFromInt(18), "18"},
-		{"from float legacy column", RateFromFloat(0.25), "0.25"},
-		{"from float with noise", RateFromFloat(5.000000000000001), "5"},
-		{"from float 12", RateFromFloat(12), "12"},
+		{"from string cess", MustRateFromString("0.25"), "0.25"},
+		{"from string percent sign", MustRateFromString("12%"), "12"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

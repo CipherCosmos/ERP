@@ -66,14 +66,6 @@ func QuantityFromInt(units int64) Quantity { return Quantity{d: decimal.NewFromI
 // QuantityFromDecimal wraps a decimal.Decimal without rounding it.
 func QuantityFromDecimal(d decimal.Decimal) Quantity { return Quantity{d: d} }
 
-// QuantityFromFloat converts a float64 to a quantity, rounding to
-// QuantityScale to discard binary residue. Like Money.FromFloat this is a
-// migration affordance for the legacy REAL columns and the handlers that still
-// pass float64; it is not for new code.
-func QuantityFromFloat(f float64) Quantity {
-	return Quantity{d: decimal.NewFromFloat(f).Round(QuantityScale)}
-}
-
 // SumQuantity adds any number of quantities exactly.
 func SumQuantity(quantities ...Quantity) Quantity {
 	total := Quantity{}
@@ -166,18 +158,14 @@ func (q Quantity) String() string { return q.d.String() }
 // for example "2.500". This is the storage and wire form.
 func (q Quantity) StringFixed() string { return q.d.StringFixed(QuantityScale) }
 
-// InexactFloat64 returns the quantity as a float64. Not exact; for legacy
-// handlers and the legacy REAL columns only.
-func (q Quantity) InexactFloat64() float64 { return q.d.InexactFloat64() }
-
 // ---------------------------------------------------------------------------
 // database/sql
 // ---------------------------------------------------------------------------
 
 // Scan implements sql.Scanner. It handles the []byte and string forms a
 // Postgres NUMERIC arrives as, the int64 some drivers use for integral values,
-// NULL as zero, and float64 from the legacy SQLite REAL columns. See
-// Money.Scan for why float64 is accepted and rounded rather than rejected.
+// and NULL as zero. A float64 is refused for the reason given on Money.Scan:
+// 0.1 kg three times must weigh exactly 0.3 kg.
 func (q *Quantity) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:
@@ -196,12 +184,8 @@ func (q *Quantity) Scan(src any) error {
 	case int:
 		*q = QuantityFromInt(int64(v))
 		return nil
-	case float64:
-		*q = QuantityFromFloat(v)
-		return nil
-	case float32:
-		*q = QuantityFromFloat(float64(v))
-		return nil
+	case float64, float32:
+		return fmt.Errorf("money: refusing to scan %T into Quantity: weights must not pass through binary floating point", src)
 	case decimal.Decimal:
 		*q = Quantity{d: v}
 		return nil

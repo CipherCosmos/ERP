@@ -28,8 +28,8 @@ type StoreChecker interface {
 
 // SessionReader exposes the identity the auth middleware established.
 //
-// It is an interface rather than a direct dependency so that this package does
-// not import the legacy auth middleware, which is still tied to SQLite.
+// It is an interface rather than a direct dependency so the scope check can be
+// tested with a stub session, without standing up authentication to get one.
 type SessionReader interface {
 	Role(c *gin.Context) string
 	StoreID(c *gin.Context) string

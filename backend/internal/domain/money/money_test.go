@@ -358,34 +358,6 @@ func TestPaiseAndFormat(t *testing.T) {
 	}
 }
 
-// TestFromFloatRepairsLegacyResidue: the migration door rounds away the binary
-// residue that stranded these entries in the first place.
-func TestFromFloatRepairsLegacyResidue(t *testing.T) {
-	tests := []struct {
-		in   float64
-		want string
-	}{
-		{999.9999999999999, "1000.00"},
-		{0.1 + 0.2, "0.30"},
-		{1234.5600000000001, "1234.56"},
-		{55.0, "55.00"},
-	}
-	for _, tt := range tests {
-		if got := FromFloat(tt.in).StringFixed(); got != tt.want {
-			t.Errorf("FromFloat(%v) = %s, want %s", tt.in, got, tt.want)
-		}
-	}
-
-	// The repaired value settles; the raw float does not.
-	amount := FromInt(1000)
-	if !FromFloat(999.9999999999999).GreaterThanOrEqual(amount) {
-		t.Fatal("a legacy paid_amount of 999.9999999999999 must settle a 1000.00 debt after repair")
-	}
-	if 999.9999999999999 >= 1000.0 {
-		t.Fatal("float64 comparison unexpectedly true; the defect premise is wrong")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // database/sql
 // ---------------------------------------------------------------------------
@@ -407,10 +379,11 @@ func TestMoneyScan(t *testing.T) {
 		{"int64", int64(1500), "1500.00", false},
 		{"int", 7, "7.00", false},
 		{"nil is zero", nil, "0.00", false},
-		// Legacy SQLite REAL, accepted and repaired on the way in.
-		{"float64", 99.5, "99.50", false},
-		{"float64 residue", 999.9999999999999, "1000.00", false},
-		{"float32", float32(2.5), "2.50", false},
+		// A float is refused, not repaired. Reaching this arm means a rupee
+		// value travelled through binary floating point somewhere upstream.
+		{"float64", 99.5, "", true},
+		{"float64 residue", 999.9999999999999, "", true},
+		{"float32", float32(2.5), "", true},
 		{"decimal", decimal.RequireFromString("3.14"), "3.14", false},
 		{"garbage bytes", []byte("not-a-number"), "", true},
 		{"unsupported type", struct{}{}, "", true},

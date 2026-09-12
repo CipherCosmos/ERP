@@ -84,14 +84,6 @@ func RateFromInt(percent int64) Rate { return Rate{d: decimal.NewFromInt(percent
 // a rate computed elsewhere - a margin, a ratio - comes through.
 func RateFromDecimal(d decimal.Decimal) Rate { return Rate{d: d} }
 
-// RateFromFloat converts the legacy products.gst_rate REAL column to a rate,
-// rounding to three places. Every notified GST rate - 0, 0.25, 3, 5, 12, 18,
-// 28 - is exactly representable at that scale, so the rounding only discards
-// float noise and never a real digit.
-func RateFromFloat(percent float64) Rate {
-	return Rate{d: decimal.NewFromFloat(percent).Round(3)}
-}
-
 // ---------------------------------------------------------------------------
 // Comparison - exact, no epsilon
 // ---------------------------------------------------------------------------
@@ -137,9 +129,9 @@ func (r Rate) Round(places int32) Rate { return Rate{d: r.d.Round(places)} }
 // ---------------------------------------------------------------------------
 
 // Scan implements sql.Scanner so a Rate can be read from a NUMERIC column.
-// The accepted forms mirror Money.Scan, including the float64 that a legacy
-// SQLite REAL column still produces. A NULL scans to zero, which is the
-// faithful reading of a NOT NULL DEFAULT 0 column and of "no rate stated".
+// The accepted forms mirror Money.Scan, and a float64 is refused the same way.
+// A NULL scans to zero, which is the faithful reading of a NOT NULL DEFAULT 0
+// column and of "no rate stated".
 func (r *Rate) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:
@@ -158,12 +150,8 @@ func (r *Rate) Scan(src any) error {
 	case int:
 		*r = RateFromInt(int64(v))
 		return nil
-	case float64:
-		*r = RateFromFloat(v)
-		return nil
-	case float32:
-		*r = RateFromFloat(float64(v))
-		return nil
+	case float64, float32:
+		return fmt.Errorf("money: refusing to scan %T into Rate: a tax rate must not pass through binary floating point", src)
 	case decimal.Decimal:
 		*r = Rate{d: v}
 		return nil

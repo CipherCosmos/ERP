@@ -21,7 +21,6 @@ func TestQuantityConstructors(t *testing.T) {
 		{"zero value struct", Quantity{}, "0.000"},
 		{"negative for a stock reversal", MustQuantityFromString("-3"), "-3.000"},
 		{"from decimal", QuantityFromDecimal(decimal.RequireFromString("0.5")), "0.500"},
-		{"from float legacy column", QuantityFromFloat(2.5), "2.500"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -176,9 +175,9 @@ func TestQuantityScan(t *testing.T) {
 		{"int64", int64(50), "50.000", false},
 		{"int", 3, "3.000", false},
 		{"nil is zero", nil, "0.000", false},
-		{"float64 legacy column", 2.5, "2.500", false},
-		{"float64 residue", 0.1 + 0.2, "0.300", false},
-		{"float32", float32(0.75), "0.750", false},
+		{"float64", 2.5, "", true},
+		{"float64 residue", 0.1 + 0.2, "", true},
+		{"float32", float32(0.75), "", true},
 		{"decimal", decimal.RequireFromString("1.234"), "1.234", false},
 		{"garbage", []byte("two point five"), "", true},
 		{"unsupported type", map[string]int{}, "", true},

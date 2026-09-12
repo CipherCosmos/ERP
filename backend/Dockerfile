@@ -19,13 +19,9 @@ RUN go mod download
 
 COPY . .
 
-# No cgo. The only package that still links sqlite is internal/db, and it is
-# in neither ./cmd/server's nor ./cmd/migrate's import graph — the server talks
-# to Postgres through pgx, which is pure Go. A static binary means the runtime
-# image has no libc to keep patched and nothing to mismatch at start.
-#
-# Check before changing this:
-#   go list -deps ./cmd/server | grep sqlite3
+# No cgo. Every dependency is pure Go — the server talks to Postgres through
+# pgx — so a static binary is possible, and it means the runtime image has no
+# libc to keep patched and nothing to mismatch at start.
 ENV CGO_ENABLED=0 GOOS=linux
 
 # -trimpath keeps build paths out of the binary; -s -w drops the symbol table.

@@ -37,9 +37,7 @@ type Config struct {
 	ServerPort string
 	// DatabaseURL is the PostgreSQL connection string.
 	DatabaseURL string
-	// DatabasePath is the SQLite file the pre-migration server still uses.
 	// It goes away with that server at the cutover.
-	DatabasePath    string
 	JWTSecret       string
 	JWTExpiration   time.Duration
 	SyncInterval    time.Duration
@@ -56,7 +54,6 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		ServerPort:      getEnv("SERVER_PORT", "8080"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
-		DatabasePath:    getEnv("DATABASE_PATH", "./data/gbos.db"),
 		JWTSecret:       os.Getenv("JWT_SECRET"),
 		JWTExpiration:   24 * time.Hour,
 		SyncInterval:    5 * time.Minute,

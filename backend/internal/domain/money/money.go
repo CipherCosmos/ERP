@@ -117,21 +117,6 @@ func FromPaise(paise int64) Money { return Money{d: decimal.New(paise, -Scale)} 
 // FromDecimal wraps a decimal.Decimal without rounding it.
 func FromDecimal(d decimal.Decimal) Money { return Money{d: d} }
 
-// FromFloat converts a float64 to an amount, rounding to Scale to discard the
-// binary residue that made the value inexact in the first place.
-//
-// This exists only as a migration affordance. The legacy SQLite schema stores
-// money in REAL columns, and legacy handlers pass float64 around; this is the
-// door those values come through. Rounding on entry is deliberate and
-// load-bearing: a legacy paid_amount of 999.9999999999999 arrives here as
-// exactly 1000.00, which is what makes the stranded-settlement entries in
-// defect (2) closable on migration. Do not use it for new code paths - once a
-// column is NUMERIC, values arrive as text and this function has no business
-// being called.
-func FromFloat(f float64) Money {
-	return Money{d: decimal.NewFromFloat(f).Round(Scale)}
-}
-
 // Sum adds any number of amounts exactly. Summing an empty list yields zero.
 func Sum(amounts ...Money) Money {
 	total := Money{}
@@ -248,12 +233,6 @@ func (m Money) StringFixed() string { return m.d.StringFixed(Scale) }
 // Paise returns the amount as a whole number of paise, rounding to Scale first.
 func (m Money) Paise() int64 { return m.d.Round(Scale).Shift(Scale).IntPart() }
 
-// InexactFloat64 returns the amount as a float64. It is named for what it does:
-// the result is not exact and must never be fed back into a comparison or a
-// running total. It exists for handlers not yet migrated off float64 and for
-// serialising to the legacy SQLite REAL columns.
-func (m Money) InexactFloat64() float64 { return m.d.InexactFloat64() }
-
 // Format renders the amount for display with a rupee sign, for example
 // "₹1234.50". Negative amounts render as "-₹12.00".
 func (m Money) Format() string {
@@ -273,15 +252,11 @@ func (m Money) Format() string {
 // the driver, so both are the normal path. int64 turns up for integral values
 // on some drivers.
 //
-// float64 is accepted rather than rejected, and immediately rounded to Scale.
-// Rejecting it would be the purer choice, but this system is mid-migration:
-// every money column is still SQLite REAL today and every one of those reads
-// arrives as a float64. Rejecting would take the application down; accepting
-// and rounding actively repairs the value, turning a stored 999.9999999999999
-// into 1000.00 at the boundary. The rounding is safe because a legacy REAL
-// column never legitimately holds more than 2dp of information. Once the
-// Postgres cutover is complete this case should be deleted, and its removal
-// will be a no-op for correct data.
+// A float64 is refused, not rounded. Every money column in this schema is
+// NUMERIC and pgx hands those over as text, so a float64 arriving here means
+// something upstream routed a rupee value through binary floating point. That
+// is the class of defect this type exists to prevent, and it is worth an error
+// the moment it appears rather than a quietly repaired total.
 //
 // A NULL column scans to zero. Every money column in this schema is
 // NOT NULL DEFAULT 0 or semantically "no amount", so zero is the faithful
@@ -305,12 +280,8 @@ func (m *Money) Scan(src any) error {
 	case int:
 		*m = FromInt(int64(v))
 		return nil
-	case float64:
-		*m = FromFloat(v)
-		return nil
-	case float32:
-		*m = FromFloat(float64(v))
-		return nil
+	case float64, float32:
+		return fmt.Errorf("money: refusing to scan %T into Money: rupee values must not pass through binary floating point", src)
 	case decimal.Decimal:
 		*m = Money{d: v}
 		return nil
