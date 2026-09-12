@@ -2,8 +2,16 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi } from '../services/api';
-import { allocateInvoiceNumber, subscribe, syncNow, TillState, tillState } from '../services/offline/service';
-import { enqueue as enqueueSale, pendingCount } from '../services/offline/outbox';
+import {
+  allocateInvoiceNumber,
+  queueForSync,
+  subscribe,
+  syncNow,
+  TillState,
+  tillState,
+} from '../services/offline/service';
+import { pendingCount } from '../services/offline/outbox';
+import { recordSale } from '../services/offline/sales';
 import { Product, Customer, SaleUnit } from '../types';
 import { formatMoney } from '../utils/format';
 
@@ -510,7 +518,30 @@ export default function Billing() {
       // match the books. Each line carries its own description, HSN code and
       // tax rate, snapshotted when the sale was written, so the receipt needs
       // no lookup against a catalogue that may since have changed.
-      printReceipt(invoice, (data as any).items ?? []);
+      const soldLines = (data as any).items ?? [];
+      printReceipt(invoice, soldLines);
+
+      // Remember it. A customer comes back tomorrow with the goods and the
+      // connection has nothing to do with it, so the till has to be able to find
+      // the bill a return is coming back on whether or not it can reach the
+      // server. Failing to remember must not fail the sale, which has happened.
+      void recordSale({
+        key: invoice.invoice_no,
+        invoiceId: invoice.id,
+        billedAt: invoice.invoice_date ?? new Date().toISOString(),
+        total: Number(invoice.total ?? 0),
+        customerId: selectedCustomerId || null,
+        lines: soldLines.map((l: any) => ({
+          product_id: String(l.product_id ?? ''),
+          product_name: String(l.product_name ?? ''),
+          product_unit_id: l.product_unit_id ? String(l.product_unit_id) : undefined,
+          unit_label: String(l.unit_label ?? ''),
+          unit_qty: Number(l.unit_qty ?? 0),
+          quantity: Number(l.quantity ?? 0),
+          rate: Number(l.rate ?? 0),
+          total: Number(l.total ?? 0),
+        })),
+      }).catch(() => undefined);
 
       clearCart();
       setPaymentMode('cash');
@@ -587,9 +618,15 @@ export default function Billing() {
       billed_offline: true,
       billed_at: billedAt,
     };
+    // The ids travel with the line rather than being looked up again later. The
+    // cart is cleared moments after this, and matching a line back to it by
+    // product name would pick the wrong one the first time a shop stocks two
+    // things with the same name.
     const lines = cart.map((item) => {
       const rate = item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices);
       return {
+        product_id: item.product.id,
+        product_unit_id: item.unit?.id,
         product_name: item.product.name,
         hsn_code: (item.product as any).hsn_code ?? '',
         gst_rate: item.product.gst_rate,
@@ -602,7 +639,7 @@ export default function Billing() {
     });
 
     try {
-      await enqueueSale({
+      await queueForSync({
         key: checkoutKey.current,
         invoice,
         splitPayments: splitLines,
@@ -633,6 +670,22 @@ export default function Billing() {
 
     // Only now is the sale real from the cashier's point of view.
     checkoutKey.current = '';
+    void recordSale({
+      key: allocated.invoiceNo,
+      billedAt,
+      total: totals.total,
+      customerId: selectedCustomerId || null,
+      lines: lines.map((l) => ({
+        product_id: l.product_id,
+        product_name: l.product_name,
+        product_unit_id: l.product_unit_id,
+        unit_label: l.unit_label,
+        unit_qty: l.unit_qty,
+        quantity: l.quantity,
+        rate: l.rate,
+        total: l.total,
+      })),
+    }).catch(() => undefined);
     printReceipt(
       {
         invoice_no: allocated.invoiceNo,

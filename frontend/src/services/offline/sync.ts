@@ -33,6 +33,8 @@ export type SyncPorts = {
     body: Record<string, unknown>,
     idempotencyKey: string
   ) => Promise<{ invoice?: { id?: string; invoice_no?: string }; id?: string }>;
+  /** Sends a return taken at the counter while the connection was down. */
+  createReturn: (body: Record<string, unknown>, idempotencyKey: string) => Promise<unknown>;
   addSplitPayments: (
     invoiceId: string,
     payments: { payment_mode: string; amount: number }[],
@@ -40,6 +42,8 @@ export type SyncPorts = {
   ) => Promise<unknown>;
   /** Told the number the server confirmed, so the till's counter never goes back. */
   observeIssued?: (invoiceNo: string) => Promise<void>;
+  /** Told the server's id for a bill, so a later return can name it. */
+  noteSynced?: (invoiceNo: string, invoiceId: string) => Promise<void>;
 };
 
 /**
@@ -113,11 +117,25 @@ export async function flush(ports: SyncPorts): Promise<SyncOutcome> {
 }
 
 async function send(entry: OutboxEntry, ports: SyncPorts): Promise<void> {
+  // A return is one request and carries no number of its own: the server
+  // allocates nothing for it, and the invoice it references is named in the
+  // body. Everything else about it — the key, the ordering, what a failure
+  // means — is the same as a sale's.
+  if (entry.kind === 'return') {
+    await ports.createReturn(entry.invoice, entry.key);
+    return;
+  }
+
   const created = await ports.createInvoice(entry.invoice, entry.key);
   const invoiceId = created?.invoice?.id ?? created?.id;
   const invoiceNo = created?.invoice?.invoice_no;
   if (invoiceNo && ports.observeIssued) {
     await ports.observeIssued(invoiceNo);
+  }
+  // A return taken tomorrow against this bill has to be able to name it, and the
+  // server knows it by id.
+  if (invoiceNo && invoiceId && ports.noteSynced) {
+    await ports.noteSynced(invoiceNo, invoiceId);
   }
   const splits = entry.splitPayments;
   if (splits && splits.length > 0 && invoiceId) {

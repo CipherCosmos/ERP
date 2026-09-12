@@ -94,6 +94,13 @@ type Return struct {
 	Status    Status    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 
+	// RaisedOffline says the till took this while it could not reach the
+	// server, and RaisedAt when the customer was served by the till's clock.
+	// Both are stated by the till: the server hears about it later and a day's
+	// refunds are counted by when they happened, not when they arrived.
+	RaisedOffline bool      `json:"raised_offline"`
+	RaisedAt      time.Time `json:"raised_at"`
+
 	// RestoredBatch names the batch the goods went back into. It is filled in
 	// by an approval and is not a stored column: the returns table has neither
 	// a batch_no nor an invoice_item_id, so the link to a physical lot is
@@ -112,6 +119,11 @@ type ReturnInput struct {
 	Amount     money.Money
 	Reason     string
 	RefundMode string
+
+	// RaisedOffline and RaisedAt come from the till. See the fields of the same
+	// name on Return.
+	RaisedOffline bool
+	RaisedAt      *time.Time
 }
 
 // NewReturn validates and returns a pending return ready to persist.
@@ -147,16 +159,26 @@ func NewReturn(in ReturnInput) (Return, error) {
 		return Return{}, invalid("a reason is required for every return")
 	}
 
+	// The till's clock decides when this happened, because that is when the
+	// customer was served. An offline return reaches the server later and dating
+	// it on arrival would put a Tuesday's refunds in Wednesday's column.
+	raisedAt := time.Now()
+	if in.RaisedAt != nil {
+		raisedAt = *in.RaisedAt
+	}
+
 	return Return{
-		ID:         uuid.New(),
-		InvoiceID:  in.InvoiceID,
-		ProductID:  in.ProductID,
-		StoreID:    in.StoreID,
-		Quantity:   in.Quantity,
-		Amount:     in.Amount,
-		Reason:     reason,
-		RefundMode: strings.TrimSpace(in.RefundMode),
-		Status:     StatusPending,
+		ID:            uuid.New(),
+		InvoiceID:     in.InvoiceID,
+		ProductID:     in.ProductID,
+		StoreID:       in.StoreID,
+		Quantity:      in.Quantity,
+		Amount:        in.Amount,
+		Reason:        reason,
+		RefundMode:    strings.TrimSpace(in.RefundMode),
+		Status:        StatusPending,
+		RaisedOffline: in.RaisedOffline,
+		RaisedAt:      raisedAt,
 	}, nil
 }
 

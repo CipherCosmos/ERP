@@ -27,6 +27,7 @@ import (
 
 	billingdomain "gbos/internal/domain/billing"
 	"gbos/internal/domain/money"
+	"gbos/internal/domain/reconcile"
 	domain "gbos/internal/domain/salesreturn"
 	stockdomain "gbos/internal/domain/stock"
 	platform "gbos/internal/platform/postgres"
@@ -113,11 +114,29 @@ type Service struct {
 	db    DB
 	repo  Repository
 	stock StockMover
+	// exceptions may be nil, and a nil one records nothing. A return must not
+	// fail because reconciliation is not wired up.
+	exceptions ExceptionRecorder
+}
+
+// ExceptionRecorder records what the server could not verify about a return it
+// had to accept anyway. See the reconcile package for why a refund already paid
+// is flagged rather than refused.
+type ExceptionRecorder interface {
+	Insert(ctx context.Context, q platform.Querier, e reconcile.Exception) error
 }
 
 // New returns a returns-and-losses service.
 func New(db DB, r Repository, stock StockMover) *Service {
 	return &Service{db: db, repo: r, stock: stock}
+}
+
+// WithExceptions attaches the recorder for what the server cannot verify about a
+// return it accepts anyway.
+func (s *Service) WithExceptions(rec ExceptionRecorder) *Service {
+	clone := *s
+	clone.exceptions = rec
+	return &clone
 }
 
 // ---------------------------------------------------------------------------
@@ -142,30 +161,74 @@ func (s *Service) CreateReturn(ctx context.Context, in domain.ReturnInput) (doma
 	}
 
 	err = s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		// What could not be verified, when the till could not verify it. A
+		// return taken while the connection was down is a claim the cashier has
+		// already paid out on: the goods are back on the counter and the money
+		// has gone. Refusing it on sync leaves the shop having paid against a
+		// record it does not hold, so it lands and the doubt is written down.
+		var problem error
+
 		if ret.InvoiceID != nil {
 			sold, err := s.soldFrom(ctx, tx, ret)
 			if err != nil {
 				return err
 			}
 			if !sold.LineFound {
-				return fmt.Errorf("%w: invoice %s sold no %s", ErrNotOnInvoice, *ret.InvoiceID, ret.ProductID)
-			}
-			// The already-returned figure counts every return against this
-			// invoice line whatever its status, because a pending return is a
-			// claim on the same goods as an approved one.
-			outstanding := sold.SoldQuantity.Sub(sold.ReturnedQuantity)
-			if ret.Quantity.GreaterThan(outstanding) {
-				return fmt.Errorf("%w: %s sold, %s already returned, %s asked for",
-					ErrOverReturn, sold.SoldQuantity.StringFixed(),
-					sold.ReturnedQuantity.StringFixed(), ret.Quantity.StringFixed())
+				problem = fmt.Errorf("%w: invoice %s sold no %s", ErrNotOnInvoice, *ret.InvoiceID, ret.ProductID)
+			} else {
+				// The already-returned figure counts every return against this
+				// invoice line whatever its status, because a pending return is
+				// a claim on the same goods as an approved one.
+				outstanding := sold.SoldQuantity.Sub(sold.ReturnedQuantity)
+				if ret.Quantity.GreaterThan(outstanding) {
+					problem = fmt.Errorf("%w: %s sold, %s already returned, %s asked for",
+						ErrOverReturn, sold.SoldQuantity.StringFixed(),
+						sold.ReturnedQuantity.StringFixed(), ret.Quantity.StringFixed())
+				}
 			}
 		}
-		return s.repo.InsertReturn(ctx, tx, ret)
+		if problem != nil && !ret.RaisedOffline {
+			// At the counter, with a connection, this is something the cashier
+			// can act on before handing anything over.
+			return problem
+		}
+		if err := s.repo.InsertReturn(ctx, tx, ret); err != nil {
+			return err
+		}
+		if problem == nil {
+			return nil
+		}
+		return s.recordOverReturn(ctx, tx, ret, problem)
 	})
 	if err != nil {
 		return domain.Return{}, err
 	}
 	return ret, nil
+}
+
+// recordOverReturn writes the exception for a return the server could not
+// reconcile against its invoice.
+//
+// It does not fail the return. By the time it runs the customer has their money
+// and the goods are on the counter; an exception that could roll that back would
+// be a way of losing a refund to a bookkeeping note.
+func (s *Service) recordOverReturn(ctx context.Context, tx platform.Tx, ret domain.Return, problem error) error {
+	if s.exceptions == nil {
+		return nil
+	}
+	e, err := reconcile.New(ret.StoreID, reconcile.OverReturned,
+		"More came back than this invoice sold, or it never sold this at all. The till was offline "+
+			"and could not check. The money has gone, so decide whether to accept the return or "+
+			"recover it from the customer.")
+	if err != nil {
+		return err
+	}
+	product := ret.ProductID
+	e.ProductID = &product
+	e.InvoiceID = ret.InvoiceID
+	e.Expected = "a return within what the invoice sold"
+	e.Actual = problem.Error()
+	return s.exceptions.Insert(ctx, tx, e)
 }
 
 // Approve accepts a return and puts the goods back on the shelf, exactly once.

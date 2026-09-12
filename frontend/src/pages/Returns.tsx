@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
+import { loadStoredSnapshot, queueForSync } from '../services/offline/service';
 import { returnApi, productApi, uomApi } from '../services/api';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
@@ -95,6 +96,22 @@ export default function Returns() {
       const { data } = await productApi.list({ store_id: store.id });
       setProducts(data as unknown as Product[]);
     } catch (err) {
+      // Fall back to what the till already holds. A customer bringing goods back
+      // while the line is down still has to be served, and a form with an empty
+      // product list is no more use than no form at all.
+      const snapshot = await loadStoredSnapshot().catch(() => null);
+      if (snapshot?.products?.length) {
+        setProducts(
+          snapshot.products.map((p) => ({
+            id: p.id,
+            name: p.name,
+            hsn_code: p.hsn_code,
+            gst_rate: p.gst_rate,
+            allow_decimal: p.allow_decimal,
+          })) as unknown as Product[]
+        );
+        return;
+      }
       console.error('Failed to load products:', err);
     }
   }, [store]);
@@ -169,21 +186,56 @@ export default function Returns() {
     }
     setSaving(true);
     setSaveError(null);
+    const body = {
+      product_id: form.product_id,
+      quantity,
+      // Zero is legitimate: an exchange, or goods taken back as a goodwill
+      // gesture with nothing refunded.
+      amount: parseFloat(form.amount) || 0,
+      reason: form.reason.trim(),
+      refund_mode: form.refund_mode,
+      store_id: store.id,
+    };
+    const key = crypto.randomUUID();
     try {
-      await returnApi.create({
-        product_id: form.product_id,
-        quantity,
-        // Zero is legitimate: an exchange, or goods taken back as a goodwill
-        // gesture with nothing refunded.
-        amount: parseFloat(form.amount) || 0,
-        reason: form.reason.trim(),
-        refund_mode: form.refund_mode,
-        store_id: store.id,
-      });
+      await returnApi.create(body, key);
       close();
       setNotice('Return recorded. It stays pending until approved — the goods go back on the shelf then, not now.');
       await loadReturns();
     } catch (err: any) {
+      const offline = typeof navigator !== 'undefined' && !navigator.onLine;
+      const code = err?.code as string | undefined;
+      const networkFail =
+        !err?.response && (code === 'ERR_NETWORK' || code === 'ECONNABORTED' || err?.message === 'Network Error');
+      if (offline || networkFail) {
+        // The cashier is handing money over at the counter. The claim has to be
+        // written down before they are told it is recorded, and if that write
+        // fails the only honest answer is that it is not.
+        const raisedAt = new Date().toISOString();
+        try {
+          await queueForSync({
+            key,
+            kind: 'return',
+            invoice: { ...body, raised_offline: true, raised_at: raisedAt },
+            invoiceNo: '',
+            billedAt: raisedAt,
+            receipt: { invoice: {}, lines: [] },
+          });
+        } catch (queueErr: any) {
+          setSaveError(
+            `No connection, and this return could NOT be saved on the device (${queueErr?.message ?? 'storage unavailable'}). Nothing was recorded — do not pay the customer.`
+          );
+          setSaving(false);
+          return;
+        }
+        close();
+        setNotice(
+          'No connection. This return is saved on this device and will be sent when the network returns. ' +
+            'It stays pending until approved, so nothing has gone back on the shelf.'
+        );
+        setSaving(false);
+        return;
+      }
       setSaveError(err?.response?.data?.error || 'Could not record this return.');
     } finally {
       setSaving(false);

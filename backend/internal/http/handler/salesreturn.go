@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"gbos/internal/domain/money"
 	domain "gbos/internal/domain/salesreturn"
@@ -64,6 +65,12 @@ type salesReturnRequest struct {
 
 	Reason     string `json:"reason" binding:"required"`
 	RefundMode string `json:"refund_mode"`
+
+	// RaisedOffline and RaisedAt are what the till says about when and how this
+	// return was taken. The server cannot know either: it hears about an offline
+	// return later, and a day's refunds are counted by when they happened.
+	RaisedOffline bool    `json:"raised_offline"`
+	RaisedAt      *string `json:"raised_at"`
 }
 
 func (h *SalesReturn) CreateReturn(c *gin.Context) {
@@ -87,14 +94,26 @@ func (h *SalesReturn) CreateReturn(c *gin.Context) {
 		return
 	}
 
+	var raisedAt *time.Time
+	if req.RaisedAt != nil && *req.RaisedAt != "" {
+		parsed, err := time.Parse(time.RFC3339, *req.RaisedAt)
+		if err != nil {
+			httperr.Respond(c, httperr.BadRequest("raised_at must be a timestamp like 2026-04-30T18:45:00+05:30"))
+			return
+		}
+		raisedAt = &parsed
+	}
+
 	created, err := h.svc.CreateReturn(c.Request.Context(), domain.ReturnInput{
-		InvoiceID:  invoiceID,
-		ProductID:  productID,
-		StoreID:    storeID,
-		Quantity:   req.Quantity,
-		Amount:     req.Amount,
-		Reason:     req.Reason,
-		RefundMode: req.RefundMode,
+		InvoiceID:     invoiceID,
+		ProductID:     productID,
+		StoreID:       storeID,
+		Quantity:      req.Quantity,
+		Amount:        req.Amount,
+		Reason:        req.Reason,
+		RefundMode:    req.RefundMode,
+		RaisedOffline: req.RaisedOffline,
+		RaisedAt:      raisedAt,
 	})
 	if err != nil {
 		respondSalesReturn(c, err)

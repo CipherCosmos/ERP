@@ -136,11 +136,17 @@ down — and hands the customer a complete tax invoice. The sale is committed to
 an outbox before the cashier is told anything; if that write fails, the only
 honest answer is that nothing was recorded.
 
-A sale that has already happened is never refused on sync, only flagged. The
-goods left the shop and the money is in the drawer, so if the shelf disagrees the
-shelf is wrong, and if a customer went past a credit limit the till could not
-check, the debt is real. Both land and raise a reconciliation exception: a task
-for somebody, not an error. `GET /reconciliation` is the working list.
+Returns work the same way. The till keeps its own recent bills so a customer can
+be served against one with the line down, and a return is a claim: it stays
+pending, and approving it — which is what puts goods back on the shelf — is a
+separate decision made against what the shelf and the invoice actually say.
+
+Nothing that has already happened is refused on sync, only flagged. The goods
+left the shop and the money is in the drawer, so if the shelf disagrees the shelf
+is wrong; if a customer went past a credit limit the till could not check, the
+debt is real; if more came back than an invoice sold, the refund is already paid.
+All of them land and raise a reconciliation exception: a task for somebody, not
+an error. `GET /reconciliation` is the working list.
 
 The rule this rests on is one till per terminal code. Two devices billing on one
 code collide on the invoice-number index and fail loudly on sync, which is the

@@ -1,0 +1,6 @@
+-- Reverses 000008_offline_returns.
+--
+-- Postgres cannot drop a value from an enum, so the label stays. It is inert:
+-- nothing writes it once the code that does is gone, and leaving it costs
+-- nothing but a line in \dT+. Recreating the type would mean rewriting every
+-- row that references it, to remove a label no row uses.

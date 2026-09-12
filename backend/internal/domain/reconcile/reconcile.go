@@ -43,12 +43,15 @@ const (
 	PriceChanged Kind = "price_changed"
 	// StaleCatalogue: the till's snapshot was older than the shop allows.
 	StaleCatalogue Kind = "stale_catalogue"
+	// OverReturned: more came back than the invoice sold, or the invoice never
+	// sold it at all. The money has gone over the counter either way.
+	OverReturned Kind = "over_returned"
 )
 
 // Valid reports whether k is a kind this system records.
 func (k Kind) Valid() bool {
 	switch k {
-	case Oversold, CreditLimitExceeded, PriceChanged, StaleCatalogue:
+	case Oversold, CreditLimitExceeded, PriceChanged, StaleCatalogue, OverReturned:
 		return true
 	}
 	return false

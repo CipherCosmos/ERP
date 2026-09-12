@@ -7,9 +7,10 @@
  * a screen being unmounted mid-flight.
  */
 
-import { customerApi, invoiceApi, paymentApi, productApi, storeApi, terminalApi } from '../api';
+import { customerApi, invoiceApi, paymentApi, productApi, returnApi, storeApi, terminalApi } from '../api';
 import { allocateInvoiceNumber, observeIssuedNumber, peekNextNumber, seedCounter } from './numbering';
-import { OutboxEntry, pending, pendingCount, rejectedCount, retry } from './outbox';
+import { OutboxEntry, enqueue, pending, pendingCount, rejectedCount, retry } from './outbox';
+import { noteSynced } from './sales';
 import { Snapshot, isStale, ageInHours, loadSnapshot, saveSnapshot, toSnapshotProducts } from './snapshot';
 import { backoffMs, flush } from './sync';
 
@@ -148,11 +149,13 @@ export async function syncNow(): Promise<void> {
   try {
     const outcome = await flush({
       createInvoice: async (body, key) => (await invoiceApi.create(body as any, key)).data as any,
+      createReturn: async (body, key) => returnApi.create(body as any, key),
       addSplitPayments: async (invoiceId, payments, key) =>
         paymentApi.addSplitPayments({ invoice_id: invoiceId, payments }, key),
       observeIssued: async (invoiceNo) => {
         if (snapshot?.terminal) await observeIssuedNumber(snapshot.terminal.id, invoiceNo);
       },
+      noteSynced: async (invoiceNo, invoiceId) => noteSynced(invoiceNo, invoiceId),
     });
     failures = outcome.stopped ? failures + 1 : 0;
     publish({ lastError: outcome.stopped });
@@ -173,6 +176,25 @@ function schedule() {
   timer = setTimeout(() => {
     void syncNow();
   }, failures > 0 ? backoffMs(failures) : 15_000);
+}
+
+/**
+ * Writes something to the outbox and tells the sync loop about it.
+ *
+ * Every screen goes through here rather than writing to the outbox itself. The
+ * returns screen did write directly, and the loop never heard: it schedules its
+ * next attempt only at the end of a run, and stops scheduling when the queue is
+ * empty — which it was when that screen loaded. A return taken at the counter
+ * sat there with zero attempts until somebody happened to make a sale or reload
+ * the app. The money had already gone over the counter.
+ *
+ * The write is awaited and its failure is the caller's to report. Nothing may
+ * tell a cashier a thing is recorded before it is.
+ */
+export async function queueForSync(entry: Omit<OutboxEntry, 'status' | 'attempts'>): Promise<void> {
+  await enqueue(entry);
+  await refreshCounts();
+  void syncNow();
 }
 
 /** The sales waiting, for the screen that lists them. */

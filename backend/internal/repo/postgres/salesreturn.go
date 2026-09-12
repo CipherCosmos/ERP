@@ -34,13 +34,15 @@ func NewSalesReturn() *SalesReturn { return &SalesReturn{} }
 // ---------------------------------------------------------------------------
 
 const salesReturnColumns = `r.id, r.invoice_id, r.product_id, r.store_id, r.quantity,
-	r.amount, r.reason, COALESCE(r.refund_mode, ''), r.status, r.created_at`
+	r.amount, r.reason, COALESCE(r.refund_mode, ''), r.status,
+	r.raised_offline, COALESCE(r.raised_at, r.created_at), r.created_at`
 
 func scanSalesReturn(s interface{ Scan(...any) error }) (salesreturn.Return, error) {
 	var ret salesreturn.Return
 	var status string
 	err := s.Scan(&ret.ID, &ret.InvoiceID, &ret.ProductID, &ret.StoreID, &ret.Quantity,
-		&ret.Amount, &ret.Reason, &ret.RefundMode, &status, &ret.CreatedAt)
+		&ret.Amount, &ret.Reason, &ret.RefundMode, &status,
+		&ret.RaisedOffline, &ret.RaisedAt, &ret.CreatedAt)
 	ret.Status = salesreturn.Status(status)
 	return ret, err
 }
@@ -53,10 +55,11 @@ func scanSalesReturn(s interface{ Scan(...any) error }) (salesreturn.Return, err
 func (r *SalesReturn) InsertReturn(ctx context.Context, q platform.Querier, ret salesreturn.Return) error {
 	_, err := q.ExecContext(ctx,
 		`INSERT INTO returns (id, invoice_id, product_id, store_id, quantity, amount,
-			reason, refund_mode, status)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::return_status)`,
+			reason, refund_mode, status, raised_offline, raised_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::return_status,$10,$11)`,
 		ret.ID, ret.InvoiceID, ret.ProductID, ret.StoreID, ret.Quantity, ret.Amount,
-		ret.Reason, nullIfBlank(ret.RefundMode), string(ret.Status))
+		ret.Reason, nullIfBlank(ret.RefundMode), string(ret.Status),
+		ret.RaisedOffline, ret.RaisedAt)
 	return platform.MapError(err)
 }
 

@@ -19,12 +19,13 @@
  */
 
 const DB_NAME = 'gbos';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 /** Stores, and what each one is for. */
 export const SNAPSHOT = 'snapshot';
 export const OUTBOX = 'outbox';
 export const COUNTERS = 'counters';
+export const SALES = 'sales';
 
 let open: Promise<IDBDatabase> | null = null;
 
@@ -63,6 +64,13 @@ export function database(): Promise<IDBDatabase> {
       // till owns it.
       if (!db.objectStoreNames.contains(COUNTERS)) {
         db.createObjectStore(COUNTERS, { keyPath: 'key' });
+      }
+      // The bills this till has raised, so a return can be taken against one
+      // with the connection down. Keyed on the invoice number: one bill, one
+      // record, however many times it is written.
+      if (!db.objectStoreNames.contains(SALES)) {
+        const sales = db.createObjectStore(SALES, { keyPath: 'key' });
+        sales.createIndex('billedAt', 'billedAt');
       }
     };
     req.onsuccess = () => {

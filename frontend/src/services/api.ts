@@ -370,8 +370,28 @@ export const paymentApi = {
 
 export const returnApi = {
   list: (storeId: string) => list<any>(api.get('/returns', { params: { store_id: storeId } }), 'returns'),
-  create: (data: { product_id: string; quantity: number; amount: number; reason: string; refund_mode?: string; store_id: string; invoice_id?: string }) =>
-    api.post('/returns', data),
+  /**
+   * The idempotency key makes a retried return safe, which is what a till
+   * syncing a backlog needs: the same key records one return rather than paying
+   * a customer twice on paper.
+   */
+  create: (
+    data: {
+      product_id: string;
+      quantity: number;
+      amount: number;
+      reason: string;
+      refund_mode?: string;
+      store_id: string;
+      invoice_id?: string;
+      raised_offline?: boolean;
+      raised_at?: string;
+    },
+    idempotencyKey?: string
+  ) =>
+    api.post('/returns', data, {
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    }),
   approve: (id: string, storeId: string) => api.post(`/returns/${id}/approve`, null, { params: { store_id: storeId } }),
 };
 

@@ -20,9 +20,14 @@ export type OutboxStatus =
   /** The server refused it in a way that retrying cannot fix. Needs a person. */
   | 'rejected';
 
+/** What kind of thing is waiting. A sale unless it says otherwise, so entries
+ *  queued before returns existed still read correctly. */
+export type OutboxKind = 'sale' | 'return';
+
 export type OutboxEntry = {
   /** The idempotency key. Also the primary key, so one sale cannot be queued twice. */
   key: string;
+  kind?: OutboxKind;
   /** The body to POST to /invoices, with the number the till already allocated. */
   invoice: Record<string, unknown>;
   /** Split tenders to record once the invoice exists. */

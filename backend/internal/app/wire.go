@@ -97,7 +97,8 @@ func Build(db *platform.DB, cfg Config) (Services, error) {
 		// is where it plugs in and nothing inside payment changes.
 		Payment: paymentsvc.New(db, paymentRepo, paymentRepo),
 		SalesReturn: salesreturnsvc.New(db, repo.NewSalesReturn(),
-			salesReturnStock{svc: stock, repo: stockRepo}),
+			salesReturnStock{svc: stock, repo: stockRepo}).
+			WithExceptions(repo.NewReconcile()),
 		// The credit service satisfies analytics' CreditReader directly, so the
 		// dashboard's outstanding balance uses the credit aggregate's own
 		// definition of a debt rather than a second copy of it.
