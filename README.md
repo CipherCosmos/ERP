@@ -157,16 +157,22 @@ lock ordering, `ILIKE` versus `LIKE`, exact numeric.
 
 | | Statement coverage |
 |---|---|
+| `internal/rbac` | 91% |
 | `internal/domain` | 90% |
-| `internal/platform` | 84% |
-| `internal/repo` | 78% |
-| `internal/service` | 72% |
-| `internal/http` | 38% |
-| **overall** | **62%** |
+| `internal/platform` | 83% |
+| `internal/repo` | 80% |
+| `internal/service` | 74% |
+| `internal/app` | 74% |
+| `internal/http` | 49% |
+| **overall** | **67%** |
 
-Measured with `-coverpkg=./...`, so a service test credits the repository code it
-drives. The HTTP layer is the thin one and also the weakest covered; that is the
-gap to close next, not a claim that it does not matter.
+Measured with `go test -count=1 -coverpkg=./...`, so a service test credits the
+repository code it drives. Without `-count=1` a cached package does not rewrite
+its profile and the total reads far lower than it is.
+
+The HTTP layer is the thin one and still the least covered. What is tested there
+is what a client actually drives: each aggregate round-tripped over real HTTP
+against real Postgres, and the permission on every route.
 
 Concurrency is tested, not assumed: twenty tills billing at once, crossed
 baskets that used to deadlock, concurrent voids, and an idempotency key retried
