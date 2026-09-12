@@ -212,7 +212,7 @@ type Loss struct {
 func (l Loss) Value() money.Money {
 	total := money.Zero()
 	for _, a := range l.Batches {
-		total = total.Add(a.Cost())
+		total = total.Add(a.Cost)
 	}
 	return total
 }
@@ -221,11 +221,21 @@ func (l Loss) Value() money.Money {
 type Allocation struct {
 	BatchNo  string         `json:"batch_no"`
 	Quantity money.Quantity `json:"quantity"`
-	UnitCost money.Money    `json:"unit_cost"`
+	// Cost is the value that actually left this lot, as the stock aggregate
+	// debited it. It is carried rather than recomputed from a rate: the value a
+	// batch holds is the stored figure, and multiplying a per-unit cost back up
+	// by a quantity is what used to lose paise on every pack size that does not
+	// divide evenly.
+	Cost money.Money `json:"cost"`
 }
 
-// Cost is what this lot contributed to the value written off.
-func (a Allocation) Cost() money.Money { return a.UnitCost.Mul(a.Quantity) }
+// UnitCost is Cost over Quantity, for display.
+func (a Allocation) UnitCost() money.Rate {
+	if a.Quantity.IsZero() {
+		return money.ZeroRate()
+	}
+	return money.RateFromDecimal(a.Cost.Decimal().DivRound(a.Quantity.Decimal(), 8))
+}
 
 // LossInput is a write-off as a caller asks for it.
 type LossInput struct {

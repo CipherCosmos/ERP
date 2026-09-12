@@ -175,6 +175,29 @@ func (m Money) DivQuantity(q Quantity) Money {
 	return Money{d: m.d.DivRound(q.d, Scale)}
 }
 
+// Share returns the part of m that corresponds to part out of whole, rounding
+// the exact quotient to Scale in a single step.
+//
+// This is the proportional-value operation: what a partial return takes out of
+// what the whole line cost, or what a partial consumption takes out of a batch.
+// Going via a unit cost instead — m over whole, then times part — rounds twice
+// and is what loses paise on pack sizes that do not divide evenly.
+//
+// A part equal to whole returns m exactly, with no division at all, so the last
+// piece of something always carries the rest of its value.
+//
+// It panics if whole is zero. A share of nothing is not a number a ledger can
+// hold, and callers validate the quantity first.
+func (m Money) Share(part, whole Quantity) Money {
+	if whole.d.IsZero() {
+		panic("money: share of a zero whole")
+	}
+	if part.d.Equal(whole.d) {
+		return m
+	}
+	return Money{d: m.d.Mul(part.d).DivRound(whole.d, Scale)}
+}
+
 // Round returns m rounded to Scale, half away from zero. See the package
 // documentation for why that mode and not banker's rounding.
 func (m Money) Round() Money { return Money{d: m.d.Round(Scale)} }

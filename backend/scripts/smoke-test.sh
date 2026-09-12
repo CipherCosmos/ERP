@@ -249,8 +249,12 @@ expect "goods received" POST /purchases/receive 201 \
 req GET "/stock/product/$RICE"
 ON_HAND=$(printf '%s' "$BODY" | jq -r '[.batches[]?.quantity // 0] | add // 0')
 equals "4 sacks land as kilos" "$ON_HAND" "100.000"
+# The batch holds what the delivery cost, and the per-kilo figure is derived
+# from it by the database. Four sacks at Rs.940 is Rs.3,760.00 exactly.
+BATCH_VALUE=$(printf '%s' "$BODY" | jq -r '[.batches[]?.total_cost // 0] | add // 0')
+equals "four sacks at 940 are worth" "$BATCH_VALUE" "3760.00"
 UNIT_COST=$(printf '%s' "$BODY" | jq -r '.batches[0].cost_price // 0')
-equals "a 940 sack costs per kilo" "$UNIT_COST" "37.60"
+equals "which is per kilo" "$UNIT_COST" "37.6"
 
 # ---------------------------------------------------------------------------
 step "sell it, loose and in bulk, on one bill"
@@ -314,6 +318,10 @@ if [ -n "${INVOICE:-}" ]; then
   req GET "/stock/product/$RICE"
   ON_HAND=$(printf '%s' "$BODY" | jq -r '[.batches[]?.quantity // 0] | add // 0')
   equals "voiding restores 27 kg" "$ON_HAND" "90.000"
+  # And the value with it. A void must not change what the shop's inventory is
+  # worth: 90 of the original 100 kg remain, at Rs.37.60, so Rs.3,384.00.
+  VALUE=$(printf '%s' "$BODY" | jq -r '[.batches[]?.total_cost // 0] | add // 0')
+  equals "and the value that went out with them" "$VALUE" "3384.00"
 fi
 
 # ---------------------------------------------------------------------------

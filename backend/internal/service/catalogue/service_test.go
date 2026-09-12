@@ -197,8 +197,9 @@ func TestProductReadModelCarriesCategoryStockAndCost(t *testing.T) {
 		{otherStore, "B3", "99.000"},
 	} {
 		if _, err := db.ExecContext(ctx,
-			`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
-			 VALUES ($1, $2, $3, $4, 337.50)`, stocked.ID, b.store, b.batch, b.qty); err != nil {
+			`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
+			 VALUES ($1, $2, $3, $4, round($4::numeric * 337.50, 2))`,
+			stocked.ID, b.store, b.batch, b.qty); err != nil {
 			t.Fatalf("seed batch %s: %v", b.batch, err)
 		}
 	}
@@ -1495,8 +1496,8 @@ func TestListingManyProductsDoesNotDuplicateRows(t *testing.T) {
 	// and turning it into a join would repeat the product once per lot.
 	for _, batch := range []string{"B1", "B2"} {
 		if _, err := db.ExecContext(ctx,
-			`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
-			 VALUES ($1, $2, $3, 40, 37.50)`, p.ID, storeID, batch); err != nil {
+			`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
+			 VALUES ($1, $2, $3, 40, 1500.00)`, p.ID, storeID, batch); err != nil {
 			t.Fatalf("seed batch %s: %v", batch, err)
 		}
 	}

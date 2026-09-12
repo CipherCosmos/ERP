@@ -916,8 +916,9 @@ func TestAnOddPaisaOfTaxIsSplitWithoutInventingOrLosingIt(t *testing.T) {
 func (x *till) batch(productID uuid.UUID, batchNo, qty, cost string, expiry time.Time) {
 	x.t.Helper()
 	if _, err := x.db.ExecContext(context.Background(),
-		`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price, expiry_date)
-		 VALUES ($1, $2, $3, $4, $5, $6)`, productID, x.storeID, batchNo,
+		`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost, expiry_date)
+		 VALUES ($1, $2, $3, $4, round($4::numeric * $5::numeric, 2), $6)`,
+		productID, x.storeID, batchNo,
 		money.MustQuantityFromString(qty), money.MustFromString(cost), expiry); err != nil {
 		x.t.Fatalf("seed batch %s: %v", batchNo, err)
 	}

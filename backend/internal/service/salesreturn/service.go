@@ -26,6 +26,7 @@ import (
 	"fmt"
 
 	billingdomain "gbos/internal/domain/billing"
+	"gbos/internal/domain/money"
 	domain "gbos/internal/domain/salesreturn"
 	stockdomain "gbos/internal/domain/stock"
 	platform "gbos/internal/platform/postgres"
@@ -94,6 +95,11 @@ type StockMover interface {
 	// nothing at all in that case — changing zero rows, returning a nil error,
 	// and leaving the API to answer 201 with the goods still on the shelf.
 	WriteOff(ctx context.Context, tx platform.Tx, req stockdomain.DeductionRequest) (stockdomain.Deduction, error)
+
+	// ProductCostPrice is the store's recorded cost for one base unit of a
+	// product. It values goods coming back with no sale behind them, so a
+	// goodwill return does not join a batch at no cost and write it down.
+	ProductCostPrice(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID) (money.Money, error)
 }
 
 // DB is the transaction capability the service needs from a pool.
@@ -224,6 +230,10 @@ func (s *Service) Approve(ctx context.Context, storeID, id uuid.UUID) (domain.Re
 		}
 
 		batch := stockdomain.DefaultBatch
+		// restored is what the goods coming back are worth. Zero means "not
+		// known from a sale", and the fallback below values them at the
+		// catalogue cost rather than letting them dilute the batch they join.
+		restored := money.Zero()
 		if ret.InvoiceID != nil {
 			sold, err := s.soldFrom(ctx, tx, ret)
 			if err != nil {
@@ -236,6 +246,22 @@ func (s *Service) Approve(ctx context.Context, storeID, id uuid.UUID) (domain.Re
 			if sold.LineFound {
 				batch = sold.BatchNo
 			}
+			// The share of what the line cost that corresponds to the quantity
+			// coming back. A full return restores exactly what the line cost,
+			// with no division at all.
+			if sold.SoldQuantity.IsPositive() {
+				restored = sold.SoldCost.Share(ret.Quantity, sold.SoldQuantity)
+			}
+		}
+		if restored.IsZero() {
+			// A goodwill return with no invoice behind it, or a sale whose cost
+			// was never recorded. The goods are real and have value; valuing
+			// them at nothing would quietly write down the batch they rejoin.
+			catalogue, err := s.stock.ProductCostPrice(ctx, tx, ret.ProductID, ret.StoreID)
+			if err != nil {
+				return fmt.Errorf("read catalogue cost price: %w", err)
+			}
+			restored = catalogue.Mul(ret.Quantity)
 		}
 
 		// The destination store is the return's own, read from the row this
@@ -247,6 +273,7 @@ func (s *Service) Approve(ctx context.Context, storeID, id uuid.UUID) (domain.Re
 			StoreID:   ret.StoreID,
 			BatchNo:   batch,
 			Quantity:  ret.Quantity,
+			TotalCost: restored,
 		}); err != nil {
 			return fmt.Errorf("return goods to stock: %w", err)
 		}
@@ -370,7 +397,7 @@ func allocations(d stockdomain.Deduction) []domain.Allocation {
 	}
 	out := make([]domain.Allocation, len(d.Batches))
 	for i, b := range d.Batches {
-		out[i] = domain.Allocation{BatchNo: b.BatchNo, Quantity: b.Quantity, UnitCost: b.UnitCost}
+		out[i] = domain.Allocation{BatchNo: b.BatchNo, Quantity: b.Quantity, Cost: b.Cost}
 	}
 	return out
 }

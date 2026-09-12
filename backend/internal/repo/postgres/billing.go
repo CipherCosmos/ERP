@@ -84,12 +84,14 @@ func (r *Billing) InsertItems(ctx context.Context, q platform.Querier, items []b
 		if _, err := q.ExecContext(ctx,
 			`INSERT INTO invoice_items (id, invoice_id, product_id, description, hsn_code,
 				gst_rate, batch_no, product_unit_id,
-				unit_qty, quantity, rate, discount, cgst, sgst, igst, total, unit_cost_at_sale)
-			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+				unit_qty, quantity, rate, discount, cgst, sgst, igst, total,
+				unit_cost_at_sale, cost_of_goods)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 			it.ID, it.InvoiceID, it.ProductID, it.ProductName, it.HSNCode,
 			it.GSTRate, it.BatchNo, nullIfNilUUID(it.ProductUnitID),
 			it.UnitQty, it.Quantity, it.Rate,
-			it.Discount, it.CGST, it.SGST, it.IGST, it.Total, it.UnitCostAtSale); err != nil {
+			it.Discount, it.CGST, it.SGST, it.IGST, it.Total,
+			it.UnitCostAtSale, it.CostOfGoods); err != nil {
 			return platform.MapError(err)
 		}
 	}
@@ -134,7 +136,8 @@ func (r *Billing) ItemsForInvoice(ctx context.Context, q platform.Querier, invoi
 		`SELECT ii.id, ii.invoice_id, ii.product_id, ii.description, ii.hsn_code, ii.gst_rate,
 			COALESCE(ii.batch_no, ''),
 			ii.product_unit_id, COALESCE(pu.label, ''), ii.unit_qty, ii.quantity, ii.rate,
-			ii.discount, ii.cgst, ii.sgst, ii.igst, ii.total, ii.unit_cost_at_sale
+			ii.discount, ii.cgst, ii.sgst, ii.igst, ii.total,
+			ii.unit_cost_at_sale, ii.cost_of_goods
 		   FROM invoice_items ii
 		   LEFT JOIN product_units pu ON pu.id = ii.product_unit_id
 		  WHERE ii.invoice_id = $1 ORDER BY ii.created_at, ii.id`, invoiceID)
@@ -150,7 +153,8 @@ func (r *Billing) ItemsForInvoice(ctx context.Context, q platform.Querier, invoi
 		if err := rows.Scan(&it.ID, &it.InvoiceID, &it.ProductID, &it.ProductName,
 			&it.HSNCode, &it.GSTRate, &it.BatchNo,
 			&unitID, &it.UnitLabel, &it.UnitQty, &it.Quantity,
-			&it.Rate, &it.Discount, &it.CGST, &it.SGST, &it.IGST, &it.Total, &it.UnitCostAtSale); err != nil {
+			&it.Rate, &it.Discount, &it.CGST, &it.SGST, &it.IGST, &it.Total,
+			&it.UnitCostAtSale, &it.CostOfGoods); err != nil {
 			return nil, fmt.Errorf("scan invoice item: %w", platform.MapError(err))
 		}
 		if unitID.Valid {

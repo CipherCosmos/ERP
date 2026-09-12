@@ -104,9 +104,12 @@ func (x *counter) stockProduct(s *shop, name, sell, onHand string, gstPercent in
 
 	x.mustExec(`INSERT INTO product_prices (product_id, store_id, product_unit_id, mrp, cost_price, sell_price)
 		VALUES ($1, $2, $3, $4, $4, $4)`, productID, s.storeID, unitID, money.MustFromString(sell))
-	x.mustExec(`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
+	// total_cost, not a rate: stock holds what a batch is worth and the
+	// per-unit figure is generated from it.
+	x.mustExec(`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
 		VALUES ($1, $2, 'OPENING', $3, $4)`, productID, s.storeID,
-		money.MustQuantityFromString(onHand), money.MustFromString(sell))
+		money.MustQuantityFromString(onHand),
+		money.MustFromString(sell).Mul(money.MustQuantityFromString(onHand)))
 	return productID
 }
 

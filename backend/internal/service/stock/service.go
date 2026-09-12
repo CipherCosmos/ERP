@@ -52,8 +52,8 @@ type Repository interface {
 	ProductCostPrice(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID) (money.Money, error)
 
 	AddQuantity(ctx context.Context, q platform.Querier, in domain.Receipt) error
-	DeductBatch(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID, batchNo string, qty money.Quantity) (bool, error)
-	DeductBatchByID(ctx context.Context, q platform.Querier, id uuid.UUID, qty money.Quantity) (bool, error)
+	DeductBatch(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID, batchNo string, qty money.Quantity) (bool, money.Money, error)
+	DeductBatchByID(ctx context.Context, q platform.Querier, id uuid.UUID, qty money.Quantity) (bool, money.Money, error)
 	Reserve(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID, batchNo string, qty money.Quantity) (bool, error)
 	Release(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID, batchNo string, qty money.Quantity) (bool, error)
 
@@ -263,35 +263,39 @@ func (s *Service) Adjust(ctx context.Context, in AdjustInput) (AdjustResult, err
 	err = s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
 		switch in.Type {
 		case domain.AdjustAdd:
-			cost := in.CostPrice
-			if cost.IsZero() {
-				// Fall back to the catalogue cost so a batch is not booked in
-				// at no cost. The error is returned rather than discarded.
-				// This one is already per base unit, so it is not divided below.
+			// What the delivery cost, in full. A caller who counted in sacks
+			// priced in sacks, so the total is the sack price times the sacks —
+			// a multiplication, stated, never a per-kilo rate derived by
+			// division. Thirty kilos at Rs.940 cannot be stored as a rate
+			// without losing paise, and the batch is what has to keep the value.
+			//
+			// Storing the sack price against a kilo was silent and expensive
+			// before: the row committed, and every valuation, COGS figure and
+			// profit line downstream was out by the size of the pack.
+			var total money.Money
+			switch {
+			case !in.CostPrice.IsZero() && unit != nil:
+				total = in.CostPrice.Mul(in.UnitQty)
+			case !in.CostPrice.IsZero():
+				// A bare quantity carries no unit, so the cost stated is per
+				// base unit already.
+				total = in.CostPrice.Mul(in.Quantity)
+			default:
+				// Fall back to the catalogue cost so a batch is not booked in at
+				// no cost. The error is returned rather than discarded. The
+				// catalogue figure is per base unit.
 				catalogueCost, err := s.repo.ProductCostPrice(ctx, tx, in.ProductID, in.StoreID)
 				if err != nil {
 					return fmt.Errorf("read catalogue cost price: %w", err)
 				}
-				cost = catalogueCost
-			} else if unit != nil && !unit.QtyInBase.IsZero() {
-				// A caller who counted in sacks priced in sacks. Stock is costed
-				// per base unit, so a Rs.940 sack of 25 kg is Rs.37.60 a kilo.
-				//
-				// Storing the sack price against a kilo is silent and expensive:
-				// the row commits, and every valuation, COGS figure and profit
-				// line downstream is out by the size of the pack — twenty-five
-				// times here. The receiving path already divides (see
-				// purchasing's costPerBase); this path did not, which made the
-				// same delivery cost different money depending on which screen
-				// booked it in.
-				cost = cost.DivQuantity(unit.QtyInBase)
+				total = catalogueCost.Mul(in.Quantity)
 			}
 			if err := s.repo.AddQuantity(ctx, tx, domain.Receipt{
 				ProductID:  in.ProductID,
 				StoreID:    in.StoreID,
 				BatchNo:    in.BatchNo,
 				Quantity:   in.Quantity,
-				CostPrice:  cost,
+				TotalCost:  total,
 				ExpiryDate: in.ExpiryDate,
 				MfgDate:    in.MfgDate,
 			}); err != nil {
@@ -299,7 +303,7 @@ func (s *Service) Adjust(ctx context.Context, in AdjustInput) (AdjustResult, err
 			}
 
 		case domain.AdjustRemove:
-			ok, err := s.repo.DeductBatch(ctx, tx, in.ProductID, in.StoreID, in.BatchNo, in.Quantity)
+			ok, _, err := s.repo.DeductBatch(ctx, tx, in.ProductID, in.StoreID, in.BatchNo, in.Quantity)
 			if err != nil {
 				return fmt.Errorf("remove stock: %w", err)
 			}
@@ -533,7 +537,7 @@ func (s *Service) Transfer(ctx context.Context, in TransferInput) error {
 			return fmt.Errorf("read source batch: %w", err)
 		}
 
-		ok, err := s.repo.DeductBatch(ctx, tx, in.ProductID, in.FromStoreID, in.BatchNo, in.Quantity)
+		ok, moved, err := s.repo.DeductBatch(ctx, tx, in.ProductID, in.FromStoreID, in.BatchNo, in.Quantity)
 		if err != nil {
 			return fmt.Errorf("debit source store: %w", err)
 		}
@@ -541,12 +545,17 @@ func (s *Service) Transfer(ctx context.Context, in TransferInput) error {
 			return domain.Insufficient(in.Quantity, src.Available())
 		}
 
+		// The destination is credited with exactly the value the source was
+		// debited, so a transfer between two of the shop's own stores moves
+		// inventory value rather than creating or destroying it. Deriving the
+		// destination's cost from a rate would do both, by a paisa, on every
+		// transfer of a pack size that does not divide evenly.
 		if err := s.repo.AddQuantity(ctx, tx, domain.Receipt{
 			ProductID:  in.ProductID,
 			StoreID:    in.ToStoreID,
 			BatchNo:    in.BatchNo,
 			Quantity:   in.Quantity,
-			CostPrice:  src.CostPrice,
+			TotalCost:  moved,
 			ExpiryDate: src.ExpiryDate,
 			MfgDate:    src.MfgDate,
 		}); err != nil {
@@ -701,7 +710,7 @@ func (s *Service) DeductFEFO(ctx context.Context, tx platform.Tx, req domain.Ded
 			// The guard is re-evaluated in SQL rather than trusted from the
 			// row just read. The FOR UPDATE above means it cannot have moved,
 			// and the sufficiency test still belongs in the write.
-			ok, err := s.repo.DeductBatchByID(ctx, tx, b.ID, remaining)
+			ok, charged, err := s.repo.DeductBatchByID(ctx, tx, b.ID, remaining)
 			if err != nil {
 				return domain.Deduction{}, fmt.Errorf("deduct hinted batch %q: %w", b.BatchNo, err)
 			}
@@ -710,7 +719,7 @@ func (s *Service) DeductFEFO(ctx context.Context, tx platform.Tx, req domain.Ded
 					StockID:    b.ID,
 					BatchNo:    b.BatchNo,
 					Quantity:   remaining,
-					UnitCost:   b.CostPrice,
+					Cost:       charged,
 					ExpiryDate: b.ExpiryDate,
 				})
 				remaining = money.ZeroQuantity()
@@ -733,7 +742,7 @@ func (s *Service) DeductFEFO(ctx context.Context, tx platform.Tx, req domain.Ded
 				take = remaining
 			}
 
-			ok, err := s.repo.DeductBatchByID(ctx, tx, b.ID, take)
+			ok, charged, err := s.repo.DeductBatchByID(ctx, tx, b.ID, take)
 			if err != nil {
 				return domain.Deduction{}, fmt.Errorf("deduct batch %q: %w", b.BatchNo, err)
 			}
@@ -748,7 +757,7 @@ func (s *Service) DeductFEFO(ctx context.Context, tx platform.Tx, req domain.Ded
 				StockID:    b.ID,
 				BatchNo:    b.BatchNo,
 				Quantity:   take,
-				UnitCost:   b.CostPrice,
+				Cost:       charged,
 				ExpiryDate: b.ExpiryDate,
 			})
 			remaining = remaining.Sub(take)

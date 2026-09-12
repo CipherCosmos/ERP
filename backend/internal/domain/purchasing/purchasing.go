@@ -522,9 +522,8 @@ func NewGoodsReceiptItem(grID uuid.UUID, ordered money.Quantity, unit BuyingUnit
 		return GoodsReceiptItem{}, invalid("rejected %s is more than the %s received", in.RejectedQty, in.ReceivedQty)
 	}
 
-	accepted := in.ReceivedQty.Sub(in.RejectedQty)
+	accepted := AcceptedUnits(in)
 	if in.AcceptedQty != nil {
-		accepted = *in.AcceptedQty
 		if accepted.IsNegative() {
 			return GoodsReceiptItem{}, invalid("accepted quantity cannot be negative")
 		}
@@ -545,6 +544,21 @@ func NewGoodsReceiptItem(grID uuid.UUID, ordered money.Quantity, unit BuyingUnit
 		RejectedQty: unit.BaseQuantity(in.RejectedQty),
 		Reason:      strings.TrimSpace(in.Reason),
 	}, nil
+}
+
+// AcceptedUnits is what a receipt line accepted, counted in the unit the
+// delivery was counted in — eight sacks, not two hundred kilos.
+//
+// It exists so the landed cost and the stored quantity cannot disagree about
+// what "accepted" means. The cost of a delivery is a price per pack times a
+// count of packs, a multiplication on the figure this returns; deriving it from
+// the converted base quantity would mean dividing by the pack size, and a 30 kg
+// sack at Rs.940 has no exact per-kilo price.
+func AcceptedUnits(in ReceiptLineInput) money.Quantity {
+	if in.AcceptedQty != nil {
+		return *in.AcceptedQty
+	}
+	return in.ReceivedQty.Sub(in.RejectedQty)
 }
 
 // ReceiptAllocation assigns part of a received quantity to one purchase order

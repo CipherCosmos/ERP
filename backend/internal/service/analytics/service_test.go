@@ -126,8 +126,9 @@ func (x *shop) stockProductIn(categoryID uuid.UUID, name, sell, cost, onHand str
 	x.exec(`INSERT INTO product_prices (product_id, store_id, product_unit_id, mrp, cost_price, sell_price)
 		VALUES ($1, $2, $3, $4, $5, $4)`, productID, x.storeID, unitID,
 		money.MustFromString(sell), money.MustFromString(cost))
-	x.exec(`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
-		VALUES ($1, $2, 'OPENING', $3, $4)`, productID, x.storeID,
+	x.exec(`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
+		VALUES ($1, $2, 'OPENING', $3, round($3::numeric * $4::numeric, 2))`,
+		productID, x.storeID,
 		money.MustQuantityFromString(onHand), money.MustFromString(cost))
 	return productID
 }

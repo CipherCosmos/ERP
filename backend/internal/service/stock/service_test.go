@@ -105,8 +105,9 @@ func (f fixture) seedBatch(t *testing.T, storeID uuid.UUID, batchNo, qty, cost s
 		expiryArg = *expiry
 	}
 	_, err := f.db.ExecContext(context.Background(),
-		`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price, expiry_date, created_at)
-		 VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::date, now() - ($7::integer * interval '1 day'))`,
+		`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost, expiry_date, created_at)
+		 VALUES ($1, $2, $3, $4::numeric, round($4::numeric * $5::numeric, 2), $6::date,
+		         now() - ($7::integer * interval '1 day'))`,
 		f.product, storeID, batchNo, qty, cost, expiryArg, receivedDaysAgo)
 	if err != nil {
 		t.Fatalf("seed batch %q: %v", batchNo, err)
@@ -1072,7 +1073,7 @@ func TestAdjustAddFallsBackToTheCatalogueCostPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if want := money.MustFromString("37.50"); !result.Batch.CostPrice.Equal(want) {
+	if want := money.MustRateFromString("37.50"); !result.Batch.CostPrice.Equal(want) {
 		t.Errorf("cost price = %s, want the catalogue's %s", result.Batch.CostPrice, want)
 	}
 
@@ -1153,13 +1154,14 @@ func TestCostPriceIsStatedInTheUnitItWasCountedIn(t *testing.T) {
 	}
 
 	assertQty(t, "four 25 kg sacks", result.Batch.Quantity, "100")
-	if want := money.MustFromString("37.60"); !result.Batch.CostPrice.Equal(want) {
+	if want := money.MustRateFromString("37.60"); !result.Batch.CostPrice.Equal(want) {
 		t.Errorf("cost price = %s, want %s — the sack price was stored against a kilo", result.Batch.CostPrice, want)
 	}
-	// The figure every report is struck from.
-	value := result.Batch.CostPrice.Mul(result.Batch.Quantity)
-	if want := money.MustFromString("3760.00"); !value.Equal(want) {
-		t.Errorf("batch value = %s, want %s (4 sacks at 940)", value, want)
+	// The figure every report is struck from. It is stored, not derived: four
+	// sacks at Rs.940 is Rs.3,760.00 stated, and the per-kilo rate above is what
+	// the database computes back from it.
+	if want := money.MustFromString("3760.00"); !result.Batch.TotalCost.Equal(want) {
+		t.Errorf("batch value = %s, want %s (4 sacks at 940)", result.Batch.TotalCost, want)
 	}
 
 	// A bare quantity carries no unit, so its cost is already per base unit and
@@ -1172,7 +1174,7 @@ func TestCostPriceIsStatedInTheUnitItWasCountedIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("book in 10 kg loose: %v", err)
 	}
-	if want := money.MustFromString("37.60"); !bare.Batch.CostPrice.Equal(want) {
+	if want := money.MustRateFromString("37.60"); !bare.Batch.CostPrice.Equal(want) {
 		t.Errorf("a bare quantity's cost = %s, want %s unchanged", bare.Batch.CostPrice, want)
 	}
 }
@@ -1437,7 +1439,7 @@ func TestCatalogueCostIsReadFromTheDefaultUnit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if want := money.MustFromString("37.50"); !result.Batch.CostPrice.Equal(want) {
+	if want := money.MustRateFromString("37.50"); !result.Batch.CostPrice.Equal(want) {
 		t.Errorf("batch cost = %s, want the default unit's %s and not the sack's 950.00",
 			result.Batch.CostPrice, want)
 	}

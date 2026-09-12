@@ -453,8 +453,8 @@ func (h *harness) sellableProduct(t *testing.T) (productID, terminalID string) {
 	mustDecode(t, created.Body.Bytes(), &product)
 
 	if _, err := h.db.ExecContext(ctx,
-		`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
-		 VALUES ($1, $2, 'OPENING', 100, 45.00)`, product.ID, h.storeID); err != nil {
+		`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
+		 VALUES ($1, $2, 'OPENING', 100, 4500.00)`, product.ID, h.storeID); err != nil {
 		t.Fatalf("seed stock: %v", err)
 	}
 	if err := h.db.QueryRowContext(ctx,

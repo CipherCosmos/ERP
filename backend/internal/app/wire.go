@@ -118,6 +118,12 @@ func (a salesReturnStock) WriteOff(ctx context.Context, tx platform.Tx, req stoc
 	return a.svc.DeductFEFO(ctx, tx, req)
 }
 
+// ProductCostPrice values goods coming back that have no sale behind them.
+func (a salesReturnStock) ProductCostPrice(ctx context.Context, q platform.Querier,
+	productID, storeID uuid.UUID) (money.Money, error) {
+	return a.repo.ProductCostPrice(ctx, q, productID, storeID)
+}
+
 // purchasingStock satisfies purchasing's StockWriter.
 type purchasingStock struct {
 	svc  *stocksvc.Service
@@ -133,7 +139,7 @@ func (a purchasingStock) ReceiveIntoStock(ctx context.Context, tx platform.Tx, m
 		StoreID:   m.StoreID,
 		BatchNo:   m.BatchNo,
 		Quantity:  m.Quantity,
-		CostPrice: m.CostPrice,
+		TotalCost: m.TotalCost,
 	})
 }
 

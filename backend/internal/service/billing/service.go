@@ -527,6 +527,7 @@ func (s *Service) deductStock(ctx context.Context, tx platform.Tx, in CreateInpu
 			SGST:           l.Tax.SGST,
 			IGST:           l.Tax.IGST,
 			Total:          l.Total,
+			CostOfGoods:    deduction.TotalCost,
 			UnitCostAtSale: deduction.UnitCost,
 		}
 	}
@@ -589,11 +590,16 @@ func (s *Service) Void(ctx context.Context, storeID, invoiceID uuid.UUID) error 
 		}
 		for _, i := range stockdomain.InLockOrder(productIDs) {
 			it := items[i]
+			// The value restored is the value that left, read off the line.
+			// Putting the goods back without it would leave the batch holding
+			// more stock than it is worth, and a void must not change what the
+			// shop's inventory is valued at.
 			if err := s.stock.ReturnToStock(ctx, tx, stockdomain.Receipt{
 				ProductID: it.ProductID,
 				StoreID:   storeID,
 				BatchNo:   it.BatchNo,
 				Quantity:  it.Quantity,
+				TotalCost: it.CostOfGoods,
 			}); err != nil {
 				return fmt.Errorf("return goods to stock: %w", err)
 			}

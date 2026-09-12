@@ -72,7 +72,16 @@ type Batch struct {
 	ReservedQty money.Quantity `json:"reserved_qty"`
 	ExpiryDate  *time.Time     `json:"expiry_date"`
 	MfgDate     *time.Time     `json:"mfg_date"`
-	CostPrice   money.Money    `json:"cost_price"`
+	// TotalCost is what this batch cost, in full. It is the stored figure and
+	// it is conserved: receiving adds what was paid, consumption moves a
+	// proportional share out and leaves the rest.
+	TotalCost money.Money `json:"total_cost"`
+	// CostPrice is TotalCost over Quantity, computed by the database as a
+	// generated column. It is for display and valuation, and it carries more
+	// decimal places than money does because it is a rate and not an amount:
+	// a 30 kg sack at Rs.940 is Rs.31.33333333 a kilo, and rounding that to
+	// paise is what used to lose ten paise a sack.
+	CostPrice money.Rate `json:"cost_price"`
 }
 
 // Available is the quantity that may actually be moved: what is on hand less
@@ -91,11 +100,18 @@ func (b Batch) Available() money.Quantity { return b.Quantity.Sub(b.ReservedQty)
 // dates alone". Both matter because a receipt into an existing batch adds to
 // it, and adding stock is not the same event as revaluing it.
 type Receipt struct {
-	ProductID  uuid.UUID
-	StoreID    uuid.UUID
-	BatchNo    string
-	Quantity   money.Quantity
-	CostPrice  money.Money
+	ProductID uuid.UUID
+	StoreID   uuid.UUID
+	BatchNo   string
+	Quantity  money.Quantity
+	// TotalCost is what the goods on this receipt cost, in full — four sacks at
+	// Rs.940 is Rs.3,760.00, stated and not derived. Nothing divides it by the
+	// quantity on the way in, which is what makes the value conserved: a
+	// per-unit figure for a 30 kg sack cannot be stored without losing paise.
+	//
+	// Zero means "do not reprice": a caller adding stock without stating a cost
+	// should not write off the batch's existing cost basis.
+	TotalCost  money.Money
 	ExpiryDate *time.Time
 	MfgDate    *time.Time
 }
@@ -402,15 +418,26 @@ func (r DeductionRequest) Validate() error {
 
 // ConsumedBatch is one batch a deduction took from.
 type ConsumedBatch struct {
-	StockID    uuid.UUID      `json:"stock_id"`
-	BatchNo    string         `json:"batch_no"`
-	Quantity   money.Quantity `json:"quantity"`
-	UnitCost   money.Money    `json:"unit_cost"`
-	ExpiryDate *time.Time     `json:"expiry_date"`
+	StockID  uuid.UUID      `json:"stock_id"`
+	BatchNo  string         `json:"batch_no"`
+	Quantity money.Quantity `json:"quantity"`
+	// Cost is the value that actually left this batch, as the database computed
+	// and debited it in the same statement as the quantity. It is not a unit
+	// cost multiplied back up: doing that reintroduces the rounding that storing
+	// a rate caused in the first place.
+	Cost       money.Money `json:"cost"`
+	ExpiryDate *time.Time  `json:"expiry_date"`
 }
 
-// Cost is what this batch contributed to the cost of goods sold.
-func (c ConsumedBatch) Cost() money.Money { return c.UnitCost.Mul(c.Quantity) }
+// UnitCost is Cost over Quantity, for display. Zero quantity reads as zero
+// rather than panicking: a consumed batch with no quantity is not a line anyone
+// needs a rate for.
+func (c ConsumedBatch) UnitCost() money.Rate {
+	if c.Quantity.IsZero() {
+		return money.ZeroRate()
+	}
+	return money.RateFromDecimal(c.Cost.Decimal().DivRound(c.Quantity.Decimal(), 8))
+}
 
 // Deduction is the outcome of a FEFO/FIFO stock deduction.
 type Deduction struct {
@@ -443,18 +470,21 @@ func (d Deduction) PrimaryBatch() string {
 
 // NewDeduction totals a set of consumed batches into a deduction.
 //
-// The weighted average is computed as the sum of the per-batch line costs
-// divided by the quantity, using Money.Mul and Money.DivQuantity. Both round to
-// paise, exactly once, in the same half-away-from-zero mode the rest of the
-// system uses — so the COGS figure on the invoice line is the figure that was
-// actually consumed, with no float residue and no epsilon.
+// TotalCost is the sum of what each batch was actually debited, so it is exactly
+// the money that left inventory — no rate is multiplied by a quantity anywhere
+// in this path. That is what makes the cost of goods sold for a delivery add up
+// to what the delivery cost.
+//
+// UnitCost is the weighted average, derived from that total for display and for
+// the per-unit figure on the invoice line. It rounds; the total does not, and
+// the total is what reports sum.
 //
 // It panics if quantity is zero, which callers prevent by validating the
 // request; a per-unit cost over zero units is not a number a ledger can hold.
 func NewDeduction(consumed []ConsumedBatch, quantity money.Quantity) Deduction {
 	total := money.Zero()
 	for _, c := range consumed {
-		total = total.Add(c.Cost())
+		total = total.Add(c.Cost)
 	}
 	return Deduction{
 		Batches:   consumed,

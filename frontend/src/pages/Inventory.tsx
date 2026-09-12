@@ -17,6 +17,11 @@ interface Batch {
   reserved_qty: number;
   expiry_date: string | null;
   mfg_date: string | null;
+  // What the batch is worth, as the server holds it. Multiplying the per-unit
+  // cost back up by the quantity is not the same number: a 30 kg sack at
+  // Rs.940 is Rs.31.3333... a kilo, and thirty times that is not Rs.940.
+  total_cost: number;
+  // Derived by the server from total_cost, for display only.
   cost_price: number;
 }
 
@@ -240,7 +245,7 @@ export default function Inventory() {
   };
 
   const totals = useMemo(() => {
-    const value = batches.reduce((s, b) => s + (b.quantity || 0) * (b.cost_price || 0), 0);
+    const value = batches.reduce((s, b) => s + (b.total_cost || 0), 0);
     const reserved = batches.reduce((s, b) => s + (b.reserved_qty || 0), 0);
     const expiringSoon = batches.filter((b) => {
       if (!b.expiry_date) return false;
@@ -300,8 +305,8 @@ export default function Inventory() {
       key: 'value',
       header: 'Value',
       numeric: true,
-      render: (b) => <span style={{ fontWeight: 600 }}>{formatMoney((b.quantity || 0) * (b.cost_price || 0))}</span>,
-      value: (b) => (b.quantity || 0) * (b.cost_price || 0),
+      render: (b) => <span style={{ fontWeight: 600 }}>{formatMoney(b.total_cost)}</span>,
+      value: (b) => b.total_cost || 0,
     },
   ];
 

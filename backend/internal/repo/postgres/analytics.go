@@ -346,14 +346,20 @@ func (r *Analytics) StoreSales(ctx context.Context, q platform.Querier, storeIDs
 // Profit and loss inputs
 // ---------------------------------------------------------------------------
 
-// COGS returns the cost of the goods sold in a period, from the unit cost
-// snapshotted on each invoice line when the goods left. Using today's cost
-// price instead would make last month's profit move whenever a supplier
-// changes a price.
+// COGS returns the cost of the goods sold in a period, summed from the value
+// snapshotted on each invoice line when the goods left. Using today's cost price
+// instead would make last month's profit move whenever a supplier changes a
+// price.
+//
+// It sums cost_of_goods rather than unit_cost_at_sale times quantity. The
+// product of a rounded per-unit average and a quantity is not the money that
+// left inventory: a 30 kg sack at Rs.940 is Rs.31.3333... a kilo, and thirty
+// times Rs.31.33 is Rs.939.90. Summing the stored total instead makes the cost
+// of goods sold for a delivery add up to what the delivery cost.
 func (r *Analytics) COGS(ctx context.Context, q platform.Querier, storeID uuid.UUID, rng analytics.Range) (money.Money, error) {
 	var total money.Money
 	err := q.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(ii.unit_cost_at_sale * ii.quantity), 0)
+		`SELECT COALESCE(SUM(ii.cost_of_goods), 0)
 		   FROM invoice_items ii
 		   JOIN invoices i ON i.id = ii.invoice_id
 		  WHERE i.store_id = $1

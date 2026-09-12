@@ -136,10 +136,18 @@ type Item struct {
 	IGST     money.Money `json:"igst"`
 	Total    money.Money `json:"total"`
 
+	// CostOfGoods is what the goods on this line cost, in full — the value the
+	// batches were actually debited. It is the figure the cost-of-goods report
+	// sums, and it is carried rather than reconstructed: multiplying the
+	// per-unit average below back up by the quantity reintroduces a rounding
+	// that loses paise on every pack size that does not divide evenly.
+	CostOfGoods money.Money `json:"cost_of_goods"`
+
 	// UnitCostAtSale is the weighted-average cost of the batches consumed,
 	// snapshotted here because the batch's cost can change afterwards and the
 	// profit on this sale must not move with it. It is per base unit, because
-	// that is what the batch it came from is costed in.
+	// that is what the batch it came from is costed in, and it is for display:
+	// CostOfGoods is the authoritative figure.
 	UnitCostAtSale money.Money `json:"unit_cost_at_sale"`
 }
 

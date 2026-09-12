@@ -40,7 +40,7 @@ type Stock struct{}
 func NewStock() *Stock { return &Stock{} }
 
 const stockBatchColumns = `s.id, s.product_id, s.store_id, s.batch_no, s.quantity,
-	s.reserved_qty, s.expiry_date, s.mfg_date, s.cost_price`
+	s.reserved_qty, s.expiry_date, s.mfg_date, s.total_cost, s.cost_price`
 
 // scanStockBatch reads the shared batch column list. It never discards the scan
 // error: inventory.go:178, :192, :217 and :598 all dropped one, which turned a
@@ -48,7 +48,7 @@ const stockBatchColumns = `s.id, s.product_id, s.store_id, s.batch_no, s.quantit
 func scanStockBatch(sc interface{ Scan(...any) error }, b *stock.Batch, extra ...any) error {
 	var expiry, mfg sql.NullTime
 	dest := []any{&b.ID, &b.ProductID, &b.StoreID, &b.BatchNo, &b.Quantity,
-		&b.ReservedQty, &expiry, &mfg, &b.CostPrice}
+		&b.ReservedQty, &expiry, &mfg, &b.TotalCost, &b.CostPrice}
 	dest = append(dest, extra...)
 	if err := sc.Scan(dest...); err != nil {
 		return err
@@ -372,20 +372,26 @@ func (r *Stock) ProductCostPrice(ctx context.Context, q platform.Querier, produc
 // the ON CONFLICT path takes serialises them; neither reads a figure into Go,
 // so neither can overwrite the other's work.
 //
-// A cost price of zero leaves the stored cost alone rather than zeroing it: a
-// caller adding stock without repricing should not silently write off the
-// batch's cost basis. Dates behave the same way, through COALESCE.
+// Value adds the same way quantity does — `total_cost + excluded.total_cost` —
+// because a second delivery into the same batch adds its own cost to the pile
+// rather than replacing it. The old column was a per-unit rate and the upsert
+// *overwrote* it, so a cheaper second delivery silently repriced the stock
+// already on the shelf.
+//
+// A total cost of zero leaves the stored value alone rather than zeroing it: a
+// caller adding stock without stating a cost should not write off the batch's
+// cost basis. Dates behave the same way, through COALESCE.
 func (r *Stock) AddQuantity(ctx context.Context, q platform.Querier, in stock.Receipt) error {
 	_, err := q.ExecContext(ctx,
-		`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price, expiry_date, mfg_date)
+		`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost, expiry_date, mfg_date)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT (product_id, store_id, batch_no) DO UPDATE SET
 			quantity    = stock.quantity + excluded.quantity,
-			cost_price  = CASE WHEN excluded.cost_price > 0 THEN excluded.cost_price ELSE stock.cost_price END,
+			total_cost  = stock.total_cost + excluded.total_cost,
 			expiry_date = COALESCE(excluded.expiry_date, stock.expiry_date),
 			mfg_date    = COALESCE(excluded.mfg_date, stock.mfg_date),
 			updated_at  = now()`,
-		in.ProductID, in.StoreID, in.BatchNo, in.Quantity, in.CostPrice,
+		in.ProductID, in.StoreID, in.BatchNo, in.Quantity, in.TotalCost,
 		stockDateArg(in.ExpiryDate), stockDateArg(in.MfgDate))
 	return platform.MapError(err)
 }
@@ -402,36 +408,74 @@ func (r *Stock) AddQuantity(ctx context.Context, q platform.Querier, in stock.Re
 // Deducting into the reserved portion would either sell goods that are already
 // promised or violate CHECK (reserved_qty <= quantity).
 func (r *Stock) DeductBatch(ctx context.Context, q platform.Querier,
-	productID, storeID uuid.UUID, batchNo string, qty money.Quantity) (bool, error) {
-	res, err := q.ExecContext(ctx,
-		`UPDATE stock SET quantity = quantity - $4, updated_at = now()
-		  WHERE product_id = $1 AND store_id = $2 AND batch_no = $3
-		    AND quantity - reserved_qty >= $4`,
-		productID, storeID, batchNo, qty)
-	if err != nil {
-		return false, platform.MapError(err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, platform.MapError(err)
-	}
-	return n == 1, nil
+	productID, storeID uuid.UUID, batchNo string, qty money.Quantity) (bool, money.Money, error) {
+	return deductBatch(ctx, q,
+		`SELECT id, `+chargeExpr+` AS charged FROM stock
+		  WHERE product_id = $2 AND store_id = $3 AND batch_no = $4`,
+		qty, productID, storeID, batchNo)
 }
 
 // DeductBatchByID is DeductBatch addressed by primary key, for the FEFO walk
 // which has already resolved the row.
-func (r *Stock) DeductBatchByID(ctx context.Context, q platform.Querier, id uuid.UUID, qty money.Quantity) (bool, error) {
-	res, err := q.ExecContext(ctx,
-		`UPDATE stock SET quantity = quantity - $2, updated_at = now()
-		  WHERE id = $1 AND quantity - reserved_qty >= $2`, id, qty)
-	if err != nil {
-		return false, platform.MapError(err)
+func (r *Stock) DeductBatchByID(ctx context.Context, q platform.Querier,
+	id uuid.UUID, qty money.Quantity) (bool, money.Money, error) {
+	return deductBatch(ctx, q,
+		`SELECT id, `+chargeExpr+` AS charged FROM stock WHERE id = $2`,
+		qty, id)
+}
+
+// chargeExpr is the value a deduction of $1 takes out of a batch.
+//
+// Taking the whole batch takes exactly what is left in it, with no division, so
+// the last sale of a delivery closes its value to zero. Taking part takes a
+// proportional share rounded to paise, and because the same figure is subtracted
+// from total_cost, the residue of that rounding stays on the shelf with the
+// goods instead of evaporating. Sell the rest later and the two halves add back
+// to what was paid.
+//
+// LEAST is a belt: under READ COMMITTED a second deducting statement can be
+// planned against the pre-update snapshot and applied to the post-update row, so
+// its share can be a paisa larger than what is left. Conservation still holds —
+// the subtraction is from the live value, and the residue keeps the difference —
+// but the clamp is what guarantees the non-negative constraint cannot be
+// tripped by that paisa.
+const chargeExpr = `LEAST(total_cost, CASE
+	WHEN quantity <= 0 THEN 0
+	WHEN quantity <= $1 THEN total_cost
+	ELSE round(total_cost * $1 / quantity, 2)
+END)`
+
+// deductBatch subtracts quantity and the value that goes with it in one
+// statement, and reports what it charged.
+//
+// The charge is computed in the database from the row being debited, never read
+// into Go and computed there: a figure read before the write is a figure another
+// till can have changed, and this is the hottest row in the system.
+//
+// locator must select (id, charged) for exactly the batch to debit, with the
+// quantity as $1 and its own parameters from $2 on.
+func deductBatch(ctx context.Context, q platform.Querier, locator string,
+	qty money.Quantity, args ...any) (bool, money.Money, error) {
+	params := append([]any{qty}, args...)
+	var charged money.Money
+	err := q.QueryRowContext(ctx,
+		`WITH target AS (`+locator+`)
+		 UPDATE stock s
+		    SET quantity   = s.quantity - $1,
+		        total_cost = s.total_cost - t.charged,
+		        updated_at = now()
+		   FROM target t
+		  WHERE s.id = t.id AND s.quantity - s.reserved_qty >= $1
+		 RETURNING t.charged`, params...).Scan(&charged)
+	if errors.Is(err, sql.ErrNoRows) {
+		// The guard refused the write, or there is no such batch. Nothing was
+		// oversold and nothing was charged.
+		return false, money.Zero(), nil
 	}
-	n, err := res.RowsAffected()
 	if err != nil {
-		return false, platform.MapError(err)
+		return false, money.Zero(), platform.MapError(err)
 	}
-	return n == 1, nil
+	return true, charged, nil
 }
 
 // Reserve holds qty of a batch against a pending order and reports whether the

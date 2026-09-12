@@ -734,14 +734,13 @@ func TestReceivingWithNoStatedCostFallsBackToTheOrderedRate(t *testing.T) {
 	if len(f.stock.received) != 1 {
 		t.Fatalf("stock was touched %d times, want once", len(f.stock.received))
 	}
-	got := f.stock.received[0].CostPrice
+	got := f.stock.received[0].TotalCost
 	if got.IsZero() {
 		t.Fatal("stock landed at zero cost — every sale from this batch would report the full price as profit")
 	}
-	// The order's rate, per base unit. The default unit is 1:1 here, so the
-	// rate carries through unchanged.
-	if want := money.MustFromString("900.00"); !got.Equal(want) {
-		t.Errorf("cost = %s, want the ordered rate %s", got, want)
+	// The order's rate times what was accepted: ten at Rs.900.
+	if want := money.MustFromString("9000.00"); !got.Equal(want) {
+		t.Errorf("landed cost = %s, want ten at the ordered rate, %s", got, want)
 	}
 }
 
@@ -893,8 +892,8 @@ func TestReceiptFallsBackToTheStoresRecordedCostPrice(t *testing.T) {
 
 	// No cost stated on the receipt line, so the store's recorded cost applies.
 	receiveAll(t, f, po.ID, productID, money.QuantityFromInt(4))
-	if got := f.stock.received[0].CostPrice; !got.Equal(money.MustFromString("41.25")) {
-		t.Errorf("cost price sent to stock = %s, want the store's 41.25", got)
+	if got := f.stock.received[0].TotalCost; !got.Equal(money.MustFromString("165.00")) {
+		t.Errorf("landed cost sent to stock = %s, want four at the store's 41.25, 165.00", got)
 	}
 	if f.stock.received[0].BatchNo == "" {
 		t.Error("a blank batch reached the stock aggregate; the receipt must allocate one")
@@ -911,8 +910,8 @@ func TestReceiptFallsBackToTheStoresRecordedCostPrice(t *testing.T) {
 		t.Fatalf("receive goods: %v", err)
 	}
 	last := f.stock.received[len(f.stock.received)-1]
-	if !last.CostPrice.Equal(money.MustFromString("52.10")) {
-		t.Errorf("cost price = %s, want the stated 52.10", last.CostPrice)
+	if !last.TotalCost.Equal(money.MustFromString("312.60")) {
+		t.Errorf("landed cost = %s, want six at the stated 52.10, 312.60", last.TotalCost)
 	}
 	if last.BatchNo != "LOT-2026-06" {
 		t.Errorf("batch = %q, want the stated LOT-2026-06", last.BatchNo)
@@ -1219,10 +1218,12 @@ func TestADeliveryCountedInSacksBooksKilosIntoStock(t *testing.T) {
 	if got := f.stock.receivedQty(rice); !got.Equal(money.QuantityFromInt(250)) {
 		t.Errorf("stock received %s, want 250 kg from ten 25 kg sacks", got)
 	}
-	// Stock is costed per base unit. Carrying the sack's Rs.900 straight
-	// through would value 250 kg of rice at Rs.225,000.
-	if got := f.stock.received[0].CostPrice; !got.Equal(money.MustFromString("36.00")) {
-		t.Errorf("cost per kilo = %s, want 36.00 — a Rs.900 sack of 25 kg", got)
+	// The batch holds what the delivery cost, stated: ten sacks at Rs.900. The
+	// per-kilo figure the reports want is derived from it — Rs.36 here — rather
+	// than stored, because a pack size that does not divide evenly has no exact
+	// per-kilo price to store.
+	if got := f.stock.received[0].TotalCost; !got.Equal(money.MustFromString("9000.00")) {
+		t.Errorf("landed cost = %s, want ten sacks at Rs.900, 9000.00", got)
 	}
 
 	// Ten sacks is the whole order, so it is fully received.
@@ -1413,8 +1414,8 @@ func TestTheRecordedCostOfTheOrderedUnitIsTheReceiptsFallback(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("receive goods: %v", err)
 	}
-	if got := f.stock.received[0].CostPrice; !got.Equal(money.MustFromString("35.00")) {
-		t.Errorf("cost per kilo = %s, want 35.00 — Rs.875 for a 25 kg sack", got)
+	if got := f.stock.received[0].TotalCost; !got.Equal(money.MustFromString("3500.00")) {
+		t.Errorf("landed cost = %s, want four sacks at the recorded Rs.875, 3500.00", got)
 	}
 }
 

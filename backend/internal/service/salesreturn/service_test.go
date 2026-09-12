@@ -104,9 +104,10 @@ func (x *shop) product(name, sell, cost, onHand string) uuid.UUID {
 func (x *shop) batch(productID, storeID uuid.UUID, batchNo, qty, cost string) {
 	x.t.Helper()
 	if _, err := x.db.ExecContext(context.Background(),
-		`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
+		`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
 		 VALUES ($1, $2, $3, $4, $5)`, productID, storeID, batchNo,
-		money.MustQuantityFromString(qty), money.MustFromString(cost)); err != nil {
+		money.MustQuantityFromString(qty),
+		money.MustFromString(cost).Mul(money.MustQuantityFromString(qty))); err != nil {
 		x.t.Fatalf("seed batch %s: %v", batchNo, err)
 	}
 }

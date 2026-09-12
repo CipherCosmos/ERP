@@ -122,8 +122,9 @@ func (x *till) sellingUnit(productID uuid.UUID, label, qtyInBase, sell string, i
 func (x *till) stockOnHand(productID uuid.UUID, onHand, cost string) {
 	x.t.Helper()
 	if _, err := x.db.ExecContext(context.Background(),
-		`INSERT INTO stock (product_id, store_id, batch_no, quantity, cost_price)
-		 VALUES ($1, $2, 'OPENING', $3, $4)`, productID, x.storeID,
+		`INSERT INTO stock (product_id, store_id, batch_no, quantity, total_cost)
+		 VALUES ($1, $2, 'OPENING', $3, round($3::numeric * $4::numeric, 2))`,
+		productID, x.storeID,
 		money.MustQuantityFromString(onHand), money.MustFromString(cost)); err != nil {
 		x.t.Fatalf("seed stock: %v", err)
 	}

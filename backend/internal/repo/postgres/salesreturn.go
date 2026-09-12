@@ -172,6 +172,12 @@ type SoldFrom struct {
 	// ReturnedQuantity is how much of it has already been recorded as returned
 	// against this invoice, whatever the status of those returns.
 	ReturnedQuantity money.Quantity
+
+	// SoldCost is what the goods on those lines cost the shop, in full. A
+	// return puts back a proportional share of it, so goods coming back are
+	// worth what they were worth going out and the shop's inventory value does
+	// not move because a customer changed their mind.
+	SoldCost money.Money
 }
 
 // SoldFrom looks up the sale a customer return refers to.
@@ -196,11 +202,13 @@ func (r *SalesReturn) SoldFrom(ctx context.Context, q platform.Querier,
 		        COALESCE((SELECT SUM(ii.quantity) FROM invoice_items ii
 		                   WHERE ii.invoice_id = i.id AND ii.product_id = $3), 0),
 		        COALESCE((SELECT SUM(rr.quantity) FROM returns rr
-		                   WHERE rr.invoice_id = i.id AND rr.product_id = $3), 0)
+		                   WHERE rr.invoice_id = i.id AND rr.product_id = $3), 0),
+		        COALESCE((SELECT SUM(ii.cost_of_goods) FROM invoice_items ii
+		                   WHERE ii.invoice_id = i.id AND ii.product_id = $3), 0)
 		   FROM invoices i
 		  WHERE i.id = $1 AND i.store_id = $2`,
 		invoiceID, storeID, productID).
-		Scan(&out.InvoiceStatus, &batch, &out.SoldQuantity, &out.ReturnedQuantity)
+		Scan(&out.InvoiceStatus, &batch, &out.SoldQuantity, &out.ReturnedQuantity, &out.SoldCost)
 	if err != nil {
 		return SoldFrom{}, platform.MapError(err)
 	}

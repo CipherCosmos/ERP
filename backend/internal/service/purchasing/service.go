@@ -84,10 +84,14 @@ type StockMovement struct {
 	// distinct batch per receipt is what keeps landed costs separable.
 	BatchNo  string
 	Quantity money.Quantity
-	// CostPrice is the landed per-unit cost of goods coming in. It is
-	// meaningless on the way out — what a batch cost is already recorded
+	// TotalCost is what the goods coming in cost, in full — eight sacks at
+	// Rs.940 is Rs.7,520.00. A total and not a rate: the batch holds value, and
+	// a per-unit cost for a pack size that does not divide evenly cannot be
+	// stored without losing paise.
+	//
+	// It is meaningless on the way out — what a batch cost is already recorded
 	// against that batch — and is left zero there.
-	CostPrice money.Money
+	TotalCost money.Money
 }
 
 // StockWriter is the slice of the stock aggregate that purchasing needs, and
@@ -633,7 +637,9 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 			item        domain.GoodsReceiptItem
 			allocations []domain.ReceiptAllocation
 			batchNo     string
-			costPrice   money.Money
+			// landedCost is what the accepted goods on this line cost in full,
+			// not a rate. See the comment where it is computed.
+			landedCost money.Money
 		}
 		plans := make([]plan, 0, len(in.Lines))
 
@@ -699,16 +705,17 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 			if !cost.IsPositive() {
 				cost = orderedRate(items, line.ProductID)
 			}
-			// Stock is costed per base unit, because that is what its quantity
-			// counts. A sack landed at Rs.900 is Rs.36 a kilo, and carrying the
-			// sack's own price through would value 250 kg of rice at Rs.225,000.
-			// This is the one place a unit size is divided by rather than
-			// multiplied, and it is deliberate: a cost basis is not a figure any
-			// document prints, so a recurring decimal here costs a fraction of a
-			// paisa on COGS rather than making a bill fail to add up.
-			// NewGoodsReceiptItem above has already refused a unit whose
-			// qty_in_base is not positive, so the divisor cannot be zero.
-			costPerBase := cost.DivQuantity(unit.QtyInBase)
+			// What the accepted goods cost, in full: the price of one pack
+			// times the packs accepted. A multiplication, so it is exact.
+			//
+			// This used to divide by the pack size to get a cost per base unit,
+			// on the reasoning that a recurring decimal there costs a fraction
+			// of a paisa. Measured, it cost more than that and always in the
+			// same direction: a 30 kg sack at Rs.940 is Rs.31.3333... a kilo,
+			// stored as Rs.31.33, so ten paise went missing between buying the
+			// sack and selling it. The batch carries value now, and nothing on
+			// the way in divides.
+			landed := cost.Mul(domain.AcceptedUnits(line))
 
 			batch := line.BatchNo
 			if batch == "" {
@@ -718,7 +725,7 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 				item:        item,
 				allocations: allocations,
 				batchNo:     batch,
-				costPrice:   costPerBase,
+				landedCost:  landed,
 			})
 		}
 
@@ -774,7 +781,7 @@ func (s *Service) ReceiveGoods(ctx context.Context, in ReceiveGoodsInput) (domai
 					ProductID: p.item.ProductID,
 					BatchNo:   p.batchNo,
 					Quantity:  p.item.AcceptedQty,
-					CostPrice: p.costPrice,
+					TotalCost: p.landedCost,
 				}); err != nil {
 					return fmt.Errorf("receive product %s into stock: %w", p.item.ProductID, err)
 				}
