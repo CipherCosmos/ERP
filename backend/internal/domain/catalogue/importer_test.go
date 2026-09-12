@@ -311,3 +311,168 @@ func itoa(n int) string {
 	}
 	return string(digits)
 }
+
+// The round trip is the whole point of the export: a shop's real price revision
+// is export, edit in a spreadsheet, import. If the file that comes out is not a
+// file that goes back in, none of that works — and the two halves share a row
+// type and a column table precisely so it cannot quietly stop working.
+func TestExportedSheetImportsBackUnchanged(t *testing.T) {
+	t.Parallel()
+	shelfLife := 270
+	original := []catalogue.ImportRow{
+		{
+			Name: "Parle-G Biscuits 200g", NameHi: "पारले-जी", NameKn: "ಪಾರ್ಲೆ-ಜಿ",
+			CategoryPath: []string{"Grocery", "Biscuits"},
+			Unit:         "NOS", Barcode: "8901063010123",
+			HSNCode: "19053100", GSTRate: money.RateFromInt(18),
+			Brand: "Parle", Description: "glucose biscuit",
+			MinStock: money.QuantityFromInt(24), AllowDecimal: false,
+			TracksExpiry: true, ShelfLifeDays: &shelfLife,
+			HasPrice: true,
+			MRP:      money.MustFromString("30.00"), CostPrice: money.MustFromString("24.50"),
+			SellPrice: money.MustFromString("30.00"), WholesaleSellPrice: money.MustFromString("28.00"),
+		},
+		{
+			// The other shape: weighed out of a sack, no barcode, no MRP, and a
+			// name with a comma and a quotation mark in it — which is what the
+			// CSV writer has to quote and the reader has to give back intact.
+			Name:         `Rice, "Sona Masoori"`,
+			CategoryPath: []string{"Grocery", "Rice"},
+			Unit:         "KG",
+			SACCode:      "",
+			HSNCode:      "10063020", GSTRate: money.RateFromInt(0),
+			MinStock: money.MustQuantityFromString("50.500"), AllowDecimal: true,
+			HasPrice:  true,
+			CostPrice: money.MustFromString("52.00"), SellPrice: money.MustFromString("64.00"),
+		},
+	}
+
+	var buf strings.Builder
+	if err := catalogue.WriteExport(&buf, original); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+
+	sheet, err := catalogue.ParseImport(strings.NewReader(buf.String()))
+	if err != nil {
+		t.Fatalf("read the export back: %v\n%s", err, buf.String())
+	}
+	if len(sheet.Problems) != 0 {
+		t.Fatalf("the export does not import cleanly: %v\n%s", sheet.Problems, buf.String())
+	}
+	if len(sheet.Rows) != len(original) {
+		t.Fatalf("rows = %d, want %d", len(sheet.Rows), len(original))
+	}
+
+	for i, want := range original {
+		got := sheet.Rows[i]
+		if got.Name != want.Name || got.NameHi != want.NameHi || got.NameKn != want.NameKn {
+			t.Errorf("row %d names = %q/%q/%q, want %q/%q/%q",
+				i, got.Name, got.NameHi, got.NameKn, want.Name, want.NameHi, want.NameKn)
+		}
+		if strings.Join(got.CategoryPath, ">") != strings.Join(want.CategoryPath, ">") {
+			t.Errorf("row %d category = %v, want %v", i, got.CategoryPath, want.CategoryPath)
+		}
+		if got.Unit != want.Unit || got.Barcode != want.Barcode {
+			t.Errorf("row %d unit/barcode = %q/%q, want %q/%q", i, got.Unit, got.Barcode, want.Unit, want.Barcode)
+		}
+		if got.HSNCode != want.HSNCode || got.SACCode != want.SACCode {
+			t.Errorf("row %d classification = %q/%q, want %q/%q",
+				i, got.HSNCode, got.SACCode, want.HSNCode, want.SACCode)
+		}
+		if !got.GSTRate.Equal(want.GSTRate) {
+			t.Errorf("row %d gst = %s, want %s", i, got.GSTRate, want.GSTRate)
+		}
+		if got.Brand != want.Brand || got.Description != want.Description {
+			t.Errorf("row %d brand/description = %q/%q", i, got.Brand, got.Description)
+		}
+		if !got.MinStock.Equal(want.MinStock) {
+			t.Errorf("row %d min stock = %s, want %s", i, got.MinStock, want.MinStock)
+		}
+		if got.AllowDecimal != want.AllowDecimal || got.TracksExpiry != want.TracksExpiry {
+			t.Errorf("row %d flags = %v/%v, want %v/%v",
+				i, got.AllowDecimal, got.TracksExpiry, want.AllowDecimal, want.TracksExpiry)
+		}
+		switch {
+		case want.ShelfLifeDays == nil && got.ShelfLifeDays != nil:
+			t.Errorf("row %d gained a shelf life of %d", i, *got.ShelfLifeDays)
+		case want.ShelfLifeDays != nil && got.ShelfLifeDays == nil:
+			t.Errorf("row %d lost its shelf life", i)
+		case want.ShelfLifeDays != nil && *got.ShelfLifeDays != *want.ShelfLifeDays:
+			t.Errorf("row %d shelf life = %d, want %d", i, *got.ShelfLifeDays, *want.ShelfLifeDays)
+		}
+		for _, money := range []struct {
+			name       string
+			got, want_ interface{ String() string }
+		}{
+			{"mrp", got.MRP, want.MRP},
+			{"cost", got.CostPrice, want.CostPrice},
+			{"sell", got.SellPrice, want.SellPrice},
+			{"wholesale", got.WholesaleSellPrice, want.WholesaleSellPrice},
+		} {
+			if money.got.String() != money.want_.String() {
+				t.Errorf("row %d %s = %s, want %s", i, money.name, money.got, money.want_)
+			}
+		}
+	}
+}
+
+// The export writes the answers its own reader accepts. A "true"/"false" or a
+// "1"/"0" would also round-trip, but the column is one a person types in next,
+// and they copy the row above.
+func TestExportWritesYesAndNo(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	err := catalogue.WriteExport(&buf, []catalogue.ImportRow{{
+		Name: "Loose thing", CategoryPath: []string{"Grocery"}, Unit: "KG",
+		HSNCode: "1101", AllowDecimal: true, TracksExpiry: false,
+	}})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(buf.String(), ",yes,") || !strings.Contains(buf.String(), ",no,") {
+		t.Errorf("export wrote:\n%s", buf.String())
+	}
+}
+
+// Every column the export writes must be one the import recognises, mapped to
+// the field whose name it carries.
+//
+// This is the check that keeps the two halves together, and the failure it
+// catches already happened once: the export wrote a column headed
+// "description", which this reader takes for the product NAME — because a sheet
+// from another system calls the name column that — so every exported
+// description was read as a second name column and silently dropped.
+func TestEveryExportedColumnIsOneTheImportUnderstands(t *testing.T) {
+	t.Parallel()
+	var buf strings.Builder
+	if err := catalogue.WriteExport(&buf, []catalogue.ImportRow{{
+		Name: "Anything", CategoryPath: []string{"Grocery"}, Unit: "KG", HSNCode: "1101",
+	}}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	header := strings.Split(strings.SplitN(buf.String(), "\n", 2)[0], ",")
+
+	sheet, err := catalogue.ParseImport(strings.NewReader(buf.String()))
+	if err != nil {
+		t.Fatalf("the export does not parse: %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, column := range header {
+		if seen[column] {
+			t.Errorf("the export writes %q twice", column)
+		}
+		seen[column] = true
+		// Has() is keyed on the canonical name of the field the heading
+		// resolved to. A heading that landed on a different field — or on no
+		// field at all — does not come back under its own name.
+		if !sheet.Has(column) {
+			t.Errorf("the export writes a column headed %q that the import does not read as %q", column, column)
+		}
+	}
+	for column := range sheet.Columns {
+		if !seen[column] {
+			t.Errorf("the import found a %q column the export did not write", column)
+		}
+	}
+}

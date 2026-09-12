@@ -353,3 +353,87 @@ func TestImportAcceptsASheetWithNoPrices(t *testing.T) {
 		t.Fatalf("created %d prices %d, want 1 and 0", report.Created, report.PricesSet)
 	}
 }
+
+// Export, edit, import: the loop a shop actually uses for a price revision.
+//
+// This runs it against a real database, which is where the parts the domain
+// round-trip cannot see live — the category path rebuilt from the tree, the
+// unit resolved back to its code, the price read from the default unit.
+func TestExportEditImportIsTheRealPriceRevisionLoop(t *testing.T) {
+	t.Parallel()
+	svc, _, storeID, _ := newService(t)
+	ctx := context.Background()
+
+	setup := `name,category,unit,hsn_code,gst_rate,barcode,brand,mrp,cost_price,sell_price,min_stock,sold_loose
+Zz Loop Atta,Zz Loop > Flour,KG,11010000,5,8901099100001,Ashirvaad,0,38.00,45.00,20,yes
+Zz Loop Biscuit,Zz Loop > Biscuits,NOS,19053100,18,8901099100002,Parle,30.00,24.50,30.00,24,no
+`
+	if r := importCSV(t, svc, setup, service.ImportRequest{StoreID: storeID, Apply: true}); r.Created != 2 {
+		t.Fatalf("setup created %d: %v %+v", r.Created, r.Problems, r.Results)
+	}
+
+	var exported strings.Builder
+	n, err := svc.ExportProducts(ctx, &exported, storeID, false)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if n < 2 {
+		t.Fatalf("export wrote %d rows, want at least the two just created", n)
+	}
+
+	// Edit it the way a shopkeeper does: raise one selling price in the sheet.
+	edited := strings.Replace(exported.String(), ",45.00,", ",48.00,", 1)
+	if edited == exported.String() {
+		t.Fatalf("the selling price was not where it was expected in:\n%s", exported.String())
+	}
+
+	report := importCSV(t, svc, edited,
+		service.ImportRequest{StoreID: storeID, Apply: true, UpdateExisting: true})
+	if len(report.Problems) != 0 || report.Failed != 0 {
+		t.Fatalf("the edited export did not import: %v %+v", report.Problems, report.Results)
+	}
+	// Everything in the sheet was already in the catalogue, so nothing is new.
+	if report.Created != 0 {
+		t.Errorf("re-importing the export created %d products", report.Created)
+	}
+	// And the categories it names are the ones it came from, so none are made.
+	if report.Categories != 0 {
+		t.Errorf("re-importing the export created %d categories", report.Categories)
+	}
+
+	products, err := svc.ListProducts(ctx, domain.ProductFilter{StoreID: storeID, Search: "Zz Loop Atta"})
+	if err != nil || len(products) != 1 {
+		t.Fatalf("read back: %v, %d products", err, len(products))
+	}
+	if !products[0].SellPrice.Equal(money.MustFromString("48.00")) {
+		t.Errorf("sell price = %s, want the 48.00 edited into the sheet", products[0].SellPrice)
+	}
+	// And the things the sheet did not touch survived the round trip.
+	if products[0].Brand != "Ashirvaad" || products[0].Barcode != "8901099100001" {
+		t.Errorf("brand/barcode = %q/%q after the round trip", products[0].Brand, products[0].Barcode)
+	}
+	if !products[0].AllowDecimal {
+		t.Error("the loose flag was lost in the round trip")
+	}
+}
+
+// The export names the category by its full path, so a re-import files
+// everything where it came from instead of flattening the tree into roots.
+func TestExportCarriesTheCategoryPath(t *testing.T) {
+	t.Parallel()
+	svc, _, storeID, _ := newService(t)
+	ctx := context.Background()
+
+	setup := "name,category,unit,hsn_code,gst_rate\nZz Path Item,Zz Path > Middle > Leaf,KG,11010000,5\n"
+	if r := importCSV(t, svc, setup, service.ImportRequest{StoreID: storeID, Apply: true}); r.Created != 1 {
+		t.Fatalf("setup: %v %+v", r.Problems, r.Results)
+	}
+
+	var exported strings.Builder
+	if _, err := svc.ExportProducts(ctx, &exported, storeID, false); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if !strings.Contains(exported.String(), "Zz Path > Middle > Leaf") {
+		t.Fatalf("the export does not carry the path:\n%s", exported.String())
+	}
+}

@@ -129,7 +129,12 @@ var canonical = map[importField]string{
 	fName: "name", fNameHi: "name_hi", fNameKn: "name_kn",
 	fCategory: "category", fUnit: "unit", fBarcode: "barcode",
 	fHSN: "hsn_code", fSAC: "sac_code", fGST: "gst_rate",
-	fBrand: "brand", fDescription: "description", fMinStock: "min_stock",
+	// "notes" rather than "description", and the difference matters: a sheet
+	// exported from another system calls the product NAME "Description", and
+	// this reader accepts that spelling below. Writing a column headed
+	// "description" would therefore produce a file whose own reader takes it
+	// for a second name column and ignores it.
+	fBrand: "brand", fDescription: "notes", fMinStock: "min_stock",
 	fAllowDecimal: "sold_loose", fTracksExpiry: "expires", fShelfLife: "shelf_life_days",
 	fMRP: "mrp", fCost: "cost_price", fSell: "sell_price", fWholesale: "wholesale_price",
 }
@@ -219,9 +224,9 @@ type ImportSheet struct {
 }
 
 // Has reports whether the sheet carried a column. The names are the canonical
-// ones: name, category, unit, barcode, hsn_code, sac_code, gst_rate, brand,
-// description, min_stock, sold_loose, expires, shelf_life_days, mrp,
-// cost_price, sell_price, wholesale_price.
+// ones: name, name_hi, name_kn, category, unit, barcode, hsn_code, sac_code,
+// gst_rate, brand, notes, min_stock, sold_loose, expires, shelf_life_days,
+// mrp, cost_price, sell_price, wholesale_price.
 func (s ImportSheet) Has(column string) bool { return s.Columns[column] }
 
 // HasAnyPriceColumn reports whether the sheet sets prices at all.

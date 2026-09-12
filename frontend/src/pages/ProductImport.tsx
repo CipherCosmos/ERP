@@ -61,17 +61,55 @@ export default function ProductImport() {
     if (chosen) run(chosen, false);
   };
 
+  /**
+   * Hands a generated file to the browser.
+   *
+   * The object URL is released on a later tick, not immediately after the
+   * click. Revoking it in the same turn is the common shape and it is a race:
+   * the click only schedules the download, and a browser that has not started
+   * reading the blob yet finds the URL already gone. Chrome usually survives
+   * it; Safari does not, and the failure is a download that silently never
+   * happens.
+   */
+  const save = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      a.remove();
+      URL.revokeObjectURL(url);
+    }, 30_000);
+  };
+
   const downloadTemplate = async () => {
     try {
       const { data } = await productApi.importTemplate();
-      const url = URL.createObjectURL(data as Blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'gbos-catalogue-template.csv';
-      a.click();
-      URL.revokeObjectURL(url);
+      save(data as Blob, 'gbos-catalogue-template.csv');
     } catch {
       setError('The template could not be downloaded.');
+    }
+  };
+
+  const downloadCatalogue = async () => {
+    if (!storeId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { data } = await productApi.export(storeId);
+      const today = new Date().toISOString().slice(0, 10);
+      save(data as Blob, `gbos-catalogue-${today}.csv`);
+    } catch (err: any) {
+      setError(
+        err?.response?.status === 403
+          ? 'The export includes cost prices, which your role cannot see.'
+          : 'The catalogue could not be exported.'
+      );
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -133,6 +171,11 @@ export default function ProductImport() {
           Upload the item list you already have. Column headings are matched by meaning, so a sheet from
           another system usually works as it is. Nothing is written until you have seen what it would do.
         </p>
+        <p style={{ ...styles.lead, marginTop: space.sm }}>
+          To revise prices, export what is here, edit it in a spreadsheet and upload it again with updating
+          switched on. The export carries each product&rsquo;s default unit; prices for other packs stay as
+          they are.
+        </p>
 
         <div style={styles.controls}>
           <input
@@ -145,8 +188,11 @@ export default function ProductImport() {
           <button style={ui.buttonPrimary} onClick={() => inputRef.current?.click()} disabled={busy}>
             {file ? 'Choose a different file' : 'Choose a spreadsheet'}
           </button>
+          <button style={ui.button} onClick={downloadCatalogue} disabled={busy}>
+            Export what is here now
+          </button>
           <button style={ui.button} onClick={downloadTemplate}>
-            Download the template
+            Download a blank template
           </button>
           {file && <span style={styles.filename}>{file.name}</span>}
         </div>

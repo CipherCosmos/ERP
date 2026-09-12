@@ -529,7 +529,7 @@ func (run *importRun) merge(existing domain.Product, row domain.ImportRow, categ
 	if has("brand") {
 		in.Brand = row.Brand
 	}
-	if has("description") {
+	if has("notes") {
 		in.Description = row.Description
 	}
 	if has("min_stock") {
@@ -638,4 +638,23 @@ func plainMessage(err error) string {
 		msg = strings.TrimPrefix(msg, prefix)
 	}
 	return strings.TrimPrefix(msg, domain.ErrValidation.Error()+": ")
+}
+
+// ExportProducts writes the catalogue as a sheet the import can read back.
+//
+// The round trip is the point. A shop's real price revision is export, edit in
+// a spreadsheet, import; and the two halves share the row type and the column
+// names precisely so that loop cannot quietly stop working.
+func (s *Service) ExportProducts(ctx context.Context, w io.Writer, storeID uuid.UUID, includeInactive bool) (int, error) {
+	if storeID == uuid.Nil {
+		return 0, ErrStoreRequired
+	}
+	rows, err := s.repo.ExportProducts(ctx, s.db, storeID, includeInactive, 0)
+	if err != nil {
+		return 0, fmt.Errorf("read catalogue: %w", err)
+	}
+	if err := domain.WriteExport(w, rows); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
 }

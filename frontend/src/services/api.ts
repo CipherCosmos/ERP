@@ -249,6 +249,19 @@ export const productApi = {
   },
   /** The empty sheet with the headings that are certain to be accepted. */
   importTemplate: () => api.get('/products/import/template', { responseType: 'blob' }),
+  /**
+   * The catalogue as a sheet the import reads back.
+   *
+   * One row per product, carrying its default unit's price. A product also sold
+   * by the sack has other prices and those are not here, because an import row
+   * can only carry one — and a sheet showing figures an import will ignore is
+   * worse than one that does not show them.
+   */
+  export: (storeId: string, includeInactive = false) =>
+    api.get('/products/export', {
+      params: { store_id: storeId, ...(includeInactive ? { include_inactive: 'true' } : {}) },
+      responseType: 'blob',
+    }),
   get: (id: string, storeId: string) => api.get(`/products/${id}`, { params: { store_id: storeId } }),
   /**
    * The units a product may be transacted in: loose by the kilo, a 5 kg bag, a

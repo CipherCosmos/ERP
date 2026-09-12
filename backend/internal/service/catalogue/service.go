@@ -73,6 +73,7 @@ type Repository interface {
 	FindProductByBarcode(ctx context.Context, q platform.Querier, barcode string) (domain.Product, bool, error)
 	FindProductByName(ctx context.Context, q platform.Querier, name string, categoryID uuid.UUID) (domain.Product, bool, error)
 	DefaultProductUnitID(ctx context.Context, q platform.Querier, productID uuid.UUID) (uuid.UUID, bool, error)
+	ExportProducts(ctx context.Context, q platform.Querier, storeID uuid.UUID, includeInactive bool, limit int) ([]domain.ImportRow, error)
 
 	ListProductUnits(ctx context.Context, q platform.Querier, productID uuid.UUID) ([]domain.ProductUnit, error)
 	GetProductUnit(ctx context.Context, q platform.Querier, id, productID uuid.UUID) (domain.ProductUnit, error)

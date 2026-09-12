@@ -1300,3 +1300,91 @@ func oneProduct(row interface{ Scan(...any) error }) (catalogue.Product, bool, e
 	}
 	return p, true, nil
 }
+
+// ---------------------------------------------------------------------------
+// Catalogue export
+// ---------------------------------------------------------------------------
+
+// categoryPaths builds each category's full "Parent > Child" name.
+//
+// Recursive, walking up from every category at once and keeping the longest
+// path found for each — which is the one that reached a root. The depth guard
+// is the same one the cycle check uses and for the same reason: a table that
+// somehow holds a loop must refuse an export rather than hang the database.
+const categoryPaths = `
+WITH RECURSIVE up AS (
+    SELECT id, parent_id, name::text AS path, 1 AS depth FROM categories
+    UNION ALL
+    SELECT u.id, c.parent_id, c.name || ' > ' || u.path, u.depth + 1
+      FROM up u JOIN categories c ON c.id = u.parent_id
+     WHERE u.depth < ` + maxCategoryDepth + `
+), full_path AS (
+    SELECT DISTINCT ON (id) id, path FROM up ORDER BY id, depth DESC
+)`
+
+// ExportProducts returns the catalogue as rows the importer can read back.
+//
+// One row per product with its default unit's prices, because that is what an
+// import row carries. Ordered by category path then name, so the sheet a
+// shopkeeper opens is grouped the way they think about the shop rather than by
+// whatever order the rows happen to sit in.
+func (r *Catalogue) ExportProducts(ctx context.Context, q platform.Querier,
+	storeID uuid.UUID, includeInactive bool, limit int) ([]catalogue.ImportRow, error) {
+	where := `WHERE p.is_active`
+	if includeInactive {
+		where = `WHERE true`
+	}
+	if limit <= 0 || limit > catalogue.MaxImportRows {
+		limit = catalogue.MaxImportRows
+	}
+
+	rows, err := q.QueryContext(ctx, categoryPaths+`
+		SELECT p.name, COALESCE(p.name_hi, ''), COALESCE(p.name_kn, ''),
+		       COALESCE(fp.path, ''), COALESCE(uom.code, ''), COALESCE(p.barcode, ''),
+		       COALESCE(p.hsn_code, ''), COALESCE(p.sac_code, ''), p.gst_rate,
+		       COALESCE(p.brand, ''), COALESCE(p.description, ''),
+		       p.min_stock, p.allow_decimal, p.tracks_expiry, p.shelf_life_days,
+		       COALESCE(pp.mrp, 0), COALESCE(pp.cost_price, 0),
+		       COALESCE(pp.sell_price, 0), COALESCE(pp.wholesale_sell_price, 0),
+		       pp.product_id IS NOT NULL AS has_price
+		  FROM products p
+		  LEFT JOIN full_path fp ON fp.id = p.category_id
+		  LEFT JOIN units_of_measure uom ON uom.id = p.uom_id
+		  -- The default unit, which is the one an import row prices. A product
+		  -- with no default unit still exports; it comes out unpriced rather
+		  -- than not at all, which is the state somebody needs to see.
+		  LEFT JOIN product_units pu
+		         ON pu.product_id = p.id AND pu.is_default AND pu.is_active
+		  LEFT JOIN product_prices pp
+		         ON pp.product_id = p.id AND pp.product_unit_id = pu.id AND pp.store_id = $1
+		 `+where+`
+		 ORDER BY COALESCE(fp.path, ''), p.name
+		 LIMIT $2`, storeID, limit)
+	if err != nil {
+		return nil, platform.MapError(err)
+	}
+	defer rows.Close()
+
+	exported := make([]catalogue.ImportRow, 0)
+	for rows.Next() {
+		var row catalogue.ImportRow
+		var path string
+		if err := rows.Scan(&row.Name, &row.NameHi, &row.NameKn, &path, &row.Unit, &row.Barcode,
+			&row.HSNCode, &row.SACCode, &row.GSTRate, &row.Brand, &row.Description,
+			&row.MinStock, &row.AllowDecimal, &row.TracksExpiry, &row.ShelfLifeDays,
+			&row.MRP, &row.CostPrice, &row.SellPrice, &row.WholesaleSellPrice,
+			&row.HasPrice); err != nil {
+			return nil, fmt.Errorf("scan export row: %w", platform.MapError(err))
+		}
+		for _, part := range strings.Split(path, ">") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				row.CategoryPath = append(row.CategoryPath, trimmed)
+			}
+		}
+		exported = append(exported, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, platform.MapError(err)
+	}
+	return exported, nil
+}

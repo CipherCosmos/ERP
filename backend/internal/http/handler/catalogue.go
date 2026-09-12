@@ -71,6 +71,9 @@ func (h *Catalogue) Register(r gin.IRoutes) {
 	// that is exactly what it does — several thousand times.
 	r.POST("/products/import", mw.RequirePermission(rbac.PermProductCatalogWrite), h.ImportProducts)
 	r.GET("/products/import/template", mw.RequirePermission(rbac.PermCatalogRead), h.ImportTemplate)
+	// Export carries cost prices, so it sits behind the price permission — the
+	// same reasoning as price history.
+	r.GET("/products/export", mw.RequirePermission(rbac.PermProductPrice), h.ExportProducts)
 	r.PUT("/products/:id", mw.RequirePermission(rbac.PermProductUpdate), h.UpdateProduct)
 	r.POST("/products/:id/deactivate", mw.RequirePermission(rbac.PermProductUpdate), h.DeactivateProduct)
 	r.POST("/products/:id/activate", mw.RequirePermission(rbac.PermProductUpdate), h.ActivateProduct)
@@ -1023,4 +1026,28 @@ func (h *Catalogue) RecentPriceChanges(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"changes": changes, "since": since})
+}
+
+// ExportProducts hands back the catalogue as a spreadsheet.
+//
+// It is written straight to the response rather than buffered: five thousand
+// rows is a few hundred kilobytes, and streaming it means a slow client cannot
+// make the server hold the whole thing.
+func (h *Catalogue) ExportProducts(c *gin.Context) {
+	storeID, ok := scope.MustStore(c)
+	if !ok {
+		return
+	}
+	filename := fmt.Sprintf("gbos-catalogue-%s.csv", time.Now().In(document.Location).Format("2006-01-02"))
+	c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+
+	if _, err := h.svc.ExportProducts(c.Request.Context(), c.Writer,
+		storeID, c.Query("include_inactive") == "true"); err != nil {
+		// The status line is already gone by the time a write fails partway,
+		// so there is no error envelope to send. Logging it is all that is
+		// left, and the client sees a truncated file rather than a lie.
+		respond(c, err)
+		return
+	}
 }
