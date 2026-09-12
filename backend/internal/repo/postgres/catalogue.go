@@ -250,12 +250,19 @@ func (r *Catalogue) SetCategoryActive(ctx context.Context, q platform.Querier, i
 // base_uom_id is nullable in the schema — a family and its canonical unit
 // cannot both be inserted first — so it is scanned through a pointer and left
 // as uuid.Nil when absent rather than COALESCEd to a magic identifier.
-const familyColumns = `id, code, name, base_uom_id, is_active`
+const familyColumns = `f.id, f.code, f.name, f.base_uom_id, f.is_active,
+	COALESCE(base.code, ''),
+	(SELECT count(*) FROM units_of_measure m WHERE m.family_id = f.id AND m.is_active)`
+
+const familyFrom = `
+	FROM unit_families f
+	LEFT JOIN units_of_measure base ON base.id = f.base_uom_id`
 
 func scanFamily(s interface{ Scan(...any) error }) (catalogue.Family, error) {
 	var f catalogue.Family
 	var baseUOM *uuid.UUID
-	if err := s.Scan(&f.ID, &f.Code, &f.Name, &baseUOM, &f.IsActive); err != nil {
+	if err := s.Scan(&f.ID, &f.Code, &f.Name, &baseUOM, &f.IsActive,
+		&f.BaseUOMCode, &f.UnitCount); err != nil {
 		return catalogue.Family{}, err
 	}
 	if baseUOM != nil {
@@ -264,14 +271,47 @@ func scanFamily(s interface{ Scan(...any) error }) (catalogue.Family, error) {
 	return f, nil
 }
 
+// UnitUsage reports what depends on a unit of measure.
+//
+// One query rather than three, because the answer is read to decide a write and
+// the three counts have to describe the same moment.
+func (r *Catalogue) UnitUsage(ctx context.Context, q platform.Querier, id uuid.UUID) (catalogue.UnitUsage, error) {
+	var u catalogue.UnitUsage
+	err := q.QueryRowContext(ctx,
+		`SELECT
+			(SELECT count(*) FROM products p WHERE p.uom_id = $1 AND p.is_active),
+			(SELECT count(*) FROM product_units pu WHERE pu.uom_id = $1 AND pu.is_active),
+			EXISTS (SELECT 1 FROM unit_families f WHERE f.base_uom_id = $1),
+			(SELECT count(*) FROM units_of_measure m
+			   JOIN units_of_measure self ON self.id = $1
+			  WHERE m.family_id = self.family_id AND m.id <> $1 AND m.is_active)`,
+		id).Scan(&u.Products, &u.ProductUnits, &u.IsFamilyBase, &u.SiblingCount)
+	if err != nil {
+		return catalogue.UnitUsage{}, platform.MapError(err)
+	}
+	return u, nil
+}
+
+// FamilyUnitCount is how many active units a family still holds. It is what
+// decides whether the family can be retired.
+func (r *Catalogue) FamilyUnitCount(ctx context.Context, q platform.Querier, familyID uuid.UUID) (int, error) {
+	var n int
+	err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM units_of_measure WHERE family_id = $1 AND is_active`, familyID).Scan(&n)
+	if err != nil {
+		return 0, platform.MapError(err)
+	}
+	return n, nil
+}
+
 // ListFamilies returns the unit families in code order.
 func (r *Catalogue) ListFamilies(ctx context.Context, q platform.Querier, includeInactive bool) ([]catalogue.Family, error) {
-	where := ` WHERE is_active`
+	where := ` WHERE f.is_active`
 	if includeInactive {
 		where = ``
 	}
 	rows, err := q.QueryContext(ctx,
-		`SELECT `+familyColumns+` FROM unit_families`+where+` ORDER BY code`)
+		`SELECT `+familyColumns+familyFrom+where+` ORDER BY f.code`)
 	if err != nil {
 		return nil, platform.MapError(err)
 	}
@@ -294,7 +334,7 @@ func (r *Catalogue) ListFamilies(ctx context.Context, q platform.Querier, includ
 // GetFamily returns one family, or platform.ErrNotFound.
 func (r *Catalogue) GetFamily(ctx context.Context, q platform.Querier, id uuid.UUID) (catalogue.Family, error) {
 	f, err := scanFamily(q.QueryRowContext(ctx,
-		`SELECT `+familyColumns+` FROM unit_families WHERE id = $1`, id))
+		`SELECT `+familyColumns+familyFrom+` WHERE f.id = $1`, id))
 	if err != nil {
 		return catalogue.Family{}, platform.MapError(err)
 	}

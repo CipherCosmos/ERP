@@ -43,6 +43,8 @@ type Repository interface {
 	UpdateFamily(ctx context.Context, q platform.Querier, f domain.Family) (bool, error)
 	SetFamilyBaseUnit(ctx context.Context, q platform.Querier, familyID, uomID uuid.UUID) (bool, error)
 	SetFamilyActive(ctx context.Context, q platform.Querier, id uuid.UUID, active bool) (bool, error)
+	FamilyUnitCount(ctx context.Context, q platform.Querier, familyID uuid.UUID) (int, error)
+	UnitUsage(ctx context.Context, q platform.Querier, id uuid.UUID) (domain.UnitUsage, error)
 
 	ListUnits(ctx context.Context, q platform.Querier, f domain.UnitFilter) ([]domain.UnitOfMeasure, error)
 	GetUnit(ctx context.Context, q platform.Querier, id uuid.UUID) (domain.UnitOfMeasure, error)
@@ -423,16 +425,42 @@ func (s *Service) SetFamilyBaseUnit(ctx context.Context, familyID, uomID uuid.UU
 	return nil
 }
 
-// SetFamilyActive deactivates or reactivates a unit family.
+// SetFamilyActive retires a unit family or brings it back.
+//
+// Retiring one that still holds units is refused. Deactivating a family does
+// not deactivate its members, so the units would stay on every product that
+// uses them while disappearing from the list the unit form offers — usable but
+// unfindable, which looks from the outside like the data having been lost.
 func (s *Service) SetFamilyActive(ctx context.Context, id uuid.UUID, active bool) error {
-	found, err := s.repo.SetFamilyActive(ctx, s.db, id, active)
-	if err != nil {
-		return fmt.Errorf("set unit family active: %w", err)
-	}
-	if !found {
-		return platform.ErrNotFound
-	}
-	return nil
+	return s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		family, err := s.repo.GetFamily(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if family.IsActive == active {
+			return nil
+		}
+		if !active {
+			units, err := s.repo.FamilyUnitCount(ctx, tx, id)
+			if err != nil {
+				return fmt.Errorf("count units: %w", err)
+			}
+			if units > 0 {
+				return fmt.Errorf("%w: %s still holds %s — retire %s first",
+					domain.ErrValidation, family.Name,
+					plural(units, "unit", "units"),
+					map[bool]string{true: "it", false: "them"}[units == 1])
+			}
+		}
+		found, err := s.repo.SetFamilyActive(ctx, tx, id, active)
+		if err != nil {
+			return fmt.Errorf("set unit family active: %w", err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		return nil
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +507,16 @@ func (s *Service) CreateUnit(ctx context.Context, in CreateUnitInput) (domain.Un
 		if err := s.repo.CreateUnit(ctx, tx, u); err != nil {
 			return err
 		}
-		if family.BaseUOMID == uuid.Nil && u.FactorToBase.Equal(money.RateFromInt(1)) {
+		// The family adopts a factor-one unit as its base when it has none, or
+		// when the one it names has been retired.
+		//
+		// The second case is reachable: retiring every unit in a family leaves
+		// the base pointer aimed at a retired row, and a family brought back
+		// into use would otherwise state that it converts through a unit
+		// nothing can see or offer. Conversions still work either way — each
+		// unit carries its own factor — but a base nobody can pick is not a
+		// base, and the next unit added is the natural moment to fix it.
+		if u.FactorToBase.Equal(money.RateFromInt(1)) && !s.familyHasLiveBase(ctx, tx, family) {
 			if _, err := s.repo.SetFamilyBaseUnit(ctx, tx, u.FamilyID, u.ID); err != nil {
 				return fmt.Errorf("adopt %s as the base unit of %s: %w", u.Code, family.Code, err)
 			}
@@ -527,16 +564,90 @@ func (s *Service) UpdateUnit(ctx context.Context, id uuid.UUID, in UpdateUnitInp
 	return validated, nil
 }
 
-// SetUnitActive deactivates or reactivates a unit of measure.
+// SetUnitActive retires a unit of measure or brings it back.
+//
+// Three things can depend on a unit and all three are refusals.
+//
+// Products stocked in it: the shelf figure on every one of them becomes a
+// number with nothing to say what it is a number of, and the screens resolve
+// the code from the active list so it does not fall back, it blanks.
+//
+// Product units transacted in it, for the same reason one layer down.
+//
+// And being its family's canonical unit, which is the one that is not obvious:
+// every other member's factor is expressed against it, so retiring it is not
+// removing one row but removing the anchor all the conversions in that family
+// are measured from. Name another base first.
 func (s *Service) SetUnitActive(ctx context.Context, id uuid.UUID, active bool) error {
-	found, err := s.repo.SetUnitActive(ctx, s.db, id, active)
+	return s.db.InTx(ctx, func(ctx context.Context, tx platform.Tx) error {
+		unit, err := s.repo.GetUnit(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if unit.IsActive == active {
+			return nil
+		}
+		if !active {
+			usage, err := s.repo.UnitUsage(ctx, tx, id)
+			if err != nil {
+				return fmt.Errorf("check what uses %s: %w", unit.Code, err)
+			}
+			if reason := unitInUseReason(unit, usage); reason != "" {
+				return fmt.Errorf("%w: %s", domain.ErrValidation, reason)
+			}
+		} else {
+			// A unit brought back under a retired family is usable and
+			// invisible: the unit form lists active families, so nothing can
+			// offer it.
+			family, err := s.repo.GetFamily(ctx, tx, unit.FamilyID)
+			if err != nil {
+				return err
+			}
+			if !family.IsActive {
+				return fmt.Errorf("%w: %s measures %s, which has been retired — bring that back first",
+					domain.ErrValidation, unit.Code, family.Name)
+			}
+		}
+		found, err := s.repo.SetUnitActive(ctx, tx, id, active)
+		if err != nil {
+			return fmt.Errorf("set unit active: %w", err)
+		}
+		if !found {
+			return platform.ErrNotFound
+		}
+		return nil
+	})
+}
+
+// familyHasLiveBase reports whether the family's canonical unit exists and is
+// still in use. A read failure is treated as "yes", so an adoption never
+// happens on the strength of a lookup that did not answer.
+func (s *Service) familyHasLiveBase(ctx context.Context, q platform.Querier, family domain.Family) bool {
+	if family.BaseUOMID == uuid.Nil {
+		return false
+	}
+	base, err := s.repo.GetUnit(ctx, q, family.BaseUOMID)
 	if err != nil {
-		return fmt.Errorf("set unit active: %w", err)
+		return !errors.Is(err, platform.ErrNotFound)
 	}
-	if !found {
-		return platform.ErrNotFound
+	return base.IsActive
+}
+
+// unitInUseReason renders why a unit cannot be retired, or "" when it can.
+func unitInUseReason(unit domain.UnitOfMeasure, usage domain.UnitUsage) string {
+	switch {
+	case usage.Products > 0:
+		return fmt.Sprintf("%s stocked in %s — change those first",
+			plural(usage.Products, "product is", "products are"), unit.Code)
+	case usage.ProductUnits > 0:
+		return fmt.Sprintf("%s sold or bought in %s — change those first",
+			plural(usage.ProductUnits, "product unit is", "product units are"), unit.Code)
+	case usage.IsFamilyBase && usage.SiblingCount > 0:
+		return fmt.Sprintf(
+			"%s is what the other %s convert through — name a different base unit first",
+			unit.Code, plural(usage.SiblingCount, "unit", "units"))
 	}
-	return nil
+	return ""
 }
 
 // ---------------------------------------------------------------------------

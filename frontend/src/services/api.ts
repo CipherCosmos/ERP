@@ -1,5 +1,17 @@
 import axios, { AxiosResponse } from 'axios';
-import { Category, CategoryMergeResult, ImportReport, PriceMovement, Product, Store, Customer, Invoice, Terminal } from '../types';
+import {
+  Category,
+  CategoryMergeResult,
+  ImportReport,
+  PriceMovement,
+  Product,
+  Store,
+  Customer,
+  Invoice,
+  Terminal,
+  UnitFamily,
+  UnitOfMeasure,
+} from '../types';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || '/api/v1',
@@ -549,7 +561,16 @@ export const stockApi = {
 // at a 404.
 
 export const uomApi = {
-  list: (familyId?: string) => list<any>(api.get('/uoms', { params: { family_id: familyId } }), 'units'),
+  list: (familyId?: string, includeInactive = false) =>
+    list<UnitOfMeasure>(
+      api.get('/uoms', {
+        params: {
+          ...(familyId ? { family_id: familyId } : {}),
+          ...(includeInactive ? { include_inactive: 'true' } : {}),
+        },
+      }),
+      'units'
+    ),
   create: (data: { code: string; name: string; decimal_places?: number; family_id: string; factor_to_base: number }) =>
     api.post('/uoms', data),
   update: (id: string, data: { name?: string; decimal_places?: number; factor_to_base?: number }) =>
@@ -565,10 +586,16 @@ export const uomApi = {
  * rather than merely discouraged.
  */
 export const unitFamilyApi = {
-  list: () => list<any>(api.get('/unit-families'), 'families'),
-  create: (data: { code: string; name: string }) => api.post('/unit-families', data),
-  update: (id: string, data: { name: string }) => api.put(`/unit-families/${id}`, data),
+  list: (includeInactive = false) =>
+    list<UnitFamily>(
+      api.get('/unit-families', { params: includeInactive ? { include_inactive: 'true' } : {} }),
+      'families'
+    ),
+  create: (data: { code: string; name: string }) => api.post<UnitFamily>('/unit-families', data),
+  update: (id: string, data: { name: string }) => api.put<UnitFamily>(`/unit-families/${id}`, data),
   setBaseUnit: (id: string, uomId: string) => api.post(`/unit-families/${id}/base-unit`, { uom_id: uomId }),
+  deactivate: (id: string) => api.post(`/unit-families/${id}/deactivate`),
+  activate: (id: string) => api.post(`/unit-families/${id}/activate`),
 };
 
 export const analyticsApi = {

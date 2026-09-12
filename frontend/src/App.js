@@ -10,6 +10,7 @@ import Products from './pages/Products';
 import Categories from './pages/Categories';
 import ProductImport from './pages/ProductImport';
 import PriceChanges from './pages/PriceChanges';
+import Units from './pages/Units';
 import Dashboard from './pages/Dashboard';
 import Menu from './pages/Menu';
 import Customers from './pages/Customers';
@@ -102,6 +103,7 @@ function App() {
         <Route path="/categories" element={<Categories />} />
         <Route path="/products/import" element={<ProductImport />} />
         <Route path="/price-changes" element={<PriceChanges />} />
+        <Route path="/units" element={<Units />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/customers" element={<Customers />} />
         <Route path="/credit" element={<Credit />} />

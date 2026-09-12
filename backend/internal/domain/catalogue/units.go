@@ -42,6 +42,34 @@ type Family struct {
 	// but a shop that thinks in grams loses nothing.
 	BaseUOMID uuid.UUID `json:"base_uom_id"`
 	IsActive  bool      `json:"is_active"`
+
+	// BaseUOMCode and UnitCount ride along on the read model. The units screen
+	// lists families and would otherwise fetch the canonical unit's code and
+	// count the members once per row.
+	BaseUOMCode string `json:"base_uom_code,omitempty"`
+	UnitCount   int    `json:"unit_count"`
+}
+
+// UnitUsage is what depends on a unit of measure. It is what decides whether a
+// unit can be retired, and the counts are what the refusal says.
+type UnitUsage struct {
+	// Products stocked in this unit. Retiring it leaves every one of them with
+	// a quantity and nothing to say what the quantity is of.
+	Products int `json:"products"`
+	// ProductUnits selling or buying in this measure.
+	ProductUnits int `json:"product_units"`
+	// IsFamilyBase says this is the unit its whole family converts through.
+	// Every other member's factor is expressed against it, so retiring it is
+	// not removing one row, it is removing the anchor for all of them.
+	IsFamilyBase bool `json:"is_family_base"`
+	// SiblingCount is how many other active units share the family, which is
+	// what makes being the base matter.
+	SiblingCount int `json:"sibling_count"`
+}
+
+// InUse reports whether anything depends on the unit.
+func (u UnitUsage) InUse() bool {
+	return u.Products > 0 || u.ProductUnits > 0 || (u.IsFamilyBase && u.SiblingCount > 0)
 }
 
 // NewFamily validates and returns a unit family ready to persist.

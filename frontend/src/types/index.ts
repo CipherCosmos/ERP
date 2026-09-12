@@ -32,6 +32,34 @@ export interface Terminal {
   is_active: boolean;
 }
 
+/**
+ * A group of units that convert between each other: weight, volume, count,
+ * length, area, and whatever else a trade needs. Units convert only within a
+ * family, which is what makes selling rice by the litre impossible rather than
+ * merely discouraged.
+ */
+export interface UnitFamily {
+  id: string;
+  code: string;
+  name: string;
+  /** The unit every member converts through. */
+  base_uom_id: string;
+  base_uom_code?: string;
+  unit_count: number;
+  is_active: boolean;
+}
+
+export interface UnitOfMeasure {
+  id: string;
+  code: string;
+  name: string;
+  family_id: string;
+  /** How many of the family's canonical unit one of these is. A gram is 0.001. */
+  factor_to_base: number;
+  decimal_places: number;
+  is_active: boolean;
+}
+
 export interface Category {
   id: string;
   name: string;
