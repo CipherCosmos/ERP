@@ -130,48 +130,102 @@ for ep in "credit?store_id=$BOGUS" "credit/overdue?store_id=$BOGUS"; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" "$BASE/$ep")
   [ "$code" = "403" ] && ok "GET /${ep%%\?*} rejects an unknown store" || bad "GET /$ep should be 403" "HTTP $code"
 done
-code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH[@]}" \
+# The store has to be named where the server reads it. A store_id in the body
+# is not a scoping input — it is ignored, by design — so probing with one
+# proves nothing and passing it would be the wrong kind of reassurance.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+  -H "Authorization: Bearer $TOKEN" -H "X-Store-ID: $BOGUS" \
   -H 'Content-Type: application/json' \
-  -d "{\"name\":\"Scope Probe\",\"store_id\":\"$BOGUS\"}" "$BASE/customers")
+  -d '{"name":"Scope Probe"}' "$BASE/customers?store_id=$BOGUS")
 [ "$code" = "403" ] && ok "POST /customers rejects an unknown store" || bad "customer create scoping" "HTTP $code"
 code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "${AUTH[@]}" \
   -H 'Content-Type: application/json' -d '{"name":"Hijacked"}' "$BASE/stores/$BOGUS")
 [ "$code" = "403" ] && ok "PUT /stores/:id rejects an unknown store" || bad "store update scoping" "HTTP $code"
 
 echo
-echo "== 5. Invoice status is not client-controlled =="
-PROD=$(curl -s "${AUTH[@]}" -G --data-urlencode "store_id=$STORE" "$BASE/products" \
-  | jq -r 'if type=="array" then .[0].id elif has("products") then .products[0].id else empty end // empty')
-if [ -n "$PROD" ]; then
-  INV=$(curl -s -X POST "${AUTH[@]}" -H 'Content-Type: application/json' -d "{
-    \"store_id\":\"$STORE\",\"invoice_date\":\"$(date +%F)\",\"sub_total\":55,\"cgst\":1.375,
-    \"sgst\":1.375,\"igst\":0,\"discount\":0,\"round_off\":0,\"total\":57.75,
-    \"status\":\"voided\",\"payment_mode\":\"cash\",
-    \"items\":[{\"product_id\":\"$PROD\",\"quantity\":1,\"rate\":55,\"total\":55}]}" "$BASE/invoices")
-  IID=$(echo "$INV" | jq -r '.id // empty')
+echo "== 5. The client cannot name its own status or total =="
+
+# A fresh database seeds nothing, so the probe builds what it needs. Three rows:
+# a category, a product with one sellable unit, and stock to sell from.
+api() { curl -s -X "$1" "${AUTH[@]}" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: verify-$$-$RANDOM" -d "${3:-}" "$BASE$2?store_id=$STORE"; }
+
+CAT=$(api POST /categories '{"name":"Probe"}' | jq -r '.id // empty')
+KG=$(curl -s "${AUTH[@]}" "$BASE/uoms?store_id=$STORE" | jq -r '.units[]? | select(.code=="KG") | .id')
+PROD=$(api POST /products "{\"name\":\"Probe Item\",\"category_id\":\"$CAT\",\"uom_id\":\"$KG\",\"gst_rate\":5,\"allow_decimal\":true}" | jq -r '.id // empty')
+UNIT=$(api POST "/products/$PROD/units" "{\"label\":\"Each\",\"qty_in_base\":1,\"uom_id\":\"$KG\",\"is_default\":true,\"is_sellable\":true}" | jq -r '.id // empty')
+api POST /products/price "{\"product_id\":\"$PROD\",\"product_unit_id\":\"$UNIT\",\"mrp\":100,\"cost_price\":40,\"sell_price\":55}" >/dev/null
+api POST /stock/adjust "{\"product_id\":\"$PROD\",\"product_unit_id\":\"$UNIT\",\"unit_qty\":10,\"type\":\"add\",\"batch_no\":\"PROBE\",\"cost_price\":40,\"reason\":\"probe\"}" >/dev/null
+
+TERM=$(api POST "/stores/$STORE/terminals" '{"code":"TV","name":"Verify"}' | jq -r '.id // empty')
+
+if [ -n "$PROD" ] && [ -n "$UNIT" ] && [ -n "$TERM" ]; then
+  # One unit at 55 plus 5% is 57.75. The request asserts a voided status and a
+  # total of 1.00; both must be ignored. A caller who could name either could
+  # post a Rs.1 sale, or a sale that deducts stock while reading as cancelled.
+  INV=$(api POST /invoices "{\"terminal_id\":\"$TERM\",\"payment_mode\":\"cash\",
+    \"status\":\"voided\",\"total\":1.00,\"sub_total\":1.00,
+    \"items\":[{\"product_id\":\"$PROD\",\"product_unit_id\":\"$UNIT\",\"unit_qty\":1,\"total\":1.00}]}")
+  IID=$(echo "$INV" | jq -r '.invoice.id // empty')
   if [ -n "$IID" ]; then
-    ST=$(curl -s "${AUTH[@]}" "$BASE/invoices/$IID" | jq -r '.invoice.status // .status // empty')
+    ST=$(echo "$INV" | jq -r '.invoice.status // empty')
+    TOT=$(echo "$INV" | jq -r '.invoice.total // empty')
     [ "$ST" = "completed" ] && ok "an invoice posted as 'voided' is stored as 'completed'" \
       || bad "client-supplied status must be ignored" "stored status = $ST"
+    [ "$TOT" = "57.75" ] && ok "the server's total wins over the client's" \
+      || bad "client-supplied total must be ignored" "stored total = $TOT, want 57.75"
   else
-    bad "could not create the probe invoice" "$(head -c 200 <<<"$INV")"
+    bad "could not create the probe invoice" "$(head -c 300 <<<"$INV")"
   fi
 else
-  bad "could not find a seeded product" "products response empty"
+  bad "could not build the probe product" "product=$PROD unit=$UNIT terminal=$TERM"
 fi
 
 echo
 echo "== 6. Audit log redaction =="
-curl -s -o /dev/null -X POST "${AUTH[@]}" -H 'Content-Type: application/json' \
-  -d '{"old_password":"verifypass123","new_password":"NewVerifyPass456"}' "$BASE/auth/change-password"
-AUD=$(curl -s "${AUTH[@]}" -G --data-urlencode "store_id=$STORE" --data-urlencode "limit=50" "$BASE/audit")
+code=$(curl -s -o "$WORK/chpw.json" -w '%{http_code}' -X POST "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"old_password":"verifypass123","new_password":"NewVerifyPass456"}' "$BASE/auth/change-password")
+[ "$code" = "200" ] && ok "the password changed" || bad "change-password" "HTTP $code $(head -c 200 "$WORK/chpw.json")"
+
+# Changing a password ends every session, this request's included, so the old
+# token can no longer read anything. Reading the trail with it would return a
+# 401 and make the redaction check below pass vacuously.
+NEWTOK=$(curl -s -X POST "$BASE/auth/login" -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"NewVerifyPass456"}' | jq -r '.token // empty')
+[ -n "$NEWTOK" ] && ok "the old password no longer signs in, the new one does" \
+  || bad "could not sign in with the new password" "login returned no token"
+code=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH[@]}" -G \
+  --data-urlencode "store_id=$STORE" "$BASE/audit")
+[ "$code" = "401" ] && ok "the session that changed the password was ended" \
+  || bad "changing a password must end existing sessions" "old token still works: HTTP $code"
+
+# The trail is written after the response is flushed — deliberately, so a
+# failed audit insert cannot turn a successful change into a 500 — so the row
+# may not be readable the instant the caller gets its 200. Poll rather than
+# read once; reading once makes this check flaky and a flaky security check is
+# one people learn to rerun until it passes.
+AUD=""
+for _ in $(seq 1 20); do
+  AUD=$(curl -s -H "Authorization: Bearer $NEWTOK" -H "X-Store-ID: $STORE" -G \
+    --data-urlencode "store_id=$STORE" --data-urlencode "limit=50" "$BASE/audit")
+  grep -q 'change_password' <<<"$AUD" && break
+  sleep 0.2
+done
 if grep -q 'NewVerifyPass456\|verifypass123' <<<"$AUD"; then
   bad "a password must never reach the audit log" "found a password in the audit response"
 else
   ok "no password appears in the audit log"
 fi
+# The trail records the derived action, not the URL: DescribeRoute turns
+# POST /auth/change-password into table "auth", action "change_password".
+if grep -q 'change_password' <<<"$AUD"; then
+  ok "the password change is in the trail"
+else
+  bad "the password change must be audited" "no change_password entry in the last 50"
+fi
 grep -q 'redacted' <<<"$AUD" && ok "the audited entry records redacted fields" \
-  || echo "  NOTE  no '[redacted]' marker present — change-password may not have been audited"
+  || bad "the audited body must show [redacted] where the credential was" "no marker found"
 
 echo
 echo "=================================="

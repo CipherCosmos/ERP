@@ -51,6 +51,11 @@ type Claims struct {
 type jwtClaims struct {
 	Role    string `json:"role"`
 	StoreID string `json:"sid"`
+	// Epoch is the user's session generation at signing time. It exists because
+	// iat is only second-precise and therefore cannot decide whether a token
+	// was minted before or after an invalidation in the same second. Absent in
+	// tokens issued before this field existed, which reads as zero.
+	Epoch int64 `json:"sess,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -119,6 +124,7 @@ func (s *Service) sign(u domain.User) (string, error) {
 	claims := jwtClaims{
 		Role:    string(u.Role),
 		StoreID: u.StoreID.String(),
+		Epoch:   u.SessionEpoch(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   u.ID.String(),
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -171,7 +177,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Claims, domai
 	if !u.IsActive {
 		return Claims{}, domain.User{}, domain.ErrInactive
 	}
-	if !u.TokenIsCurrent(claims.IssuedAt.Time) {
+	if !u.TokenIsCurrent(claims.Epoch) {
 		return Claims{}, domain.User{}, errors.New("session has been signed out")
 	}
 

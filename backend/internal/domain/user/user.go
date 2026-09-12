@@ -185,13 +185,32 @@ func (u User) VerifyPassword(password string) error {
 	return nil
 }
 
-// TokenIsCurrent reports whether a token issued at issuedAt is still honoured.
-// A token predating the user's last sign-out-everywhere is not.
-func (u User) TokenIsCurrent(issuedAt time.Time) bool {
+// SessionEpoch identifies the generation of sessions a user is currently on.
+//
+// It is stamped into every token at signing time and compared for equality on
+// every request, which is what makes signing out everywhere exact. Comparing a
+// token's issue time against the invalidation instant cannot be exact: a JWT
+// carries iat in whole seconds, so a token minted 900ms after an invalidation
+// claims to predate it. That made a password change leave the user unable to
+// use their brand-new session for the rest of the second — they would sign in,
+// get a token, and be bounced back to the login screen by the next 401.
+//
+// Zero means "never invalidated", which is both the value a fresh user has and
+// the value a token carries when the claim is absent.
+func (u User) SessionEpoch() int64 {
 	if u.SessionsInvalidatedAt == nil {
-		return true
+		return 0
 	}
-	// Tokens carry whole-second precision, so a token issued in the same
-	// second as the invalidation must be rejected rather than kept.
-	return issuedAt.After(*u.SessionsInvalidatedAt)
+	return u.SessionsInvalidatedAt.UTC().UnixNano()
+}
+
+// TokenIsCurrent reports whether a token carrying this session epoch is still
+// honoured. Anything but the user's current epoch has been signed out.
+//
+// A token minted before this change carries no epoch and so arrives as zero.
+// For a user who has never signed out everywhere that is their epoch too and
+// the token still works; for a user who has, it does not, which is the safe
+// direction — they sign in once more.
+func (u User) TokenIsCurrent(epoch int64) bool {
+	return epoch == u.SessionEpoch()
 }

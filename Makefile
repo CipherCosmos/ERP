@@ -1,4 +1,4 @@
-.PHONY: backend frontend smoke e2e verify-security migrate-down-all backup restore-drill \
+.PHONY: backend frontend smoke verify-security migrate-down-all backup restore-drill \
         db-up db-down db-reset db-psql test test-unit migrate-up migrate-down migrate-status \
         ops-check caddy-check restore install-timers logs ps health
 
@@ -135,10 +135,6 @@ test-unit:
 smoke: db-up
 	bash backend/scripts/smoke-test.sh
 
-# Mutating end-to-end pass against an already-running server. Defaults to
-# 127.0.0.1:8080; set GBOS_API to point it elsewhere.
-e2e:
-	bash backend/scripts/comprehensive-e2e-test.sh
 
 # Security regressions from the hardening pass. Starts its own server on an
 # ephemeral port against a throwaway database.
