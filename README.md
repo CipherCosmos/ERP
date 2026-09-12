@@ -1,406 +1,145 @@
-# GBOS ERP - Enterprise Resource Planning System
+# GBOS
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-118/118%20passing-brightgreen)]()
-[![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)]()
-[![License](https://img.shields.io/badge/license-MIT-blue)]()
-[![Go Version](https://img.shields.io/badge/go-1.21+-blue)]()
+A point of sale and back office for an Indian retail or distribution business.
+One to three shops, a counter that has to keep billing when the internet does
+not, goods that sell both loose and in bulk, and GST returns that have to tie to
+the cash drawer.
 
-A **production-ready Enterprise Resource Planning (ERP) system** for retail and distribution businesses with online/offline capabilities, comprehensive inventory management, financial tracking, and multi-store support.
+**Status: not yet live anywhere.** The books are correct and the operations are
+in place; offline billing and the pilot are not done. See
+[What is not finished](#what-is-not-finished).
 
-## 🎯 Overview
+## The problem this is shaped around
 
-**GBOS ERP** is a complete, cloud-capable ERP solution featuring:
+A sack of rice is not twenty-five kilos of rice, commercially. It costs less per
+kilo, it scans differently, and a customer buys one or the other. Most retail
+schemas cannot say that: a product has one price and one unit, so bulk must cost
+exactly twenty-five times loose, which forbids the trade that bulk exists for.
 
-- ✅ **Multi-store inventory management** across locations
-- ✅ **Real-time sales & invoicing** with offline support
-- ✅ **Advanced stock tracking** with batch/expiry management
-- ✅ **Financial management** (payments, credit, GST compliance)
-- ✅ **Purchase order & vendor management** with returns
-- ✅ **Comprehensive analytics** (dashboards, reports, trends)
-- ✅ **Role-based access control** (49+ permissions, 5 roles)
-- ✅ **Mobile app** with offline-first architecture
-- ✅ **PWA web app** with service worker sync
-- ✅ **Production-ready** with 100% test coverage
+So in GBOS a unit is a row, not an enum:
 
-**Status:** ✅ **100% SRS Compliant** | **Production Ready** | **Fully Tested**
+- **Families** group units that convert to one another by a stored factor. A
+  kilo is a thousand grams everywhere, so that factor belongs to the unit.
+- **A product's units** list what *that* product may be transacted as: loose by
+  the kilo, a 5 kg bag, a 25 kg sack. Each carries `qty_in_base` — how many of
+  the product's own stocking unit one of them amounts to — its own price per
+  store, and its own barcode.
+- **Stock is one pool in the base unit.** Receiving ten 25 kg sacks adds 250 kg;
+  a 400 g sale takes 0.4 off the same pile. A shop can never be out of loose
+  rice while sacks sit unopened.
+- **A line total is `rate x unit_qty`** — a multiplication. Deriving a per-kilo
+  rate from a sack's price gives 41.999… and a bill built on it is short.
 
----
+Adding a unit, or a whole new family, is an INSERT. No deploy.
 
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Go 1.21+
-- Node.js 18+
-- Flutter 3.0+ (for mobile)
-- SQLite 3
-- Docker & Docker Compose (optional)
-
-### 1. Start Backend
+## Running it locally
 
 ```bash
-cd backend
-go run cmd/server/main.go
+make db-up        # PostgreSQL 16 in docker, on 5434
+make backend      # migrates, seeds an owner, prints its password once
+make frontend     # http://localhost:3000
 ```
 
-Backend runs on: **http://localhost:8080**
+The backend needs no configuration in development. In release mode it refuses to
+start without `JWT_SECRET`, `DATABASE_URL` and an explicit `CORS_ORIGIN`, and it
+rejects known placeholder secrets by name.
 
-### 2. Start Frontend
+The owner password comes from `GBOS_ADMIN_PASSWORD` if set; otherwise one is
+generated and printed once at startup, because nothing stores it in the clear.
+
+## How it is put together
+
+```
+backend/
+  cmd/server            wiring only
+  cmd/migrate           schema up, down, version
+  migrations/postgres   the schema, embedded in both binaries
+  internal/
+    platform/           config, pgx pool and Tx runner, error mapping, logging,
+                        the HTTP error envelope, an in-process cache
+    domain/             entities and invariants. No SQL, no HTTP.
+      money/            Money (2dp), Quantity (3dp), Rate — one rounding policy each
+    repo/postgres/      all SQL. One file per aggregate.
+    service/            transactions, invariants, idempotency
+    http/               thin handlers, middleware, the router
+frontend/src/
+  pages/                27 screens
+  components/           DataTable, form kit, modal, charts
+  theme.ts              colour, spacing, type, radius, shadow
+  services/api.ts       the single HTTP choke point
+```
+
+Three rules hold the shape: SQL only in `repo/`, transactions only in
+`service/`, and handlers never touch the database. The previous implementation
+had all 219 queries inside HTTP handlers, and the cost was not style — it was
+that every rule was a hand-written repetition nobody owned, so the same defect
+recurred wherever someone forgot it.
+
+### Money
+
+Three decimal types, each with its own scale and its own rounding policy stated
+once. `NUMERIC` in Postgres, `shopspring/decimal` in Go, never a float64 — `Scan`
+refuses one rather than rounding it, because a rupee value arriving as binary
+floating point is the defect these types exist to prevent.
+
+There are no tolerance comparisons anywhere. The seven `math.Abs(x) > 0.05`
+checks that used to reconcile client and server float drift are gone; equality
+is exact.
+
+### What the database enforces itself
+
+Status columns are enums. Stock and reserved quantities cannot go negative. A
+credit entry cannot be overpaid. An invoice series is unique per store. Money
+columns are exact numeric. A defect the database rejects cannot be reintroduced
+by the next handler someone writes.
+
+### Invoice numbering
+
+Per terminal: `INV/T1/2026-27/00001`, allocated gap-free from a sequence table
+inside the sale's own transaction. CGST Rule 46(b) wants each series consecutive
+and unique, and a terminal owning its own series never has to coordinate — which
+is also what makes offline billing possible later.
+
+The financial year turns at Indian midnight. Every date boundary in the system —
+the year, a GSTR-1 month, a trading day — derives from one fixed +05:30, so two
+of them can never disagree.
+
+### Tax invoice particulars
+
+Description, HSN code and rate of tax are snapshotted onto each invoice line
+when it is written, not joined from the catalogue. Renaming a product must not
+rewrite the bills it was already sold on, and a rate moved by notification must
+not make an old invoice reprint at a rate the customer was never charged.
+
+## Testing
 
 ```bash
-cd frontend
-npm install
-npm start
+make test            # 41 packages against real Postgres
+make test-unit       # just the ones that need no database
+make smoke           # a trading day against the built binary, over HTTP
+make verify-security # the hardening checks, each tied to a past defect
 ```
 
-Frontend runs on: **http://localhost:3000**
+Repository and service tests run against a real PostgreSQL, never a mock.
+Mocked SQL would have hidden most of what was wrong here — drained cursors,
+lock ordering, `ILIKE` versus `LIKE`, exact numeric.
 
-### 3. Mobile App (Optional)
+| | Statement coverage |
+|---|---|
+| `internal/domain` | 90% |
+| `internal/platform` | 84% |
+| `internal/repo` | 78% |
+| `internal/service` | 72% |
+| `internal/http` | 38% |
+| **overall** | **62%** |
 
-```bash
-cd mobile
-flutter pub get
-flutter run
-```
+Measured with `-coverpkg=./...`, so a service test credits the repository code it
+drives. The HTTP layer is the thin one and also the weakest covered; that is the
+gap to close next, not a claim that it does not matter.
 
-### 4. Run Tests
-
-```bash
-cd backend
-
-# Reset database
-bash scripts/reset-db.sh
-
-# Run comprehensive E2E tests (100+ assertions)
-bash scripts/comprehensive-e2e-test.sh
-```
-
-**Expected Result:** ✅ **118/118 tests passing (100% success rate)**
-
----
-
-## 📋 Project Structure
-
-```
-ERP/
-├── backend/                    # Go API server
-│   ├── cmd/server/            # Application entry point
-│   ├── internal/
-│   │   ├── config/            # Configuration management
-│   │   ├── db/                # Database & migrations
-│   │   ├── handlers/          # API endpoint handlers
-│   │   ├── middleware/        # Authentication, rate limiting
-│   │   ├── models/            # Data models
-│   │   └── rbac/              # Role-based access control
-│   ├── scripts/
-│   │   ├── comprehensive-e2e-test.sh  # Full test suite (100+ tests)
-│   │   ├── reset-db.sh                # Database reset
-│   │   └── smoke-test.sh              # Basic tests
-│   ├── migrations/            # Database schema migrations
-│   ├── Dockerfile            # Multi-stage Go build
-│   └── go.mod                # Go dependencies
-│
-├── frontend/                   # React web application
-│   ├── src/
-│   │   ├── pages/            # Page components
-│   │   ├── components/       # Reusable components
-│   │   ├── services/         # API client
-│   │   ├── hooks/            # Custom React hooks
-│   │   ├── types/            # TypeScript interfaces
-│   │   └── i18n/             # Internationalization
-│   ├── public/
-│   │   ├── service-worker.js # PWA offline support
-│   │   └── manifest.json     # PWA manifest
-│   ├── Dockerfile           # Node.js builder + Nginx runtime
-│   ├── nginx.conf           # Reverse proxy config
-│   └── package.json
-│
-├── mobile/                    # Flutter mobile app
-│   ├── lib/
-│   │   ├── screens/         # UI screens
-│   │   ├── services/        # API & offline DB
-│   │   ├── models/          # Data models
-│   │   └── main.dart        # App entry
-│   └── pubspec.yaml
-│
-├── docker-compose.yml        # Multi-container orchestration
-├── .github/workflows/        # CI/CD pipelines
-├── E2E_TESTING_GUIDE.md     # Detailed test documentation
-├── EXECUTION_GUIDE.md       # How to run tests
-└── README.md                # This file
-```
-
----
-
-## ✨ Key Features
-
-### 📦 Inventory Management
-
-- **Stock Tracking**: Real-time stock levels by product, store, batch
-- **Multi-unit Support**: Pieces, boxes, kilograms, liters (with decimal support)
-- **Batch Management**: FEFO/FIFO tracking with expiry dates
-- **Stock Adjustments**: Record losses, wastage, adjustments
-- **Stock Transfers**: Move stock between locations
-- **Low Stock Alerts**: Automatic notifications when stock below threshold
-- **Stock Conversion**: Convert between different unit sizes
-- **Reserved Stock**: Track committed/reserved quantities
-
-### 💰 Sales & Invoicing
-
-- **Invoice Generation**: Create invoices in seconds
-- **Multiple Payment Modes**: Cash, cheque, card, bank transfer, credit
-- **Customer Types**: Retail (cash), wholesale (bulk discounts), credit customers
-- **Decimal Quantities**: Support for fractional quantities (2.5kg, 0.75L)
-- **Discounts**: Line-item & invoice-level discounts
-- **Tax Calculation**: 
-  - **Intra-state**: CGST + SGST (50/50 split)
-  - **Inter-state**: IGST (determined by GSTIN state codes)
-- **Invoice Void**: Void with automatic stock restoration
-- **Receipt Printing**: PDF generation with store header
-
-### 🛒 Purchase Orders
-
-- **Vendor Management**: Track vendors, credit limits, credit days
-- **Purchase Orders**: Create, track, receive orders
-- **Partial Receipt**: Receive goods in multiple shipments
-- **Batch Tracking**: Record batch numbers, expiry dates, cost prices
-- **Purchase Returns**: Return defective/damaged goods
-- **Vendor Payments**: Pay vendors with multiple payment modes
-- **Credit Limit Enforcement**: Prevent overspend
-
-### 💳 Credit & Payments
-
-- **Credit Management**: Track customer outstanding balances
-- **Payment Recording**: Record partial/full payments
-- **Payment Methods**: Multiple payment modes (cash, cheque, bank, etc.)
-- **Credit Aging**: Identify overdue amounts
-- **Credit Limit Enforcement**: Prevent sales beyond customer credit limit
-- **Vendor Credit Tracking**: Track vendor credit terms and utilization
-
-### 📊 Analytics & Reports
-
-- **Dashboard**: Revenue, GST, invoice count, avg bill value, low stock alerts
-- **Sales by Category**: Revenue breakdown by product category
-- **Top Products**: Identify best-selling products
-- **Hourly Sales**: Track sales trends by hour
-- **Payment Breakdown**: Sales by payment mode
-- **Multi-Store Analytics**: Cross-store aggregation for owners
-- **Profit & Loss**: Revenue - COGS - expenses = net profit
-- **Credit Aging**: Days outstanding analysis
-- **GST-3B Summary**: Tax filing compliance report
-
-### 🔐 Security & Access Control
-
-**49+ Permissions across 5 roles:**
-
-- **Owner**: Full system access, multi-store management
-- **Manager**: Store management, reporting, limited financials
-- **User**: Invoice creation, stock updates, basic reporting
-- **Viewer**: Read-only access to dashboards
-- **Guest**: Limited public information
-
-**Security Features:**
-- JWT authentication with configurable expiry
-- Password hashing (bcrypt)
-- RBAC on every endpoint
-- Session management
-- Audit logging
-- Rate limiting (global & login-specific)
-- CORS protection
-
-### 📱 Mobile App
-
-- **Offline-First**: Full functionality without internet
-- **SQLite Database**: Local data persistence
-- **Background Sync**: Automatic sync when online
-- **Dashboard**: Quick business metrics
-- **Stock Tab**: View inventory, pull-to-refresh
-- **Customers Tab**: Search customers, view credit
-- **Invoices Tab**: View transactions, filter by date
-- **Barcode Scanning**: Scan products (flutter_barcode_scanner)
-
-### 🌐 Web Application (PWA)
-
-- **Service Worker**: Offline support with network-first caching
-- **IndexedDB**: Client-side caching for offline mode
-- **Background Sync**: Queue invoices, auto-sync when online
-- **Responsive Design**: Works on desktop, tablet, mobile
-- **Real-time Updates**: Live data from backend
-- **PDF Export**: Invoices, reports as PDFs
-
----
-
-## 🏗️ Architecture
-
-### Technology Stack
-
-**Backend:**
-- **Language**: Go 1.21+
-- **Framework**: Gin Web Framework
-- **Database**: SQLite with WAL mode
-- **Authentication**: JWT tokens
-- **Testing**: Go testing + curl-based E2E tests
-
-**Frontend:**
-- **Framework**: React 18+ with TypeScript
-- **State**: React Context API + Hooks
-- **Caching**: IndexedDB + Service Workers
-- **UI**: Material-UI / Bootstrap
-- **i18n**: english, hindi, kannada
-
-**Mobile:**
-- **Framework**: Flutter
-- **Local Database**: SQLite (sqflite)
-- **Networking**: HTTP client
-- **Storage**: Local filesystem
-
-**Infrastructure:**
-- **Database**: SQLite (file-based)
-- **API**: RESTful JSON
-- **Deployment**: Docker & Docker Compose
-- **CI/CD**: GitHub Actions
-
-### API Architecture
-
-```
-/api/v1/
-├── /auth              # Authentication
-│   ├── POST /login    # User login
-│   └── POST /logout   # User logout
-│
-├── /products          # Product management
-│   ├── POST           # Create product
-│   ├── GET            # List products
-│   ├── PUT /:id       # Update product
-│   └── DELETE /:id    # Delete product
-│
-├── /invoices          # Sales invoicing
-│   ├── POST           # Create invoice
-│   ├── GET            # List invoices
-│   ├── GET /:id       # Get invoice details
-│   ├── POST /:id/void # Void invoice (restore stock)
-│   └── GET /?filter   # Filter by date, customer
-│
-├── /stock             # Inventory management
-│   ├── GET            # Get stock levels
-│   ├── POST /adjust   # Adjust stock
-│   ├── POST /loss     # Record loss
-│   ├── POST /convert  # Convert units
-│   └── GET /movement  # View stock history
-│
-├── /purchase-orders   # Vendor management
-│   ├── POST           # Create PO
-│   ├── GET            # List POs
-│   ├── POST /:id/recv # Receive goods
-│   └── POST /returns  # Create return
-│
-├── /analytics         # Business intelligence
-│   ├── GET /dashboard # Revenue, GST, metrics
-│   ├── GET /sales-cat # By category
-│   ├── GET /top-prods # Top products
-│   ├── GET /hourly    # Hourly trends
-│   ├── GET /payment   # Payment breakdown
-│   ├── GET /multi-str # Cross-store
-│   ├── GET /profit    # P&L report
-│   ├── GET /credit    # Credit aging
-│   └── GET /gstr3b    # GST compliance
-│
-├── /credit            # Payment management
-│   ├── GET /:cust     # Customer credit
-│   └── POST /pay      # Record payment
-│
-└── /vendors           # Vendor management
-    ├── POST           # Create vendor
-    ├── GET            # List vendors
-    └── PUT /:id       # Update vendor
-```
-
----
-
-## 📊 Database Schema
-
-**Key Tables:**
-- `users` - Application users with roles
-- `stores` - Multiple store locations
-- `products` - Product catalog with pricing
-- `categories` - Product categorization
-- `product_units` - Unit of measurement mapping
-- `stock` - Current stock levels by batch/location
-- `invoices` - Sales transactions
-- `invoice_items` - Line items per invoice
-- `credit_entries` - Customer credit tracking
-- `customers` - Customer master data
-- `purchase_orders` - Vendor purchase orders
-- `purchase_order_items` - PO line items
-- `purchase_returns` - Returned items to vendors
-- `expenses` - Business expenses
-- `vendors` - Vendor master data
-- `stock_adjustments` - Stock losses, adjustments
-- `audit_logs` - All changes for compliance
-- And 10+ more supporting tables
-
----
-
-## 🧪 Testing
-
-### Test Coverage
-
-- ✅ **100+ Unit Tests** - Core business logic
-- ✅ **100+ E2E Tests** - Full workflow validation
-- ✅ **13 Testing Phases** - Complete system coverage
-- ✅ **100% Success Rate** - All tests passing
-
-### Running Tests
-
-```bash
-cd backend
-
-# Unit tests
-go test ./...
-
-# E2E tests
-bash scripts/comprehensive-e2e-test.sh
-
-# Smoke tests (basic)
-bash scripts/smoke-test.sh
-```
-
-### Test Phases
-
-1. **Authentication** - Login, token validation
-2. **Master Data** - Products, categories, UOMs
-3. **Purchase Orders** - Create, receive, track
-4. **Stock Management** - Adjustments, losses, tracking
-5. **Invoicing** - Create, void, receipts
-6. **Payments** - Credit, collections
-7. **Vendor Management** - Returns, payments
-8. **Analytics** - Reports, dashboards
-9. **Inventory Tracking** - Low stock, expiry, batches
-10. **Stress Testing** - Concurrent operations
-11. **Error Handling** - Validation, edge cases
-12. **Data Integrity** - Financial reconciliation
-13. **Final Verification** - System readiness
-
-### Test Data Generated
-
-**Products (4 items)**
-- Laptop: ₹89,999 (pieces, fixed qty)
-- Rice: ₹450/kg (kilos, decimal qty)
-- Paracetamol: ₹85/box (boxes, fixed qty)
-- Sanitizer: ₹180/L (liters, decimal qty)
-
-**Customers (3 types)**
-- Retail: Cash customer
-- Wholesale: Bulk buyer with discounts
-- Credit: Corporate with payment terms
-
-**Transactions**
-- 8+ invoices (~₹350K total volume)
-- Multiple payment modes
-- Various discount scenarios
-
----
+Concurrency is tested, not assumed: twenty tills billing at once, crossed
+baskets that used to deadlock, concurrent voids, and an idempotency key retried
+while the original is still in flight.
 
 ## 🚀 Deployment
 
@@ -460,265 +199,33 @@ bash scripts/restore-drill.sh            # prove a backup restores. Safe; never 
 
 ---
 
-## 🔄 CI/CD Pipeline
 
-**GitHub Actions**, on every push and pull request:
-
-- `go vet` and the full Go suite with `-race`, against a **real PostgreSQL
-  service container** — not mocks
-- migrations up from empty, all the way down, and up again
-- frontend lint and production build
-- **Ops Config**: parses `docker-compose.yml` (and proves it refuses to start
-  with any secret missing), checks only Caddy publishes a host port, validates
-  the Caddyfile, and runs shellcheck over `scripts/`
-- builds both Docker images
-
-Nothing is deployed automatically, and no step swallows a failure.
-
-View `.github/workflows/ci.yml`
-
----
-
-## 📖 Documentation
-
-- **[docs/RUNBOOK.md](./docs/RUNBOOK.md)** - Operating the system on a VPS: first deploy, backups, restore, logs, outages
-- **[EXECUTION_GUIDE.md](./EXECUTION_GUIDE.md)** - Complete testing guide with expected outputs
-- **[E2E_TESTING_GUIDE.md](./E2E_TESTING_GUIDE.md)** - Detailed test scenarios (13 phases, 100+ cases)
-- **[backend/scripts/README.md](./backend/scripts/README.md)** - Test utilities reference
-
----
-
-## 💡 Usage Examples
-
-### Create an Invoice
-
-```bash
-curl -X POST "http://localhost:8080/api/v1/invoices" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "customer_id": "cust-123",
-    "payment_mode": "cash",
-    "items": [
-      {
-        "product_id": "prod-456",
-        "quantity": 2,
-        "rate": 450,
-        "discount": 0
-      }
-    ],
-    "discount": 0
-  }'
-```
-
-### Get Dashboard Analytics
-
-```bash
-curl "http://localhost:8080/api/v1/analytics/dashboard?store_id=store-001" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-
-# Response:
-{
-  "revenue": 125000,
-  "gst_collected": 14500,
-  "invoice_count": 15,
-  "avg_bill_value": 8333,
-  "low_stock_count": 3,
-  "credit_outstanding": 45000
-}
-```
-
-### Track Stock Movement
-
-```bash
-curl "http://localhost:8080/api/v1/stock/movements?product_id=prod-789" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-
-# Response: Array of stock in/out transactions
-```
-
----
-
-## ⚙️ Configuration
-
-### Database
-
-Located at: `backend/internal/db/db.go`
-
-**Features:**
-- SQLite with WAL (Write-Ahead Logging) for concurrency
-- 5-second busy timeout for lock contention
-- Automatic connection pooling
-- Run-time migrations
-
-### Authentication
-
-Located at: `backend/internal/config/config.go`
-
-**Configuration:**
-- JWT expiry (default: 24 hours)
-- Session management
-- Password hashing (bcrypt)
-- Rate limiting (100 req/s global, 10 req/min login)
-
-### RBAC Permissions
-
-Location: `backend/internal/rbac/rbac.go`
-
-**49 Permissions including:**
-- `product.create`, `product.read`, `product.update`, `product.delete`
-- `invoice.create`, `invoice.void`, `invoice.payment`
-- `stock.view`, `stock.adjust`, `stock.transfer`
-- `analytics.view`, `analytics.export`
-- `vendor.create`, `vendor.payment`
-- And 35+ more...
-
----
-
-## 🐛 Troubleshooting
-
-### Backend won't start
-```bash
-# Check if port 8080 is in use
-lsof -i :8080
-
-# Try different port
-PORT=9000 go run cmd/server/main.go
-```
-
-### Tests fail
-```bash
-# Verify backend is running
-curl http://localhost:8080/api/v1/health
-
-# Check database exists
-ls -la backend/data/gbos.db
-
-# Reset database
-bash backend/scripts/reset-db.sh
-```
-
-### Database locked
-```bash
-# SQLite may have stale connections
-# Restart backend and try again
-# Or delete: backend/data/gbos.db-shm
-```
-
----
-
-## 📈 Performance Metrics
-
-**Benchmarks:**
-- Invoice Creation: <200ms
-- Stock Query: <100ms
-- Analytics Dashboard: <500ms
-- Concurrent Invoices: 10+ simultaneously
-- Daily Transaction Capacity: 10,000+
-
----
-
-## 🔐 Security
-
-- ✅ **JWT Authentication** - Secure token-based auth
-- ✅ **RBAC** - Role-based permissions on every endpoint
-- ✅ **Input Validation** - All fields validated
-- ✅ **SQL Injection Prevention** - Parameterized queries
-- ✅ **CORS Protection** - Restricted origins
-- ✅ **Rate Limiting** - Global + login-specific limits
-- ✅ **Audit Logging** - All changes tracked
-- ✅ **Password Hashing** - bcrypt with salt
-- ✅ **Session Management** - Secure cookies
-- ✅ **Error Handling** - No sensitive data in errors
-
----
-
-## 📝 License
-
-This project is licensed under the MIT License - see LICENSE file for details.
-
----
-
-## 👥 Contributors
-
-**GBOS ERP Development Team**
-
-Comprehensive implementation:
-- Backend (Go)
-- Frontend (React)
-- Mobile (Flutter)
-- Infrastructure (Docker)
-- Testing (100+ tests)
-- Documentation (complete)
-
----
-
-## 🤝 Support
-
-For issues, questions, or feedback:
-
-1. Check **[EXECUTION_GUIDE.md](./EXECUTION_GUIDE.md)** for quick start
-2. Review **[E2E_TESTING_GUIDE.md](./E2E_TESTING_GUIDE.md)** for detailed scenarios
-3. Examine backend logs for errors
-4. Run `bash backend/scripts/comprehensive-e2e-test.sh` to validate system
-
----
-
-## 🎯 Roadmap
-
-### Current Status: ✅ COMPLETE
-- [x] Phase A: Backend critical fixes
-- [x] Phase B: Schema & models
-- [x] Phase C: API handlers
-- [x] Phase D: Frontend fixes
-- [x] Phase E: Frontend enhancements
-- [x] Phase F: Infrastructure
-- [x] Phase G: Mobile app
-- [x] Phase H: Sync & offline
-- [x] Phase I: Testing & polish
-
-### Potential Enhancements (v2.0)
-- [ ] Advanced reporting (Excel, CSV export)
-- [ ] Email integration (invoices, reminders)
-- [ ] SMS alerts (low stock, payment due)
-- [ ] Website integration (e-commerce sync)
-- [ ] Advanced forecasting (AI/ML predictions)
-- [ ] Multi-currency support
-- [ ] Advanced RBAC workflows
-
----
-
-## 📊 Statistics
-
-- **Lines of Code**: 50,000+
-- **Unit Tests**: 30+
-- **E2E Tests**: 100+
-- **Test Success Rate**: 100%
-- **API Endpoints**: 40+
-- **Database Tables**: 20+
-- **RBAC Permissions**: 49
-- **User Roles**: 5
-- **Supported Languages**: 3 (English, Hindi, Kannada)
-- **Production Ready**: ✅ YES
-
----
-
-## 🎉 Quick Start Command
-
-Get up and running in 60 seconds:
-
-```bash
-# Terminal 1: Backend
-cd backend && go run cmd/server/main.go
-
-# Terminal 2: Tests (after 3 seconds)
-cd backend && bash scripts/comprehensive-e2e-test.sh
-```
-
-**Expected:** ✅ **118/118 tests passing**
-
----
-
-**Status:** 🟢 **Production Ready** | **100% SRS Compliant** | **Fully Tested**
-
-For detailed information, see documentation files in the project root.
+## What is not finished
+
+| | |
+|---|---|
+| **Offline billing** | Not built. The counter needs the server. The old service-worker sync is removed: it read IndexedDB while the app wrote `localStorage`, its token getter always returned an empty string, and the offline path printed no receipt. Replacing it properly means terminal-scoped series (done), an outbox, idempotent sync against `processed_requests` (done), and cash-only rules offline. |
+| **Pilot** | Not run. The gate is fourteen consecutive days in one shop reconciling against the cash drawer and a physical stock count with no manual correction. |
+| **Mobile app** | Cut. The `mobile/` tree was seven Dart files, never built, read-only, with its API URL hardcoded to an emulator loopback. The web app is a PWA and serves the same purpose. |
+| **HSN enforcement** | A product can be saved with no HSN code, and then its invoices go out without one. The invoice view flags it; nothing yet prevents it. |
+
+## Known judgement calls
+
+Three decisions deliberately left open rather than made quietly:
+
+1. **Idempotency keys are scoped by check, not by key.** A mismatched store now
+   gets a 409 rather than another shop's invoice, but the primary key is still
+   the raw client string. The clean fix is a composite `(store_id, key)`, which
+   is a migration that has to decide what happens to retries in flight across
+   the deploy.
+2. **A unit size with a fourth decimal is refused**, not rounded. `qty_in_base`
+   is `numeric(14,4)` while quantities are `numeric(14,3)`. Refusing is
+   consistent with the rule against silent tolerances, but it makes such a pack
+   unsellable rather than slightly wrong. The alternative is widening quantities.
+3. **Rejected goods close a purchase order.** The goods came, they were refused,
+   nothing more is coming — which is the documented convention and is pinned by
+   a test. Some trades expect a short receipt to leave the order open.
+
+## Licence
+
+MIT.
