@@ -91,11 +91,23 @@ func NewRouter(svcs app.Services, cfg Config) (*gin.Engine, func(), error) {
 		login.Close()
 	}
 
-	r.Use(global.Limit())
-
+	// CORS first, and the rate limiter after it. Two reasons, and the second is
+	// the one that cost an afternoon:
+	//
+	//   - A refusal has to be comprehensible. A 429 written before the CORS
+	//     headers are set reaches the browser as "blocked by CORS policy", which
+	//     says nothing about rate limiting and sends whoever reads it looking at
+	//     the wrong thing entirely. The shop sees a blank screen either way; the
+	//     difference is whether anyone can find out why.
+	//   - A preflight is not a request the shop made. The browser sends one
+	//     before most of them, so counting them halves the real limit — and a
+	//     till working quickly is exactly when that starts to bite. CORS answers
+	//     OPTIONS and aborts, so the limiter never sees one.
 	if cfg.CORSOrigin != "" {
 		r.Use(corsMiddleware(cfg.CORSOrigin))
 	}
+
+	r.Use(global.Limit())
 
 	api := r.Group("/api/v1")
 	api.GET("/health", healthHandler(cfg.DB))

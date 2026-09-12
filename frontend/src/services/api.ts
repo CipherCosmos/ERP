@@ -87,7 +87,15 @@ api.interceptors.response.use(
     if (error.response?.status === 401) {
       localStorage.removeItem('token');
       localStorage.removeItem('storeId');
-      window.location.href = '/login';
+      // Not if we are already there. The login screen still renders components
+      // that load data, and a persisted session whose token has expired makes
+      // each of those 401 — every one of which used to reassign location and
+      // reload the page, which loaded them again. Measured on a real tab before
+      // the guard: eight thousand requests and a rate-limited server, from a
+      // till nobody had touched.
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
     }
     const data = error.response?.data;
     if (data && typeof data === 'object' && 'error' in data) {
@@ -276,6 +284,28 @@ export const customerApi = {
     api.put(`/customers/${id}`, data),
 };
 
+/**
+ * What a reconciliation screen needs: the things a shop has to look at after a
+ * till has been offline.
+ */
+export const reconciliationApi = {
+  list: (storeId: string, opts?: { resolved?: boolean; kind?: string }) =>
+    list<any>(
+      api.get('/reconciliation', {
+        params: {
+          store_id: storeId,
+          resolved: opts?.resolved ? 'true' : undefined,
+          kind: opts?.kind || undefined,
+        },
+      }),
+      'exceptions'
+    ),
+  countOpen: (storeId: string) =>
+    field<number>(api.get('/reconciliation/count', { params: { store_id: storeId } }), 'open'),
+  resolve: (id: string, storeId: string, note: string) =>
+    api.post(`/reconciliation/${id}/resolve`, { note }, { params: { store_id: storeId } }),
+};
+
 export const barcodeApi = {
   lookup: (barcode: string, storeId: string) =>
     api.get(`/barcodes/lookup/${encodeURIComponent(barcode)}`, { params: { store_id: storeId } }),
@@ -319,8 +349,19 @@ export const vendorApi = {
 };
 
 export const paymentApi = {
-  addSplitPayments: (data: { invoice_id: string; payments: { payment_mode: string; amount: number; reference?: string }[] }) =>
-    api.post('/payments/split', data),
+  /**
+   * The idempotency key is what makes a retried settlement safe. A till syncing
+   * a backlog sends each one under a key derived from the sale's, so a reply it
+   * never sees is answered with the original settlement rather than taking the
+   * money a second time.
+   */
+  addSplitPayments: (
+    data: { invoice_id: string; payments: { payment_mode: string; amount: number; reference?: string }[] },
+    idempotencyKey?: string
+  ) =>
+    api.post('/payments/split', data, {
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
+    }),
   getInvoicePayments: (invoiceId: string) =>
     list<any>(api.get(`/payments/invoice/${invoiceId}`), 'payments'),
   getSettlement: (params: { store_id: string; date?: string }) =>

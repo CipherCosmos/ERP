@@ -127,6 +127,25 @@ The financial year turns at Indian midnight. Every date boundary in the system �
 the year, a GSTR-1 month, a trading day — derives from one fixed +05:30, so two
 of them can never disagree.
 
+### Billing with the line down
+
+A till that cannot reach the server keeps billing. It prices from a catalogue
+snapshot on the device, numbers the bill from its own terminal's series — online
+too, so the path is exercised on every sale rather than only when the network is
+down — and hands the customer a complete tax invoice. The sale is committed to
+an outbox before the cashier is told anything; if that write fails, the only
+honest answer is that nothing was recorded.
+
+A sale that has already happened is never refused on sync, only flagged. The
+goods left the shop and the money is in the drawer, so if the shelf disagrees the
+shelf is wrong, and if a customer went past a credit limit the till could not
+check, the debt is real. Both land and raise a reconciliation exception: a task
+for somebody, not an error. `GET /reconciliation` is the working list.
+
+The rule this rests on is one till per terminal code. Two devices billing on one
+code collide on the invoice-number index and fail loudly on sync, which is the
+right failure.
+
 ### Tax invoice particulars
 
 Every product carries the classification a tax invoice has to print — an HSN code
@@ -241,7 +260,6 @@ bash scripts/restore-drill.sh            # prove a backup restores. Safe; never 
 
 | | |
 |---|---|
-| **Offline billing** | Not built. The counter needs the server. The old service-worker sync is removed: it read IndexedDB while the app wrote `localStorage`, its token getter always returned an empty string, and the offline path printed no receipt. Replacing it properly means terminal-scoped series (done), an outbox, idempotent sync against `processed_requests` (done), and cash-only rules offline. |
 | **Pilot** | Not run. The gate is fourteen consecutive days in one shop reconciling against the cash drawer and a physical stock count with no manual correction. |
 | **Mobile app** | Cut. The `mobile/` tree was seven Dart files, never built, read-only, with its API URL hardcoded to an emulator loopback. The web app is a PWA and serves the same purpose. |
 

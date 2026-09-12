@@ -103,6 +103,17 @@ type Terminal struct {
 	Code     string    `json:"code"`
 	Name     string    `json:"name"`
 	IsActive bool      `json:"is_active"`
+
+	// NextInvoiceSeq is where this counter's series has reached in the current
+	// financial year, so a till can start from the right place.
+	//
+	// It rides along on the read path rather than living on the terminal,
+	// because it is a property of the year and not of the counter. A till that
+	// bills offline allocates its own numbers, and a device provisioned without
+	// this starts at one and collides with every bill the shop has already
+	// issued — which is not a numbering problem, it is a sale rejected on sync
+	// for a reason the cashier cannot see and cannot fix.
+	NextInvoiceSeq int64 `json:"next_invoice_seq"`
 }
 
 // terminalCodePattern keeps a code usable inside an invoice number: no

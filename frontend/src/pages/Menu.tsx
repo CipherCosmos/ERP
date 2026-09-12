@@ -1,16 +1,18 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { menuT } from '../i18n/menu';
-import { getPendingInvoiceCount } from '../services/offlineInvoiceQueue';
+import { subscribe, TillState, tillState } from '../services/offline/service';
 
 export default function Menu() {
   const navigate = useNavigate();
-  const { user, store, language, isOnline, syncPending, setSyncPending, permissions } = useAppStore();
+  const { user, store, language, permissions } = useAppStore();
 
-  useEffect(() => {
-    setSyncPending(getPendingInvoiceCount());
-  }, [setSyncPending]);
+  // The till's own state, not a number read once on mount. The sync loop lives
+  // in the app and keeps running while this screen is open, so the count has to
+  // come from it rather than from a snapshot taken at render time.
+  const [till, setTill] = useState<TillState>(tillState());
+  useEffect(() => subscribe(setTill), []);
 
   if (!user) {
     navigate('/login');
@@ -95,9 +97,19 @@ export default function Menu() {
 
       <div style={styles.footer}>
         <p>{menuT(lang, 'tagline')}</p>
-        <p style={{ ...styles.offlineStatus, color: isOnline ? '#4caf50' : '#ff9800' }}>
-          {isOnline ? '● ' + menuT(lang, 'online') : '● ' + menuT(lang, 'offline')}
-          {syncPending > 0 ? ` · ${syncPending} ${menuT(lang, 'pendingSync')}` : ''}
+        <p
+          style={{
+            ...styles.offlineStatus,
+            color: till.rejected > 0 ? '#dc2626' : till.online ? '#4caf50' : '#ff9800',
+          }}
+        >
+          {till.online ? '● ' + menuT(lang, 'online') : '● ' + menuT(lang, 'offline')}
+          {till.queued > 0 ? ` · ${till.queued} ${menuT(lang, 'pendingSync')}` : ''}
+          {/* A refused bill is not a queue length, it is a job. It says so in
+              words rather than adding to a count somebody reads as "busy". */}
+          {till.rejected > 0
+            ? ` · ${till.rejected} bill${till.rejected === 1 ? '' : 's'} the server refused`
+            : ''}
         </p>
       </div>
     </div>

@@ -47,14 +47,20 @@ export type SyncPorts = {
  *
  * A 4xx other than 408, 425 and 429 is the server saying the request itself is
  * wrong: a duplicate invoice number, a product that no longer exists, a customer
- * deleted since. None of those improve by waiting. Everything else — no
- * response, a 5xx, a timeout — is the connection or the server having a bad
- * moment, and the sale stays in the queue.
+ * deleted since. None of those improve by waiting, so the sale stops and waits
+ * for a person. Everything else — no response, a 5xx, a timeout — is the
+ * connection or the server having a bad moment, and the sale stays queued.
  *
- * A 409 is the exception that matters most: it means the server already has this
- * sale, which is success from the till's point of view.
+ * A 409 is NOT success, and getting that wrong loses sales. It was wrong here
+ * first: a replayed sale does not come back as a conflict, it comes back as the
+ * original sale with a 201, because that is what the idempotency key is for. A
+ * 409 means something genuinely clashed — almost always that the invoice number
+ * this till allocated is already on another bill, which happens when a device is
+ * provisioned without being told where the shop's series had got to. Treating it
+ * as "the server already has this" deleted the queue entry and the sale with it.
+ * Measured, on a till that had billed one customer.
  */
-function classify(err: any): { permanent: boolean; alreadyThere: boolean; message: string } {
+export function classify(err: any): { permanent: boolean; message: string } {
   const status = err?.response?.status as number | undefined;
   const message =
     err?.response?.data?.error ||
@@ -62,13 +68,10 @@ function classify(err: any): { permanent: boolean; alreadyThere: boolean; messag
     err?.message ||
     'could not reach the server';
 
-  if (status === undefined) return { permanent: false, alreadyThere: false, message };
-  if (status === 409) return { permanent: false, alreadyThere: true, message };
-  if (status === 408 || status === 425 || status === 429) {
-    return { permanent: false, alreadyThere: false, message };
-  }
-  if (status >= 400 && status < 500) return { permanent: true, alreadyThere: false, message };
-  return { permanent: false, alreadyThere: false, message };
+  if (status === undefined) return { permanent: false, message };
+  if (status === 408 || status === 425 || status === 429) return { permanent: false, message };
+  if (status >= 400 && status < 500) return { permanent: true, message };
+  return { permanent: false, message };
 }
 
 /** Sends everything waiting. Safe to call at any time, including concurrently. */
@@ -90,14 +93,7 @@ export async function flush(ports: SyncPorts): Promise<SyncOutcome> {
         await settle(entry.key);
         outcome.sent += 1;
       } catch (err: any) {
-        const { permanent, alreadyThere, message } = classify(err);
-        if (alreadyThere) {
-          // The server has it. Whatever the till believed, the sale is recorded
-          // exactly once and the queue entry has done its job.
-          await settle(entry.key);
-          outcome.sent += 1;
-          continue;
-        }
+        const { permanent, message } = classify(err);
         await recordFailure(entry.key, message, permanent);
         if (permanent) {
           outcome.rejected += 1;

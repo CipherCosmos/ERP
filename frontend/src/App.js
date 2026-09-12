@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAppStore } from './stores/appStore';
+import { startTill } from './services/offline/service';
 import { storeApi } from './services/api';
 import Login from './pages/Login';
 import Billing from './pages/Billing';
@@ -63,8 +64,30 @@ function useFreshStore() {
   }, [storeId, setStore]);
 }
 
+/**
+ * Starts the till for the signed-in shop: load the snapshot it bills from, keep
+ * it current while there is a connection, and send whatever is queued.
+ *
+ * It lives here rather than on the counter screen because the sync loop has to
+ * outlive any one screen. A cashier who bills offline and then walks to the
+ * stock screen has sales waiting, and those go when the line comes back whether
+ * or not anybody is looking at the till.
+ */
+function useTill() {
+  const storeId = useAppStore((s) => s.store?.id);
+  const user = useAppStore((s) => s.user);
+  useEffect(() => {
+    // A persisted user and store are not a session: the token expires and the
+    // two outlive it. Without the token check the till starts on a dead session
+    // and retries against a server that can only say 401.
+    if (!storeId || !user || !localStorage.getItem('token')) return undefined;
+    return startTill(storeId);
+  }, [storeId, user]);
+}
+
 function App() {
   useFreshStore();
+  useTill();
   return (
     <BrowserRouter>
       <Routes>

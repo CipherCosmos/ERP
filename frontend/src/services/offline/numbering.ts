@@ -105,6 +105,29 @@ export async function observeIssuedNumber(terminalId: string, invoiceNo: string)
   });
 }
 
+/**
+ * Moves the counter to at least seq, without issuing anything.
+ *
+ * This is how a newly provisioned till learns where the shop's series has got
+ * to. Without it a device starts at one and its first offline sale collides with
+ * a bill the shop issued months ago — which the server refuses, correctly, and
+ * which the cashier can neither see nor fix.
+ *
+ * Only forward, like every other write to this counter. A server reporting a
+ * lower number than the till holds means the till has issued sales the server
+ * has not seen yet, and those are in the outbox waiting to go.
+ */
+export async function seedCounter(terminalId: string, seq: number, at: Date = new Date()): Promise<void> {
+  if (!Number.isInteger(seq) || seq < 1) return;
+  const key = counterKey(terminalId, financialYear(at));
+  await transact([COUNTERS], 'readwrite', async (tx) => {
+    const store = tx.objectStore(COUNTERS);
+    const current = await request(store.get(key) as IDBRequest<Counter | undefined>);
+    const next = Math.max(current?.next ?? 1, seq);
+    await request(store.put({ key, next } as Counter));
+  });
+}
+
 /** What the till would number next, without taking it. For the settings screen. */
 export async function peekNextNumber(
   terminalId: string,

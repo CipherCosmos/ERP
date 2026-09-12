@@ -62,10 +62,28 @@ function checkValidServiceWorker(swUrl: string, config?: Config) {
         response.status === 404 ||
         (contentType != null && contentType.indexOf('javascript') === -1)
       ) {
-        // No service worker found. Probably a different app. Reload the page.
+        // No service worker found. Probably a different app, or a deploy that
+        // did not publish one. Unregister and reload ONCE.
+        //
+        // Once matters. Without the guard this is a loop: the reload runs the
+        // same check, which fails the same way, which reloads. A till in that
+        // state hammers the server until somebody closes the tab — and it is
+        // how this one exhausted its own rate limit, after which every request
+        // came back 429 and the browser reported it as a CORS failure, which
+        // says nothing about either.
+        const RELOADED = 'gbos-sw-reloaded';
+        let alreadyTried = true;
+        try {
+          alreadyTried = sessionStorage.getItem(RELOADED) === '1';
+          sessionStorage.setItem(RELOADED, '1');
+        } catch {
+          // Private browsing, or storage disabled. Assume we have tried, which
+          // errs towards not reloading: a missing service worker costs offline
+          // loading, and a reload loop costs the shop its till.
+        }
         navigator.serviceWorker.ready.then((registration) => {
           registration.unregister().then(() => {
-            window.location.reload();
+            if (!alreadyTried) window.location.reload();
           });
         });
       } else {

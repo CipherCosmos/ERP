@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	"gbos/internal/domain/document"
 	domain "gbos/internal/domain/store"
 	platform "gbos/internal/platform/postgres"
 
@@ -117,9 +119,18 @@ func (r *Store) SetActive(ctx context.Context, q platform.Querier, id uuid.UUID,
 
 // ListTerminals returns the terminals registered to a store.
 func (r *Store) ListTerminals(ctx context.Context, q platform.Querier, storeID uuid.UUID) ([]domain.Terminal, error) {
+	finYear := document.FinancialYear(time.Now())
+	// The counter is LEFT JOINed and defaults to 1: a terminal that has issued
+	// nothing this year has no row yet, and the next number it should use is the
+	// first one.
 	rows, err := q.QueryContext(ctx,
-		`SELECT id, store_id, code, name, is_active
-		   FROM terminals WHERE store_id = $1 ORDER BY code`, storeID)
+		`SELECT t.id, t.store_id, t.code, t.name, t.is_active,
+		        COALESCE(s.next_value, 1)
+		   FROM terminals t
+		   LEFT JOIN document_sequences s
+		          ON s.store_id = t.store_id AND s.terminal_id = t.id
+		         AND s.doc_type = 'invoice' AND s.fin_year = $2
+		  WHERE t.store_id = $1 ORDER BY t.code`, storeID, finYear)
 	if err != nil {
 		return nil, platform.MapError(err)
 	}
@@ -128,7 +139,7 @@ func (r *Store) ListTerminals(ctx context.Context, q platform.Querier, storeID u
 	terminals := make([]domain.Terminal, 0)
 	for rows.Next() {
 		var t domain.Terminal
-		if err := rows.Scan(&t.ID, &t.StoreID, &t.Code, &t.Name, &t.IsActive); err != nil {
+		if err := rows.Scan(&t.ID, &t.StoreID, &t.Code, &t.Name, &t.IsActive, &t.NextInvoiceSeq); err != nil {
 			return nil, fmt.Errorf("scan terminal: %w", platform.MapError(err))
 		}
 		terminals = append(terminals, t)

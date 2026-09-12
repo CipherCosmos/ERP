@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi } from '../services/api';
-import { flushPendingInvoiceQueue, getPendingInvoiceCount } from '../services/offlineInvoiceQueue';
+import { allocateInvoiceNumber, subscribe, syncNow, TillState, tillState } from '../services/offline/service';
+import { enqueue as enqueueSale, pendingCount } from '../services/offline/outbox';
 import { Product, Customer, SaleUnit } from '../types';
 import { formatMoney } from '../utils/format';
 
@@ -158,25 +159,22 @@ export default function Billing() {
     }
   }, [selectedCustomerId, customers]);
 
+  // The counter watches the till rather than owning it: the sync loop belongs to
+  // the app, so it keeps running when this screen is not mounted. The badge here
+  // is the same state the menu shows.
+  const [till, setTill] = useState<TillState>(tillState());
+  useEffect(() => subscribe(setTill), []);
   useEffect(() => {
-    useAppStore.getState().setSyncPending(getPendingInvoiceCount());
-  }, []);
+    useAppStore.getState().setSyncPending(till.queued);
+  }, [till.queued]);
 
-  useEffect(() => {
-    const syncQueued = async () => {
-      if (!store || !user || typeof navigator === 'undefined' || !navigator.onLine) return;
-      await flushPendingInvoiceQueue(
-        (body) => invoiceApi.create(body as any).then((r) => r.data),
-        async (invoiceId, payments) => {
-          await paymentApi.addSplitPayments({ invoice_id: invoiceId, payments });
-        }
-      );
-      useAppStore.getState().setSyncPending(getPendingInvoiceCount());
-    };
-    syncQueued();
-    window.addEventListener('online', syncQueued);
-    return () => window.removeEventListener('online', syncQueued);
-  }, [store, user]);
+  const refreshQueued = useCallback(async () => {
+    const queued = await pendingCount();
+    useAppStore.getState().setSyncPending(queued);
+    // A sale saved on the device should go as soon as there is a line, rather
+    // than waiting for the next tick of the timer.
+    void syncNow();
+  }, []);
 
   useEffect(() => {
     if (search.length >= 2) {
@@ -519,7 +517,7 @@ export default function Billing() {
       setUseSplitPayment(false);
       setSplitPayments([{ mode: 'cash', amount: '' }]);
       setSelectedCustomerId('');
-      useAppStore.getState().setSyncPending(getPendingInvoiceCount());
+      void refreshQueued();
       // Reset the counter for the next customer. Leaving the bill discount set
       // hands the next person the previous one's concession silently, and a
       // stale "cash received" makes the change due read as nonsense.
@@ -534,11 +532,7 @@ export default function Billing() {
       const networkFail =
         !err?.response && (code === 'ERR_NETWORK' || code === 'ECONNABORTED' || err?.message === 'Network Error');
       if (offline || networkFail) {
-        // The cart is deliberately kept. Offline billing is not supported yet,
-        // and the queue this used to write to was never read by anything — a
-        // cashier was told the sale was safe while it was quietly lost. Better
-        // to say plainly that nothing was recorded.
-        alert('No connection — this sale was NOT recorded. Check the network and press Checkout again.');
+        await billOffline(invoiceBody, splitLines);
         return;
       }
       const message = err?.response?.data?.message || err?.response?.data?.error;
@@ -546,6 +540,126 @@ export default function Billing() {
     } finally {
       setCheckingOut(false);
     }
+  };
+
+  /**
+   * Records a sale the server could not be told about.
+   *
+   * The order here is the whole thing. The sale is written to the outbox and
+   * that write is AWAITED before the cashier is told anything: if it fails, the
+   * only honest answer is that nothing was recorded, and the cart stays so they
+   * can try again. The previous version wrote to a queue nothing read and told
+   * the cashier the sale was saved.
+   *
+   * The number comes from the till's own counter, so the customer leaves with a
+   * complete tax invoice rather than a slip that becomes one later.
+   */
+  const billOffline = async (
+    body: Record<string, unknown>,
+    splitLines?: { payment_mode: string; amount: number }[]
+  ) => {
+    const terminal = useAppStore.getState().terminal;
+    if (!terminal) {
+      alert('No connection, and this device is not registered to a counter — so it cannot number a bill. Nothing was recorded.');
+      return;
+    }
+
+    let allocated: { invoiceNo: string };
+    try {
+      allocated = await allocateInvoiceNumber(terminal.id, terminal.code);
+    } catch (err: any) {
+      alert(`No connection, and this device could not allocate a bill number (${err?.message ?? 'storage unavailable'}). Nothing was recorded.`);
+      return;
+    }
+
+    const billedAt = new Date().toISOString();
+    const totals = calculateTotals();
+    const customer = customers.find((c) => c.id === selectedCustomerId);
+
+    // What the paper says. It is computed here rather than by the server,
+    // because the server has not been told yet — and on sync the server prices
+    // it again from its own list. If the two disagree the sale still stands and
+    // a reconciliation exception says so; the customer paid what the receipt
+    // says.
+    const invoice = {
+      ...body,
+      invoice_no: allocated.invoiceNo,
+      billed_offline: true,
+      billed_at: billedAt,
+    };
+    const lines = cart.map((item) => {
+      const rate = item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices);
+      return {
+        product_name: item.product.name,
+        hsn_code: (item.product as any).hsn_code ?? '',
+        gst_rate: item.product.gst_rate,
+        unit_label: item.unit?.label ?? '',
+        unit_qty: item.quantity,
+        quantity: item.quantity * (item.unit?.qty_in_base ?? 1),
+        rate,
+        total: Math.max(0, rate * item.quantity - (item.discount || 0)),
+      };
+    });
+
+    try {
+      await enqueueSale({
+        key: checkoutKey.current,
+        invoice,
+        splitPayments: splitLines,
+        invoiceNo: allocated.invoiceNo,
+        billedAt,
+        receipt: {
+          invoice: {
+            invoice_no: allocated.invoiceNo,
+            invoice_date: billedAt,
+            sub_total: totals.subtotal,
+            cgst: totals.cgst,
+            sgst: totals.sgst,
+            igst: totals.igst,
+            discount: Math.max(0, Number(billDiscount) || 0),
+            round_off: totals.roundOff,
+            total: totals.total,
+            payment_mode: useSplitPayment ? 'split' : paymentMode,
+            customer_id: selectedCustomerId || null,
+          },
+          lines,
+        },
+      });
+    } catch (err: any) {
+      // The one case where the cashier must not hand over the goods.
+      alert(`No connection, and this sale could NOT be saved on the device (${err?.message ?? 'storage unavailable'}). Nothing was recorded — do not hand over the goods.`);
+      return;
+    }
+
+    // Only now is the sale real from the cashier's point of view.
+    checkoutKey.current = '';
+    printReceipt(
+      {
+        invoice_no: allocated.invoiceNo,
+        invoice_date: billedAt,
+        sub_total: totals.subtotal,
+        cgst: totals.cgst,
+        sgst: totals.sgst,
+        igst: totals.igst,
+        discount: Math.max(0, Number(billDiscount) || 0),
+        round_off: totals.roundOff,
+        total: totals.total,
+        payment_mode: useSplitPayment ? 'split' : paymentMode,
+        customer_gstin: customer?.gstin,
+      },
+      lines
+    );
+
+    clearCart();
+    setPaymentMode('cash');
+    setUseSplitPayment(false);
+    setSplitPayments([{ mode: 'cash', amount: '' }]);
+    setSelectedCustomerId('');
+    setBillDiscount('');
+    setTendered('');
+    setDiscountFor(null);
+    await refreshQueued();
+    alert(`No connection. Bill ${allocated.invoiceNo} is saved on this device and will be sent when the network returns.`);
   };
 
   checkoutRef.current = handleCheckout;
@@ -665,6 +779,36 @@ export default function Billing() {
 
   return (
     <div style={styles.container}>
+      {/* The counter has to know, at a glance and without asking, whether what
+          it bills is reaching the server. A cashier who does not know they are
+          offline cannot tell a customer why the bill looks different, and a
+          shop that does not know sales are queued closes the day on the wrong
+          figures. */}
+      {(!till.online || till.queued > 0 || till.rejected > 0 || (till.stale && till.ready)) && (
+        <div
+          style={{
+            ...styles.tillBanner,
+            ...(till.rejected > 0
+              ? styles.tillBannerBad
+              : till.online
+              ? styles.tillBannerBusy
+              : styles.tillBannerOffline),
+          }}
+        >
+          {!till.online && <strong>No connection. </strong>}
+          {!till.online && till.ready && 'Bills are being saved on this device and sent when the line returns. '}
+          {!till.online && !till.ready && 'This device has no catalogue saved, so it cannot bill offline. '}
+          {till.queued > 0 && `${till.queued} bill${till.queued === 1 ? '' : 's'} waiting to be sent. `}
+          {till.rejected > 0 && (
+            <strong>
+              {till.rejected} bill{till.rejected === 1 ? '' : 's'} the server refused — someone has to look at
+              {till.rejected === 1 ? ' it' : ' them'}.{' '}
+            </strong>
+          )}
+          {till.online && till.stale && till.ready &&
+            `Prices on this device were last refreshed ${Math.round(till.snapshotAgeHours)} hours ago.`}
+        </div>
+      )}
       <div style={styles.leftPanel}>
         <div style={styles.searchBar}>
           <input
@@ -1114,10 +1258,23 @@ export default function Billing() {
 
 const styles: Record<string, React.CSSProperties> = {
   container: {
+    // The banner sits above the two panels, so the counter is a column with a
+    // row inside it rather than a bare row.
     display: 'flex',
+    flexWrap: 'wrap',
     height: '100vh',
     background: '#f5f5f5',
   },
+  // Full width, above everything: a cashier must not have to look for this.
+  tillBanner: {
+    flexBasis: '100%',
+    padding: '0.5rem 1rem',
+    fontSize: '0.875rem',
+    lineHeight: 1.4,
+  },
+  tillBannerOffline: { background: '#fff7ed', color: '#9a3412', borderBottom: '2px solid #f97316' },
+  tillBannerBusy: { background: '#eff6ff', color: '#1e40af', borderBottom: '2px solid #3b82f6' },
+  tillBannerBad: { background: '#fef2f2', color: '#991b1b', borderBottom: '2px solid #dc2626' },
   leftPanel: {
     flex: 1,
     padding: '1rem',
