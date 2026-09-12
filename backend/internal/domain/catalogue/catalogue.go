@@ -134,6 +134,21 @@ type Product struct {
 	ImageURL     string         `json:"image_url"`
 	Brand        string         `json:"brand"`
 	Description  string         `json:"description"`
+
+	// TracksExpiry says this product has a shelf life, so receiving asks for a
+	// date and the expiry report covers it. It is the product's property and
+	// never inferred per batch: leaving it to whoever was typing at the
+	// receiving bay made the expiry report only as complete as their memory,
+	// and nothing said a date was missing.
+	TracksExpiry bool `json:"tracks_expiry"`
+	// ShelfLifeDays is how long it lasts from manufacture, so a receipt can work
+	// out the expiry instead of a clerk reading it off the packet. Nil means the
+	// date is stated on arrival.
+	ShelfLifeDays *int `json:"shelf_life_days"`
+	// PreferredVendorID is who normally supplies this, which is what lets a
+	// low-stock list become a purchase order rather than a list of names to look
+	// up one at a time.
+	PreferredVendorID *uuid.UUID `json:"preferred_vendor_id"`
 }
 
 // NewProductInput is the caller-supplied shape for creating a product.
@@ -154,6 +169,10 @@ type NewProductInput struct {
 	ImageURL     string
 	Brand        string
 	Description  string
+
+	TracksExpiry      bool
+	ShelfLifeDays     *int
+	PreferredVendorID *uuid.UUID
 }
 
 // NewProduct validates and returns a product ready to persist.
@@ -172,6 +191,10 @@ func NewProduct(in NewProductInput) (Product, error) {
 		return Product{}, err
 	}
 	hsn, sac, err := validateClassification(in.HSNCode, in.SACCode)
+	if err != nil {
+		return Product{}, err
+	}
+	shelfLife, err := validateShelfLife(in.TracksExpiry, in.ShelfLifeDays)
 	if err != nil {
 		return Product{}, err
 	}
@@ -200,6 +223,10 @@ func NewProduct(in NewProductInput) (Product, error) {
 		ImageURL:     strings.TrimSpace(in.ImageURL),
 		Brand:        strings.TrimSpace(in.Brand),
 		Description:  strings.TrimSpace(in.Description),
+
+		TracksExpiry:      in.TracksExpiry,
+		ShelfLifeDays:     shelfLife,
+		PreferredVendorID: in.PreferredVendorID,
 	}, nil
 }
 
@@ -208,6 +235,33 @@ func NewProduct(in NewProductInput) (Product, error) {
 // units.go replaces it with a flat list whose every entry states its size in
 // the product's own stocking unit. See the comment on that type for why flat is
 // a correction rather than a simplification.
+
+// validateShelfLife checks the pair that has to be read together.
+//
+// A shelf life on something that does not expire is a contradiction the database
+// also refuses, and it is worth catching here with a sentence rather than there
+// with a constraint name. A zero or negative one is a typo — a product that
+// lasts no days is not a product — and silently storing it would make every
+// receipt of it expire the moment it arrived.
+func validateShelfLife(tracks bool, days *int) (*int, error) {
+	if days == nil || *days == 0 {
+		if tracks {
+			// Legitimate: a shop that reads the date off the packet rather than
+			// counting from manufacture. Most perishables work this way.
+			return nil, nil
+		}
+		return nil, nil
+	}
+	if !tracks {
+		return nil, invalid(
+			"a shelf life of %d days was given for something not marked as expiring. "+
+				"Tick that it expires, or clear the shelf life", *days)
+	}
+	if *days < 0 {
+		return nil, invalid("shelf life cannot be negative, got %d days", *days)
+	}
+	return days, nil
+}
 
 // validateClassification requires a product to carry the code a tax invoice has
 // to print for it: an HSN code for goods, a SAC code for a service.
@@ -341,8 +395,11 @@ type PricedProduct struct {
 	// CategoryName is the display name of CategoryID, blank when the product
 	// has no category. The products screen has a Category column and no other
 	// way to fill it.
-	CategoryName string      `json:"category_name"`
-	MRP          money.Money `json:"mrp"`
+	CategoryName string `json:"category_name"`
+	// PreferredVendorName rides along for the same reason the category's does:
+	// the screen has a column for it and would otherwise fetch one per row.
+	PreferredVendorName string      `json:"preferred_vendor_name"`
+	MRP                 money.Money `json:"mrp"`
 	// CostPrice is what the shop pays for the product in this store.
 	//
 	// It was deliberately absent from this read model, on the argument that a

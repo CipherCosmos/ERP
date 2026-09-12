@@ -298,7 +298,8 @@ const pricedProductFrom = `
 	LEFT JOIN product_units dpu ON dpu.product_id = p.id AND dpu.is_default
 	LEFT JOIN product_prices pp
 	       ON pp.product_id = p.id AND pp.store_id = $1 AND pp.product_unit_id = dpu.id
-	LEFT JOIN categories c ON c.id = p.category_id`
+	LEFT JOIN categories c ON c.id = p.category_id
+	LEFT JOIN vendors v ON v.id = p.preferred_vendor_id`
 
 // pricedProductColumns is the read model shared by the list and get paths.
 //
@@ -319,7 +320,8 @@ const pricedProductColumns = `
 	COALESCE(p.hsn_code, ''), COALESCE(p.sac_code, ''), COALESCE(p.barcode, ''),
 	p.uom_id, p.base_unit_qty, p.gst_rate, p.is_free, p.is_active, p.allow_decimal,
 	p.min_stock, COALESCE(p.image_url, ''), COALESCE(p.brand, ''), COALESCE(p.description, ''),
-	COALESCE(c.name, ''),
+	p.tracks_expiry, p.shelf_life_days, p.preferred_vendor_id,
+	COALESCE(c.name, ''), COALESCE(v.name, ''),
 	COALESCE(pp.mrp, 0), COALESCE(pp.cost_price, 0), COALESCE(pp.sell_price, 0),
 	COALESCE(pp.wholesale_sell_price, 0),
 	COALESCE((SELECT SUM(s.quantity) FROM stock s
@@ -336,7 +338,8 @@ func scanPricedProduct(s interface{ Scan(...any) error }) (catalogue.PricedProdu
 		&p.HSNCode, &p.SACCode, &p.Barcode,
 		&p.UOMID, &p.BaseUnitQty, &p.GSTRate, &p.IsFree, &p.IsActive, &p.AllowDecimal,
 		&p.MinStock, &p.ImageURL, &p.Brand, &p.Description,
-		&p.CategoryName,
+		&p.TracksExpiry, &p.ShelfLifeDays, &p.PreferredVendorID,
+		&p.CategoryName, &p.PreferredVendorName,
 		&p.MRP, &p.CostPrice, &p.SellPrice, &p.WholesaleSellPrice,
 		&p.Stock, &defaultUnitID)
 	if err != nil {
@@ -618,11 +621,13 @@ func (r *Catalogue) CreateProduct(ctx context.Context, q platform.Querier, p cat
 	_, err := q.ExecContext(ctx,
 		`INSERT INTO products (id, name, name_hi, name_kn, category_id, hsn_code, sac_code,
 			barcode, uom_id, base_unit_qty, gst_rate, is_free, is_active, allow_decimal,
-			min_stock, image_url, brand, description)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+			min_stock, image_url, brand, description,
+			tracks_expiry, shelf_life_days, preferred_vendor_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
 		p.ID, p.Name, p.NameHi, p.NameKn, p.CategoryID, p.HSNCode, p.SACCode,
 		nullIfBlank(p.Barcode), p.UOMID, p.BaseUnitQty, p.GSTRate, p.IsFree, p.IsActive,
-		p.AllowDecimal, p.MinStock, p.ImageURL, p.Brand, p.Description)
+		p.AllowDecimal, p.MinStock, p.ImageURL, p.Brand, p.Description,
+		p.TracksExpiry, p.ShelfLifeDays, p.PreferredVendorID)
 	return platform.MapError(err)
 }
 
@@ -634,11 +639,14 @@ func (r *Catalogue) UpdateProduct(ctx context.Context, q platform.Querier, p cat
 			name = $2, name_hi = $3, name_kn = $4, category_id = $5, hsn_code = $6,
 			sac_code = $7, barcode = $8, uom_id = $9, base_unit_qty = $10, gst_rate = $11,
 			is_free = $12, allow_decimal = $13, min_stock = $14, image_url = $15,
-			brand = $16, description = $17, updated_at = now()
+			brand = $16, description = $17,
+			tracks_expiry = $18, shelf_life_days = $19, preferred_vendor_id = $20,
+			updated_at = now()
 		  WHERE id = $1`,
 		p.ID, p.Name, p.NameHi, p.NameKn, p.CategoryID, p.HSNCode,
 		p.SACCode, nullIfBlank(p.Barcode), p.UOMID, p.BaseUnitQty, p.GSTRate,
-		p.IsFree, p.AllowDecimal, p.MinStock, p.ImageURL, p.Brand, p.Description)
+		p.IsFree, p.AllowDecimal, p.MinStock, p.ImageURL, p.Brand, p.Description,
+		p.TracksExpiry, p.ShelfLifeDays, p.PreferredVendorID)
 	if err != nil {
 		return false, platform.MapError(err)
 	}

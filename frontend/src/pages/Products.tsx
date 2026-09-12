@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { categoryApi, productApi, uomApi } from '../services/api';
+import { categoryApi, productApi, uomApi, vendorApi } from '../services/api';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Checkbox, Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
@@ -69,6 +69,7 @@ export default function Products() {
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
   const [uoms, setUoms] = useState<{ id: string; code: string; name: string }[]>([]);
+  const [vendors, setVendors] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('');
   const [showInactive, setShowInactive] = useState(false);
@@ -117,6 +118,17 @@ export default function Products() {
     }
   }, []);
 
+  const loadVendors = useCallback(async () => {
+    try {
+      const { data } = await vendorApi.list();
+      setVendors(data as { id: string; name: string }[]);
+    } catch (err) {
+      // The supplier field is optional, so a shop with no vendors yet — or one
+      // whose role cannot read them — still gets a working product form.
+      console.error('Failed to load vendors:', err);
+    }
+  }, []);
+
   useEffect(() => {
     if (!user || !store) {
       navigate('/login');
@@ -125,7 +137,8 @@ export default function Products() {
     loadProducts();
     loadCategories();
     loadUoms();
-  }, [user, store, navigate, loadProducts, loadCategories, loadUoms]);
+    loadVendors();
+  }, [user, store, navigate, loadProducts, loadCategories, loadUoms, loadVendors]);
 
   /** Refresh one product in place, so editing units does not reset the table. */
   const refreshEditing = useCallback(async () => {
@@ -138,6 +151,8 @@ export default function Products() {
   const openNew = () => {
     setForm({
       name: '',
+      name_hi: '',
+      name_kn: '',
       category_id: categories[0]?.id ?? '',
       uom_id: uoms.find((u) => u.code === 'NOS')?.id ?? uoms[0]?.id ?? '',
       gst_rate: 5,
@@ -145,6 +160,9 @@ export default function Products() {
       barcode: '',
       brand: '',
       allow_decimal: false,
+      tracks_expiry: false,
+      shelf_life_days: '',
+      preferred_vendor_id: '',
       min_stock: 0,
       sell_price: 0,
       cost_price: 0,
@@ -159,6 +177,8 @@ export default function Products() {
   const openEdit = (p: ProductRow) => {
     setForm({
       name: p.name,
+      name_hi: (p as any).name_hi ?? '',
+      name_kn: (p as any).name_kn ?? '',
       category_id: p.category_id,
       uom_id: p.uom_id,
       gst_rate: p.gst_rate,
@@ -166,6 +186,9 @@ export default function Products() {
       barcode: p.barcode ?? '',
       brand: p.brand ?? '',
       allow_decimal: !!p.allow_decimal,
+      tracks_expiry: !!(p as any).tracks_expiry,
+      shelf_life_days: (p as any).shelf_life_days ?? '',
+      preferred_vendor_id: (p as any).preferred_vendor_id ?? '',
       min_stock: p.min_stock ?? 0,
     });
     setEditing(p);
@@ -188,13 +211,29 @@ export default function Products() {
       setSaveError('A product needs a name.');
       return;
     }
+    const shelfLife = String(form.shelf_life_days ?? '').trim();
+    if (shelfLife && !form.tracks_expiry) {
+      setSaveError('A shelf life belongs to something that expires. Tick "Has a shelf life", or clear the days.');
+      return;
+    }
+    // Blank is not an identifier and not a number. Sending "" for either is how
+    // a form turns a field somebody left alone into a validation error they
+    // cannot see the cause of.
+    const payload = {
+      ...form,
+      shelf_life_days: shelfLife ? Number(shelfLife) : undefined,
+      preferred_vendor_id: form.preferred_vendor_id || undefined,
+      name_hi: form.name_hi || undefined,
+      name_kn: form.name_kn || undefined,
+    };
+
     setBusy(true);
     setSaveError(null);
     try {
       if (editing) {
-        await productApi.update(editing.id, form as any);
+        await productApi.update(editing.id, payload as any);
       } else {
-        await productApi.create({ ...form, store_id: store.id } as any);
+        await productApi.create({ ...payload, store_id: store.id } as any);
       }
       close();
       await loadProducts();
@@ -452,6 +491,25 @@ export default function Products() {
               <Field label="Brand" htmlFor="p-brand">
                 <TextInput id="p-brand" value={form.brand ?? ''} onChange={(e) => setForm({ ...form, brand: e.target.value })} />
               </Field>
+              {/* The bill can print these and until now nothing could enter
+                  them. A shop in Bangalore serving a customer who reads Kannada
+                  had the column, the renderer, and no way to fill it in. */}
+              <Field label="Name in Hindi" hint="Printed on the bill when the customer reads Hindi." htmlFor="p-name-hi">
+                <TextInput
+                  id="p-name-hi"
+                  lang="hi"
+                  value={form.name_hi ?? ''}
+                  onChange={(e) => setForm({ ...form, name_hi: e.target.value })}
+                />
+              </Field>
+              <Field label="Name in Kannada" hint="Printed on the bill when the customer reads Kannada." htmlFor="p-name-kn">
+                <TextInput
+                  id="p-name-kn"
+                  lang="kn"
+                  value={form.name_kn ?? ''}
+                  onChange={(e) => setForm({ ...form, name_kn: e.target.value })}
+                />
+              </Field>
               <Field label="Category" required htmlFor="p-cat">
                 <Select
                   id="p-cat"
@@ -504,6 +562,50 @@ export default function Products() {
               checked={!!form.allow_decimal}
               onChange={(v) => setForm({ ...form, allow_decimal: v })}
             />
+
+            {/* Expiry belongs to the product, not to whoever is typing at the
+                receiving bay. Until this existed the expiry report was only as
+                complete as their memory: goods that should have been watched
+                were missing from it because nobody had entered a date, and
+                nothing said one was missing. */}
+            <Checkbox
+              label="Has a shelf life"
+              hint="Receiving will ask for an expiry date, and this appears on the expiry report."
+              checked={!!form.tracks_expiry}
+              onChange={(v) =>
+                setForm({ ...form, tracks_expiry: v, shelf_life_days: v ? form.shelf_life_days : '' })
+              }
+            />
+
+            <FormGrid>
+              {form.tracks_expiry && (
+                <Field
+                  label="Shelf life (days)"
+                  hint="Leave blank if the date is printed on the packet. Filling it in lets receiving work the date out."
+                  htmlFor="p-shelf"
+                >
+                  <NumberInput
+                    id="p-shelf"
+                    min={1}
+                    value={form.shelf_life_days ?? ''}
+                    onChange={(e) => setForm({ ...form, shelf_life_days: e.target.value })}
+                  />
+                </Field>
+              )}
+              <Field
+                label="Usual supplier"
+                hint="Who this is normally bought from, so a low-stock list can become an order."
+                htmlFor="p-vendor"
+              >
+                <Select
+                  id="p-vendor"
+                  value={form.preferred_vendor_id ?? ''}
+                  onChange={(e) => setForm({ ...form, preferred_vendor_id: e.target.value })}
+                  placeholder="Not set"
+                  options={vendors.map((v) => ({ value: v.id, label: v.name }))}
+                />
+              </Field>
+            </FormGrid>
 
             {creating && (
               <>

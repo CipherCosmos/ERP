@@ -416,6 +416,13 @@ type productRequest struct {
 	Brand        string         `json:"brand"`
 	Description  string         `json:"description"`
 
+	// TracksExpiry says the goods have a shelf life, so receiving asks for a
+	// date and the expiry report covers them. ShelfLifeDays lets a receipt work
+	// the date out instead of a clerk reading it off the packet.
+	TracksExpiry      bool    `json:"tracks_expiry"`
+	ShelfLifeDays     *int    `json:"shelf_life_days"`
+	PreferredVendorID *string `json:"preferred_vendor_id"`
+
 	// Optional opening price, written in the same transaction as the product.
 	MRP                *money.Money `json:"mrp"`
 	CostPrice          *money.Money `json:"cost_price"`
@@ -436,6 +443,10 @@ func (r productRequest) toInput() (domain.NewProductInput, error) {
 	if baseQty.IsZero() {
 		baseQty = money.QuantityFromInt(1)
 	}
+	vendorID, err := optionalUUID(r.PreferredVendorID)
+	if err != nil {
+		return domain.NewProductInput{}, errors.New("preferred_vendor_id is not a valid identifier")
+	}
 	return domain.NewProductInput{
 		Name:         r.Name,
 		NameHi:       r.NameHi,
@@ -453,6 +464,10 @@ func (r productRequest) toInput() (domain.NewProductInput, error) {
 		ImageURL:     r.ImageURL,
 		Brand:        r.Brand,
 		Description:  r.Description,
+
+		TracksExpiry:      r.TracksExpiry,
+		ShelfLifeDays:     r.ShelfLifeDays,
+		PreferredVendorID: vendorID,
 	}, nil
 }
 
