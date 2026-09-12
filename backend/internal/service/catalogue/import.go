@@ -52,6 +52,8 @@ type ImportRequest struct {
 	// transaction is rolled back — which is how the shopkeeper sees what an
 	// import would do before it does it.
 	Apply bool
+	// UserID is who uploaded the sheet, recorded against every price it sets.
+	UserID uuid.UUID
 }
 
 // ImportOutcome is what happened to one row.
@@ -307,6 +309,7 @@ func (run *importRun) row(ctx context.Context, row domain.ImportRow, report *Imp
 		Product: run.fresh(row, categoryID, unit.ID),
 		StoreID: run.req.StoreID,
 		Price:   run.priceFor(row),
+		UserID:  run.req.UserID,
 	})
 	if err != nil {
 		if isRowFault(err) {
@@ -603,7 +606,10 @@ func (run *importRun) price(ctx context.Context, productID uuid.UUID, row domain
 	if err := price.Validate(); err != nil {
 		return err
 	}
-	if err := run.svc.repo.UpsertPrice(ctx, run.tx, price); err != nil {
+	if err := run.svc.repo.UpsertPrice(ctx, run.tx, price, domain.PriceAuthor{
+		UserID: run.req.UserID,
+		Source: domain.PriceImport,
+	}); err != nil {
 		return err
 	}
 	report.PricesSet++

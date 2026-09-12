@@ -75,3 +75,52 @@ func TestTheYearTurnsOnceAcrossTheBoundaryMinute(t *testing.T) {
 		t.Errorf("the financial year changed %d times over twelve hours, want once", changes)
 	}
 }
+
+// A range described as "the last 30 days" begins at the start of a day. A
+// rolling cut drops this morning's entries out of the range by lunchtime, so
+// the same screen refreshed an hour later shows fewer rows with nothing having
+// been deleted.
+func TestStartOfDayIsMidnightInIndia(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		in   time.Time
+		want string
+	}{
+		{
+			// Late evening in India is already the next day in UTC. Truncating
+			// the UTC instant would put this at the wrong midnight.
+			name: "evening in India, next day in UTC",
+			in:   time.Date(2026, 9, 12, 19, 45, 0, 0, document.Location),
+			want: "2026-09-12T00:00:00+05:30",
+		},
+		{
+			// The same instant arriving as UTC has to give the same answer.
+			name: "the same instant expressed in UTC",
+			in:   time.Date(2026, 9, 12, 14, 15, 0, 0, time.UTC),
+			want: "2026-09-12T00:00:00+05:30",
+		},
+		{
+			// India is 5.5 hours ahead, so a UTC evening is already tomorrow
+			// there. A server truncating the UTC instant would file this under
+			// the 12th, a day the shop has already finished.
+			name: "UTC evening is already tomorrow in India",
+			in:   time.Date(2026, 9, 12, 19, 30, 0, 0, time.UTC),
+			want: "2026-09-13T00:00:00+05:30",
+		},
+		{
+			name: "midnight is already the start of its own day",
+			in:   time.Date(2026, 9, 12, 0, 0, 0, 0, document.Location),
+			want: "2026-09-12T00:00:00+05:30",
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := document.StartOfDay(tc.in).Format(time.RFC3339)
+			if got != tc.want {
+				t.Errorf("StartOfDay(%s) = %s, want %s", tc.in.Format(time.RFC3339), got, tc.want)
+			}
+		})
+	}
+}

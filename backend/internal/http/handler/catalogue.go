@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	domain "gbos/internal/domain/catalogue"
+	"gbos/internal/domain/document"
 	"gbos/internal/domain/money"
 	mw "gbos/internal/http/middleware"
 	scope "gbos/internal/http/middleware"
@@ -59,6 +61,11 @@ func (h *Catalogue) Register(r gin.IRoutes) {
 
 	r.GET("/products", mw.RequirePermission(rbac.PermCatalogRead), h.ListProducts)
 	r.GET("/products/:id", mw.RequirePermission(rbac.PermCatalogRead), h.GetProduct)
+	// Price history is behind the price permission, not the catalogue one: it
+	// carries cost prices, and what the shop pays its suppliers is not
+	// something every cashier should be able to read off a screen.
+	r.GET("/products/:id/price-history", mw.RequirePermission(rbac.PermProductPrice), h.PriceHistory)
+	r.GET("/price-changes", mw.RequirePermission(rbac.PermProductPrice), h.RecentPriceChanges)
 	r.POST("/products", mw.RequirePermission(rbac.PermProductCatalogWrite), h.CreateProduct)
 	// Import sits behind the same permission as creating a product, because
 	// that is exactly what it does — several thousand times.
@@ -585,6 +592,11 @@ func (h *Catalogue) CreateProduct(c *gin.Context) {
 	if !ok {
 		return
 	}
+	session, ok := scope.SessionFrom(c.Request.Context())
+	if !ok {
+		httperr.Respond(c, httperr.Unauthorized("no session"))
+		return
+	}
 	var req productRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		httperr.Respond(c, httperr.FromBinding(err))
@@ -600,6 +612,7 @@ func (h *Catalogue) CreateProduct(c *gin.Context) {
 		Product: in,
 		StoreID: storeID,
 		Price:   req.price(),
+		UserID:  session.UserID,
 	})
 	if err != nil {
 		respond(c, err)
@@ -829,11 +842,20 @@ type setPriceRequest struct {
 	CostPrice          money.Money `json:"cost_price"`
 	SellPrice          money.Money `json:"sell_price"`
 	WholesaleSellPrice money.Money `json:"wholesale_sell_price"`
+	// Why, if whoever is changing it says. It goes in the history beside the
+	// figures, which is the difference between a price rise somebody can
+	// explain next month and one nobody can.
+	Note string `json:"note"`
 }
 
 func (h *Catalogue) SetPrice(c *gin.Context) {
 	storeID, ok := scope.MustStore(c)
 	if !ok {
+		return
+	}
+	session, ok := scope.SessionFrom(c.Request.Context())
+	if !ok {
+		httperr.Respond(c, httperr.Unauthorized("no session"))
 		return
 	}
 	var req setPriceRequest
@@ -860,6 +882,10 @@ func (h *Catalogue) SetPrice(c *gin.Context) {
 		CostPrice:          req.CostPrice,
 		SellPrice:          req.SellPrice,
 		WholesaleSellPrice: req.WholesaleSellPrice,
+	}, domain.PriceAuthor{
+		UserID: session.UserID,
+		Source: domain.PriceManual,
+		Note:   req.Note,
 	})
 	if err != nil {
 		respond(c, err)
@@ -882,6 +908,11 @@ const maxImportBytes = 4 << 20
 func (h *Catalogue) ImportProducts(c *gin.Context) {
 	storeID, ok := scope.MustStore(c)
 	if !ok {
+		return
+	}
+	session, ok := scope.SessionFrom(c.Request.Context())
+	if !ok {
+		httperr.Respond(c, httperr.Unauthorized("no session"))
 		return
 	}
 
@@ -908,6 +939,7 @@ func (h *Catalogue) ImportProducts(c *gin.Context) {
 		StoreID:        storeID,
 		UpdateExisting: c.PostForm("update_existing") == "true",
 		Apply:          c.PostForm("apply") == "true",
+		UserID:         session.UserID,
 	})
 	if err != nil {
 		respond(c, err)
@@ -928,4 +960,67 @@ func (h *Catalogue) ImportProducts(c *gin.Context) {
 func (h *Catalogue) ImportTemplate(c *gin.Context) {
 	c.Header("Content-Disposition", `attachment; filename="gbos-catalogue-template.csv"`)
 	c.Data(http.StatusOK, "text/csv; charset=utf-8", []byte(domain.ImportTemplate))
+}
+
+// PriceHistory answers "why is this ₹45 when it was ₹42 last week".
+//
+// Without a unit it covers every unit of the product, because a product sold
+// loose and by the sack has two price series and reading one of them alone is
+// how somebody concludes the wrong thing about the other.
+func (h *Catalogue) PriceHistory(c *gin.Context) {
+	productID, ok := pathUUID(c, "id")
+	if !ok {
+		return
+	}
+	storeID, ok := scope.MustStore(c)
+	if !ok {
+		return
+	}
+	unitID, err := optionalUUID(queryPtr(c, "product_unit_id"))
+	if err != nil {
+		httperr.Respond(c, httperr.BadRequest("product_unit_id is not a valid identifier"))
+		return
+	}
+	var unit uuid.UUID
+	if unitID != nil {
+		unit = *unitID
+	}
+
+	history, err := h.svc.PriceHistory(c.Request.Context(), productID, storeID, unit, intQuery(c, "limit", 100))
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"history": history})
+}
+
+// defaultPriceChangeDays is how far back the store-wide view looks when the
+// caller does not say. A month covers "what did we change recently" without
+// making the first load read a year of a busy shop's history.
+const defaultPriceChangeDays = 30
+
+// RecentPriceChanges is every price that moved in this store lately — the
+// store-wide counterpart to one product's history, and what a shopkeeper opens
+// when a customer says the rate went up.
+func (h *Catalogue) RecentPriceChanges(c *gin.Context) {
+	storeID, ok := scope.MustStore(c)
+	if !ok {
+		return
+	}
+	days := intQuery(c, "days", defaultPriceChangeDays)
+	if days < 1 {
+		days = defaultPriceChangeDays
+	}
+	// The boundary is a whole day in the shop's own timezone, not a rolling
+	// point in the last twenty-four hours: "the last 30 days" to a shopkeeper
+	// starts at the beginning of a day, and a rolling cut drops this morning's
+	// change out of "yesterday" at lunchtime.
+	since := document.StartOfDay(time.Now().In(document.Location)).AddDate(0, 0, -(days - 1))
+
+	changes, err := h.svc.RecentPriceChanges(c.Request.Context(), storeID, since, intQuery(c, "limit", 200))
+	if err != nil {
+		respond(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"changes": changes, "since": since})
 }

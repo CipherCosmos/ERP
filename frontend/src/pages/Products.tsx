@@ -6,7 +6,8 @@ import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Checkbox, Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
-import { formatMoney, formatQty } from '../utils/format';
+import { formatDate, formatMoney, formatQty } from '../utils/format';
+import { PriceMovement } from '../types';
 
 interface UnitRow {
   id: string;
@@ -76,7 +77,9 @@ export default function Products() {
 
   const [editing, setEditing] = useState<ProductRow | null>(null);
   const [creating, setCreating] = useState(false);
-  const [detailTab, setDetailTab] = useState<'details' | 'units'>('details');
+  const [detailTab, setDetailTab] = useState<'details' | 'units' | 'history'>('details');
+  const [history, setHistory] = useState<PriceMovement[] | null>(null);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [form, setForm] = useState<Record<string, any>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -84,7 +87,7 @@ export default function Products() {
   // Unit editor -------------------------------------------------------------
   const [unitDraft, setUnitDraft] = useState<Partial<UnitRow> | null>(null);
   const [unitError, setUnitError] = useState<string | null>(null);
-  const [priceDraft, setPriceDraft] = useState<{ unit: UnitRow; sell: string; wholesale: string; mrp: string; cost: string } | null>(null);
+  const [priceDraft, setPriceDraft] = useState<{ unit: UnitRow; sell: string; wholesale: string; mrp: string; cost: string; note: string } | null>(null);
 
   const loadProducts = useCallback(async () => {
     if (!store) return;
@@ -194,6 +197,10 @@ export default function Products() {
     setEditing(p);
     setCreating(false);
     setDetailTab('details');
+    // Dropped rather than kept: a history left over from the last product
+    // opened would be another product's prices under this one's name.
+    setHistory(null);
+    setHistoryError(null);
     setSaveError(null);
   };
 
@@ -279,6 +286,36 @@ export default function Products() {
     }
   };
 
+  /**
+   * Price history, fetched when the tab is opened rather than with the product.
+   *
+   * It is the answer to a question most people looking at a product are not
+   * asking, and it carries cost prices — which is also why the endpoint sits
+   * behind the price permission rather than the catalogue one.
+   */
+  useEffect(() => {
+    if (detailTab !== 'history' || !editing || !store || history) return;
+    let cancelled = false;
+    setHistoryError(null);
+    productApi
+      .priceHistory(editing.id, store.id)
+      .then(({ data }) => {
+        if (!cancelled) setHistory(data || []);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setHistoryError(
+          err?.response?.status === 403
+            ? 'Price history includes cost prices, which your role cannot see.'
+            : err?.response?.data?.error || 'The price history could not be loaded.'
+        );
+        setHistory([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailTab, editing, store, history]);
+
   const savePrice = async () => {
     if (!editing || !store || !priceDraft) return;
     setBusy(true);
@@ -291,8 +328,11 @@ export default function Products() {
         wholesale_sell_price: Number(priceDraft.wholesale) || 0,
         mrp: Number(priceDraft.mrp) || 0,
         cost_price: Number(priceDraft.cost) || 0,
+        note: priceDraft.note.trim(),
       });
       setPriceDraft(null);
+      // The history now has an entry that was not there a moment ago.
+      setHistory(null);
       await refreshEditing();
     } catch (err: any) {
       window.alert(err?.response?.data?.error || 'Could not save this price.');
@@ -481,6 +521,9 @@ export default function Products() {
             </button>
             <button style={detailTab === 'units' ? styles.tabActive : styles.tab} onClick={() => setDetailTab('units')}>
               Units &amp; prices ({detail.units?.length ?? 0})
+            </button>
+            <button style={detailTab === 'history' ? styles.tabActive : styles.tab} onClick={() => setDetailTab('history')}>
+              Price history
             </button>
           </div>
         )}
@@ -683,6 +726,7 @@ export default function Products() {
                           style={{ ...ui.button, padding: '0.125rem 0.5rem', fontSize: font.size.xs }}
                           onClick={() =>
                             setPriceDraft({
+                              note: '',
                               unit,
                               sell: String(price?.sell_price ?? 0),
                               wholesale: String(price?.wholesale_sell_price ?? 0),
@@ -726,6 +770,10 @@ export default function Products() {
               </button>
             </div>
           </>
+        )}
+
+        {detail && detailTab === 'history' && (
+          <PriceHistoryPanel history={history} error={historyError} />
         )}
       </Modal>
 
@@ -841,6 +889,20 @@ export default function Products() {
             />
           </Field>
         </FormGrid>
+
+        <Field
+          label="Why is it changing?"
+          hint="Optional, and worth the four words. It is kept with the figures, so next month somebody can see why the rate went up instead of guessing."
+          htmlFor="pr-note"
+        >
+          <TextInput
+            id="pr-note"
+            maxLength={200}
+            placeholder="vendor raised the rate"
+            value={priceDraft?.note ?? ''}
+            onChange={(e) => setPriceDraft(priceDraft ? { ...priceDraft, note: e.target.value } : null)}
+          />
+        </Field>
         {priceDraft && detail && priceDraft.unit.qty_in_base > 0 && Number(priceDraft.sell) > 0 && (
           <div style={styles.note}>
             That works out at <strong>{formatMoney(Number(priceDraft.sell) / priceDraft.unit.qty_in_base)}</strong> per{' '}
@@ -862,7 +924,95 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: 'da
   );
 }
 
+/**
+ * What this price has been.
+ *
+ * Each row is a state, and the movement beside it is derived from the row below
+ * — which is why the list must stay newest first. Storing the difference would
+ * let it disagree with the figures either side of it; deriving it cannot.
+ */
+function PriceHistoryPanel({ history, error }: { history: PriceMovement[] | null; error: string | null }) {
+  if (error) return <div style={styles.historyEmpty}>{error}</div>;
+  if (history === null) return <div style={styles.historyEmpty}>Loading…</div>;
+  if (history.length === 0) {
+    return <div style={styles.historyEmpty}>This product has no recorded price yet.</div>;
+  }
+
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={styles.utable}>
+        <thead>
+          <tr>
+            <th style={styles.uth}>When</th>
+            <th style={styles.uth}>Unit</th>
+            <th style={{ ...styles.uth, textAlign: 'right' }}>Selling</th>
+            <th style={{ ...styles.uth, textAlign: 'right' }}>Cost</th>
+            <th style={{ ...styles.uth, textAlign: 'right' }}>Margin</th>
+            <th style={styles.uth}>Who and why</th>
+          </tr>
+        </thead>
+        <tbody>
+          {history.map((entry) => {
+            const sellMoved = entry.previous ? entry.sell_price - entry.previous.sell_price : 0;
+            const costMoved = entry.previous ? entry.cost_price - entry.previous.cost_price : 0;
+            const margin = entry.sell_price - entry.cost_price;
+            return (
+              <tr key={entry.id}>
+                <td style={styles.utd}>
+                  <div>{formatDate(entry.at)}</div>
+                  <div style={styles.historySub}>{sourceLabel(entry.source)}</div>
+                </td>
+                <td style={styles.utd}>{entry.unit_label || '—'}</td>
+                <td style={{ ...styles.utd, textAlign: 'right' }}>
+                  <div style={{ fontWeight: 600 }}>{formatMoney(entry.sell_price)}</div>
+                  <Delta amount={sellMoved} />
+                </td>
+                <td style={{ ...styles.utd, textAlign: 'right' }}>
+                  <div>{formatMoney(entry.cost_price)}</div>
+                  <Delta amount={costMoved} />
+                </td>
+                <td style={{ ...styles.utd, textAlign: 'right' }}>
+                  <span style={{ color: margin < 0 ? color.danger : color.text }}>{formatMoney(margin)}</span>
+                </td>
+                <td style={styles.utd}>
+                  <div>{entry.changed_by_name || <span style={styles.historySub}>—</span>}</div>
+                  {entry.note && <div style={styles.historySub}>{entry.note}</div>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** How much a figure moved, or nothing at all where it did not move. */
+function Delta({ amount }: { amount: number }) {
+  if (!amount) return null;
+  const rose = amount > 0;
+  return (
+    <div style={{ ...styles.historySub, color: rose ? color.danger : color.success }}>
+      {rose ? '▲' : '▼'} {formatMoney(Math.abs(amount))}
+    </div>
+  );
+}
+
+function sourceLabel(source: PriceMovement['source']): string {
+  switch (source) {
+    case 'opening':
+      return 'where it started';
+    case 'import':
+      return 'from a catalogue sheet';
+    default:
+      return 'typed in';
+  }
+}
+
+
 const styles: Record<string, React.CSSProperties> = {
+  historyEmpty: { padding: space.lg, color: color.textMuted, fontSize: font.size.md },
+  historySub: { fontSize: font.size.xs, color: color.textMuted },
   header: { display: 'flex', alignItems: 'center', gap: space.lg, marginBottom: space.lg },
   h1: { margin: 0, fontSize: font.size.xxl },
   summary: { display: 'flex', gap: space.lg, marginBottom: space.lg, flexWrap: 'wrap' },

@@ -9,6 +9,7 @@ import Inventory from './pages/Inventory';
 import Products from './pages/Products';
 import Categories from './pages/Categories';
 import ProductImport from './pages/ProductImport';
+import PriceChanges from './pages/PriceChanges';
 import Dashboard from './pages/Dashboard';
 import Menu from './pages/Menu';
 import Customers from './pages/Customers';
@@ -100,6 +101,7 @@ function App() {
         <Route path="/products" element={<Products />} />
         <Route path="/categories" element={<Categories />} />
         <Route path="/products/import" element={<ProductImport />} />
+        <Route path="/price-changes" element={<PriceChanges />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/customers" element={<Customers />} />
         <Route path="/credit" element={<Credit />} />

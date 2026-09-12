@@ -34,6 +34,20 @@ import (
 // changes its clocks.
 var Location = time.FixedZone("IST", int((5*time.Hour + 30*time.Minute).Seconds()))
 
+// StartOfDay is midnight at the start of t's day in Location.
+//
+// A range a shopkeeper describes as "the last 30 days" begins at the start of a
+// day, not at this moment 30 days ago. A rolling cut drops this morning's
+// entries out of the range by lunchtime, so the same screen refreshed an hour
+// later shows fewer rows with nothing having been deleted.
+//
+// t is read in Location whatever zone it arrives carrying, for the same reason
+// FinancialYear does.
+func StartOfDay(t time.Time) time.Time {
+	local := t.In(Location)
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, Location)
+}
+
 // FinancialYear returns the Indian financial year containing t, in the
 // '2026-27' form that the document_sequences.fin_year CHECK requires.
 //

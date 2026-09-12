@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"gbos/internal/domain/catalogue"
 	platform "gbos/internal/platform/postgres"
@@ -835,19 +836,157 @@ func (r *Catalogue) SetProductActive(ctx context.Context, q platform.Querier, id
 // runtime error on every price save. Naming the constraint rather than the
 // column list means a future rename fails loudly here instead of quietly
 // inserting a duplicate.
-func (r *Catalogue) UpsertPrice(ctx context.Context, q platform.Querier, p catalogue.UnitPrice) error {
+// It also writes the history entry, in the same statement, which is the only
+// way to be sure there is one. There are three paths that set a price — a new
+// product's opening figures, the price screen, a bulk sheet — and a rule that
+// every one of them must remember to record is a rule that lasts until the
+// fourth is written.
+//
+// Two things about the statement are load-bearing.
+//
+// The `before` CTE reads the row as it was. Every part of a statement sees the
+// same snapshot in Postgres, taken before any of it ran, so `before` is not
+// racing the upsert beside it — it is the previous price, reliably, without a
+// separate read and the window that would open between them.
+//
+// History is written only when something actually moved. Re-saving a product
+// with its prices untouched, or re-running yesterday's catalogue sheet, is not
+// a price change, and a history full of entries that changed nothing is a
+// history nobody can read.
+func (r *Catalogue) UpsertPrice(ctx context.Context, q platform.Querier,
+	p catalogue.UnitPrice, by catalogue.PriceAuthor) error {
+	if err := by.Validate(); err != nil {
+		return err
+	}
 	_, err := q.ExecContext(ctx,
-		`INSERT INTO product_prices
-		    (product_id, store_id, product_unit_id, mrp, cost_price, sell_price, wholesale_sell_price)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT ON CONSTRAINT product_prices_product_store_unit_key DO UPDATE SET
-			mrp = excluded.mrp,
-			cost_price = excluded.cost_price,
-			sell_price = excluded.sell_price,
-			wholesale_sell_price = excluded.wholesale_sell_price,
-			updated_at = now()`,
-		p.ProductID, p.StoreID, p.ProductUnitID, p.MRP, p.CostPrice, p.SellPrice, p.WholesaleSellPrice)
+		`WITH before AS (
+		    SELECT mrp, cost_price, sell_price, wholesale_sell_price
+		      FROM product_prices
+		     WHERE product_id = $1 AND store_id = $2 AND product_unit_id = $3
+		 ), upserted AS (
+		    INSERT INTO product_prices
+		        (product_id, store_id, product_unit_id, mrp, cost_price, sell_price, wholesale_sell_price)
+		    VALUES ($1, $2, $3, $4, $5, $6, $7)
+		    ON CONFLICT ON CONSTRAINT product_prices_product_store_unit_key DO UPDATE SET
+		        mrp = excluded.mrp,
+		        cost_price = excluded.cost_price,
+		        sell_price = excluded.sell_price,
+		        wholesale_sell_price = excluded.wholesale_sell_price,
+		        updated_at = now()
+		    RETURNING mrp, cost_price, sell_price, wholesale_sell_price
+		 )
+		 INSERT INTO product_price_history
+		    (product_id, store_id, product_unit_id, mrp, cost_price, sell_price,
+		     wholesale_sell_price, changed_by, source, note)
+		 SELECT $1, $2, $3, u.mrp, u.cost_price, u.sell_price, u.wholesale_sell_price,
+		        $8, $9::price_change_source, $10
+		   FROM upserted u
+		  WHERE NOT EXISTS (
+		        SELECT 1 FROM before b
+		         WHERE b.mrp = u.mrp
+		           AND b.cost_price = u.cost_price
+		           AND b.sell_price = u.sell_price
+		           AND b.wholesale_sell_price = u.wholesale_sell_price)`,
+		p.ProductID, p.StoreID, p.ProductUnitID, p.MRP, p.CostPrice, p.SellPrice, p.WholesaleSellPrice,
+		nullIfNilUUID(by.UserID), string(by.Source), by.Note)
 	return platform.MapError(err)
+}
+
+const priceHistoryColumns = `h.id, h.product_id, h.store_id, h.product_unit_id,
+	COALESCE(p.name, ''), COALESCE(pu.label, ''),
+	h.mrp, h.cost_price, h.sell_price, h.wholesale_sell_price,
+	h.changed_by, COALESCE(u.username, ''), h.source, h.note, h.created_at`
+
+// priceHistoryFrom carries the joins the columns above need: the product's
+// name and the unit's label, so a store-wide list of price changes reads
+// without a lookup per row, and the username so it says who.
+const priceHistoryFrom = `
+	FROM product_price_history h
+	LEFT JOIN products p ON p.id = h.product_id
+	LEFT JOIN product_units pu ON pu.id = h.product_unit_id
+	LEFT JOIN users u ON u.id = h.changed_by`
+
+// PriceHistory returns what one price has been, newest first.
+//
+// Newest first is the order the screen wants and the order the index is built
+// in, and it is also what catalogue.AsMovements expects — the entry before a
+// given one is the NEXT element, not the previous one.
+func (r *Catalogue) PriceHistory(ctx context.Context, q platform.Querier,
+	productID, storeID, productUnitID uuid.UUID, limit int) ([]catalogue.PriceChange, error) {
+	if limit <= 0 || limit > maxPriceHistory {
+		limit = maxPriceHistory
+	}
+	rows, err := q.QueryContext(ctx,
+		`SELECT `+priceHistoryColumns+priceHistoryFrom+`
+		  WHERE h.product_id = $1 AND h.store_id = $2 AND h.product_unit_id = $3
+		  ORDER BY h.created_at DESC, h.id DESC
+		  LIMIT $4`, productID, storeID, productUnitID, limit)
+	if err != nil {
+		return nil, platform.MapError(err)
+	}
+	return scanPriceHistory(rows)
+}
+
+// ProductPriceHistory returns the history of every unit of one product, so a
+// product sold loose and by the sack shows both series together.
+func (r *Catalogue) ProductPriceHistory(ctx context.Context, q platform.Querier,
+	productID, storeID uuid.UUID, limit int) ([]catalogue.PriceChange, error) {
+	if limit <= 0 || limit > maxPriceHistory {
+		limit = maxPriceHistory
+	}
+	rows, err := q.QueryContext(ctx,
+		`SELECT `+priceHistoryColumns+priceHistoryFrom+`
+		  WHERE h.product_id = $1 AND h.store_id = $2
+		  ORDER BY h.created_at DESC, h.id DESC
+		  LIMIT $3`, productID, storeID, limit)
+	if err != nil {
+		return nil, platform.MapError(err)
+	}
+	return scanPriceHistory(rows)
+}
+
+// RecentPriceChanges is the store's price movements, newest first — what a
+// shopkeeper opens when a customer says the rate went up.
+func (r *Catalogue) RecentPriceChanges(ctx context.Context, q platform.Querier,
+	storeID uuid.UUID, since time.Time, limit int) ([]catalogue.PriceChange, error) {
+	if limit <= 0 || limit > maxPriceHistory {
+		limit = maxPriceHistory
+	}
+	rows, err := q.QueryContext(ctx,
+		`SELECT `+priceHistoryColumns+priceHistoryFrom+`
+		  WHERE h.store_id = $1 AND h.created_at >= $2
+		  ORDER BY h.created_at DESC, h.id DESC
+		  LIMIT $3`, storeID, since, limit)
+	if err != nil {
+		return nil, platform.MapError(err)
+	}
+	return scanPriceHistory(rows)
+}
+
+// maxPriceHistory bounds a history read. A price moves a handful of times a
+// year, so this is a guard against a runaway query rather than a page size
+// anyone will reach.
+const maxPriceHistory = 500
+
+func scanPriceHistory(rows *sql.Rows) ([]catalogue.PriceChange, error) {
+	defer rows.Close()
+
+	history := make([]catalogue.PriceChange, 0)
+	for rows.Next() {
+		var c catalogue.PriceChange
+		var source string
+		if err := rows.Scan(&c.ID, &c.ProductID, &c.StoreID, &c.ProductUnitID, &c.ProductName, &c.UnitLabel,
+			&c.MRP, &c.CostPrice, &c.SellPrice, &c.WholesaleSellPrice,
+			&c.ChangedBy, &c.ChangedByName, &source, &c.Note, &c.At); err != nil {
+			return nil, fmt.Errorf("scan price history: %w", platform.MapError(err))
+		}
+		c.Source = catalogue.PriceSource(source)
+		history = append(history, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, platform.MapError(err)
+	}
+	return history, nil
 }
 
 // GetPrice returns the stored price row for one unit of a product in a store,

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	domain "gbos/internal/domain/catalogue"
 	"gbos/internal/domain/money"
@@ -57,7 +58,10 @@ type Repository interface {
 	SetProductActive(ctx context.Context, q platform.Querier, id uuid.UUID, active bool) (bool, error)
 	ProductExists(ctx context.Context, q platform.Querier, id uuid.UUID) (bool, error)
 
-	UpsertPrice(ctx context.Context, q platform.Querier, p domain.UnitPrice) error
+	UpsertPrice(ctx context.Context, q platform.Querier, p domain.UnitPrice, by domain.PriceAuthor) error
+	PriceHistory(ctx context.Context, q platform.Querier, productID, storeID, productUnitID uuid.UUID, limit int) ([]domain.PriceChange, error)
+	ProductPriceHistory(ctx context.Context, q platform.Querier, productID, storeID uuid.UUID, limit int) ([]domain.PriceChange, error)
+	RecentPriceChanges(ctx context.Context, q platform.Querier, storeID uuid.UUID, since time.Time, limit int) ([]domain.PriceChange, error)
 	GetPrice(ctx context.Context, q platform.Querier, productID, storeID, productUnitID uuid.UUID) (domain.UnitPrice, error)
 	SellableUnitsWithPrices(ctx context.Context, q platform.Querier, storeID uuid.UUID,
 		productIDs []uuid.UUID) (map[uuid.UUID][]domain.SellableUnitsWithPrice, error)
@@ -575,6 +579,9 @@ type CreateProductInput struct {
 	// briefly without the price the POS needs to sell it.
 	StoreID uuid.UUID
 	Price   *domain.UnitPrice
+	// UserID is who is doing this, recorded against the opening price. Nil is
+	// allowed and means the first-run bootstrap, which has nobody behind it.
+	UserID uuid.UUID
 }
 
 // CreatedProduct is a new product together with the unit it may be transacted
@@ -679,7 +686,12 @@ func (s *Service) createProduct(ctx context.Context, tx platform.Tx, p domain.Pr
 		if err := price.Validate(); err != nil {
 			return CreatedProduct{}, err
 		}
-		if err := s.repo.UpsertPrice(ctx, tx, price); err != nil {
+		if err := s.repo.UpsertPrice(ctx, tx, price, domain.PriceAuthor{
+			UserID: in.UserID,
+			// Where the price started, which is not the same as somebody
+			// later changing it and is worth telling apart in the history.
+			Source: domain.PriceOpening,
+		}); err != nil {
 			return CreatedProduct{}, err
 		}
 	}
@@ -729,7 +741,7 @@ func (s *Service) SetProductActive(ctx context.Context, id uuid.UUID, active boo
 // rice at Rs.45 a kilo is the ordinary case and not an error: bulk being
 // cheaper per kilo is the whole reason a shop sells it that way, and the model
 // this replaces could not express it.
-func (s *Service) SetPrice(ctx context.Context, p domain.UnitPrice) (domain.UnitPrice, error) {
+func (s *Service) SetPrice(ctx context.Context, p domain.UnitPrice, by domain.PriceAuthor) (domain.UnitPrice, error) {
 	if p.StoreID == uuid.Nil {
 		return domain.UnitPrice{}, ErrStoreRequired
 	}
@@ -759,10 +771,63 @@ func (s *Service) SetPrice(ctx context.Context, p domain.UnitPrice) (domain.Unit
 		return domain.UnitPrice{}, err
 	}
 
-	if err := s.repo.UpsertPrice(ctx, s.db, p); err != nil {
+	if err := s.repo.UpsertPrice(ctx, s.db, p, by); err != nil {
 		return domain.UnitPrice{}, fmt.Errorf("set price: %w", err)
 	}
 	return p, nil
+}
+
+// ---------------------------------------------------------------------------
+// Price history
+// ---------------------------------------------------------------------------
+
+// PriceHistory returns what one price has been, newest first and paired so each
+// entry carries the one before it.
+//
+// Pairing happens here rather than in the database because the difference
+// between two figures is not a fact worth storing: derived, it cannot disagree
+// with the numbers either side of it.
+func (s *Service) PriceHistory(ctx context.Context, productID, storeID, productUnitID uuid.UUID, limit int) ([]domain.PriceMovement, error) {
+	if storeID == uuid.Nil {
+		return nil, ErrStoreRequired
+	}
+	if productID == uuid.Nil {
+		return nil, fmt.Errorf("%w: product is required", domain.ErrValidation)
+	}
+
+	var history []domain.PriceChange
+	var err error
+	if productUnitID == uuid.Nil {
+		// Every unit of the product together: a product sold loose and by the
+		// sack has two price series, and looking at one of them alone is how a
+		// shopkeeper concludes the wrong thing about the other.
+		history, err = s.repo.ProductPriceHistory(ctx, s.db, productID, storeID, limit)
+	} else {
+		history, err = s.repo.PriceHistory(ctx, s.db, productID, storeID, productUnitID, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read price history: %w", err)
+	}
+	return domain.AsMovements(history), nil
+}
+
+// RecentPriceChanges is every price that moved in this store lately.
+func (s *Service) RecentPriceChanges(ctx context.Context, storeID uuid.UUID, since time.Time, limit int) ([]domain.PriceMovement, error) {
+	if storeID == uuid.Nil {
+		return nil, ErrStoreRequired
+	}
+	history, err := s.repo.RecentPriceChanges(ctx, s.db, storeID, since, limit)
+	if err != nil {
+		return nil, fmt.Errorf("read recent price changes: %w", err)
+	}
+	// Not paired: these entries are from different products, so the row below
+	// one of them is not what it used to be. Pairing them would invent a
+	// comparison between two unrelated prices.
+	movements := make([]domain.PriceMovement, len(history))
+	for i, entry := range history {
+		movements[i] = domain.PriceMovement{PriceChange: entry}
+	}
+	return movements, nil
 }
 
 // GetPrice returns the stored price of one unit of a product, cost price

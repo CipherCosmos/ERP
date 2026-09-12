@@ -64,6 +64,7 @@ export default function Menu() {
         { key: 'products', labelKey: 'products', icon: '🏷️', path: '/products', permission: 'catalog.read' },
         { key: 'categories', labelKey: 'categories', icon: '🗂️', path: '/categories', permission: 'catalog.read' },
         { key: 'product-import', labelKey: 'productImport', icon: '📤', path: '/products/import', permission: 'product.catalog_write' },
+        { key: 'price-changes', labelKey: 'priceChanges', icon: '🏷️', path: '/price-changes', permission: 'product.price' },
       ],
     },
     {

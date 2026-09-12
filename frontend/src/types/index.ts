@@ -49,6 +49,38 @@ export interface Category {
   child_count?: number;
 }
 
+/** How a price came to be what it is. */
+export type PriceSource = 'opening' | 'manual' | 'import';
+
+/** One recorded state of one price. */
+export interface PriceChange {
+  id: string;
+  product_id: string;
+  store_id: string;
+  product_unit_id: string;
+  product_name: string;
+  unit_label: string;
+  mrp: number;
+  cost_price: number;
+  sell_price: number;
+  wholesale_sell_price: number;
+  changed_by?: string;
+  changed_by_name?: string;
+  source: PriceSource;
+  note?: string;
+  at: string;
+}
+
+/**
+ * A history entry with the figures it changed from.
+ *
+ * `previous` is absent on the earliest entry: the price did not change into
+ * that, it started there.
+ */
+export interface PriceMovement extends PriceChange {
+  previous?: PriceChange;
+}
+
 /** One thing wrong with one line of an uploaded catalogue sheet. */
 export interface ImportProblem {
   /** The line number as a spreadsheet counts them: the header is line 1. */

@@ -1,5 +1,5 @@
 import axios, { AxiosResponse } from 'axios';
-import { Category, CategoryMergeResult, ImportReport, Product, Store, Customer, Invoice, Terminal } from '../types';
+import { Category, CategoryMergeResult, ImportReport, PriceMovement, Product, Store, Customer, Invoice, Terminal } from '../types';
 
 const api = axios.create({
   baseURL: process.env.REACT_APP_API_URL || '/api/v1',
@@ -297,7 +297,35 @@ export const productApi = {
     cost_price: number;
     sell_price: number;
     wholesale_sell_price?: number;
+    /** Why it is changing. Recorded beside the figures in the price history. */
+    note?: string;
   }) => api.post('/products/price', data),
+  /**
+   * What this price has been, newest first, each entry carrying the one before
+   * it. Without a unit it covers every unit of the product — a product sold
+   * loose and by the sack has two series, and reading one alone is how somebody
+   * concludes the wrong thing about the other.
+   */
+  priceHistory: (productId: string, storeId: string, productUnitId?: string) =>
+    list<PriceMovement>(
+      api.get(`/products/${productId}/price-history`, {
+        params: { store_id: storeId, ...(productUnitId ? { product_unit_id: productUnitId } : {}) },
+      }),
+      'history'
+    ),
+};
+
+export const priceChangeApi = {
+  /**
+   * Every price that moved in this store lately — the store-wide counterpart to
+   * one product's history. Entries are deliberately not paired: they are from
+   * different products, so the row below one of them is not what it used to be.
+   */
+  list: (storeId: string, days: number) =>
+    list<PriceMovement>(
+      api.get('/price-changes', { params: { store_id: storeId, days } }),
+      'changes'
+    ),
 };
 
 export const invoiceApi = {

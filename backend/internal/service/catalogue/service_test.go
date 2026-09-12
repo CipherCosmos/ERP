@@ -21,6 +21,11 @@ import (
 // Postgres rather than a mock because the behaviour worth testing here —
 // constraint enforcement, ILIKE semantics, transaction rollback — lives in the
 // database and a mock would assert only that the code calls itself.
+// byHand is the author every test price carries: somebody typing it into the
+// price screen. The user is nil because these tests are about the price rules
+// and not about who set them; the history tests name a real one.
+var byHand = domain.PriceAuthor{Source: domain.PriceManual}
+
 func newService(t *testing.T) (*service.Service, *platform.DB, uuid.UUID, uuid.UUID) {
 	t.Helper()
 	ctx := context.Background()
@@ -430,7 +435,7 @@ func TestSellingAboveMRPIsRejected(t *testing.T) {
 		StoreID:       storeID,
 		MRP:           money.MustFromString("20.00"),
 		SellPrice:     money.MustFromString("25.00"),
-	})
+	}, byHand)
 	if err == nil {
 		t.Fatal("expected a selling price above MRP to be rejected")
 	}
@@ -445,7 +450,7 @@ func TestSellingAboveMRPIsRejected(t *testing.T) {
 		StoreID:       storeID,
 		MRP:           money.Zero(),
 		SellPrice:     money.MustFromString("25.00"),
-	}); err != nil {
+	}, byHand); err != nil {
 		t.Errorf("an unpriced MRP should not cap the selling price: %v", err)
 	}
 }
@@ -469,7 +474,7 @@ func TestSetPriceReplacesRatherThanDuplicating(t *testing.T) {
 			ProductUnitID: p.DefaultUnit.ID,
 			StoreID:       storeID,
 			SellPrice:     money.MustFromString(amount),
-		}); err != nil {
+		}, byHand); err != nil {
 			t.Fatalf("set price %s: %v", amount, err)
 		}
 	}
@@ -678,7 +683,7 @@ func TestBulkIsPricedIndependentlyOfLoose(t *testing.T) {
 		ProductUnitID: sack.ID,
 		StoreID:       storeID,
 		SellPrice:     money.MustFromString("1050.00"),
-	}); err != nil {
+	}, byHand); err != nil {
 		t.Fatalf("price the sack: %v", err)
 	}
 
@@ -721,7 +726,7 @@ func TestBulkIsPricedIndependentlyOfLoose(t *testing.T) {
 		ProductUnitID: p.DefaultUnit.ID,
 		StoreID:       storeID,
 		SellPrice:     money.MustFromString("47.00"),
-	}); err != nil {
+	}, byHand); err != nil {
 		t.Fatalf("reprice loose: %v", err)
 	}
 	sackPrice, err := svc.GetPrice(ctx, p.ID, storeID, sack.ID)
@@ -997,7 +1002,7 @@ func TestScanningTheSackPricesTheSack(t *testing.T) {
 	if _, err := svc.SetPrice(ctx, domain.UnitPrice{
 		ProductID: p.ID, ProductUnitID: sack.ID, StoreID: storeID,
 		SellPrice: money.MustFromString("1050.00"),
-	}); err != nil {
+	}, byHand); err != nil {
 		t.Fatalf("price the sack: %v", err)
 	}
 
@@ -1412,7 +1417,7 @@ func TestPricingAnotherProductsUnitIsRefused(t *testing.T) {
 		ProductUnitID: dal.DefaultUnit.ID,
 		StoreID:       storeID,
 		SellPrice:     money.MustFromString("45.00"),
-	}); !errors.Is(err, domain.ErrValidation) {
+	}, byHand); !errors.Is(err, domain.ErrValidation) {
 		t.Errorf("expected ErrValidation pricing another product's unit, got %v", err)
 	}
 
@@ -1490,7 +1495,7 @@ func TestListingManyProductsDoesNotDuplicateRows(t *testing.T) {
 		if _, err := svc.SetPrice(ctx, domain.UnitPrice{
 			ProductID: p.ID, ProductUnitID: unit.ID, StoreID: storeID,
 			SellPrice: money.MustFromString(u.price),
-		}); err != nil {
+		}, byHand); err != nil {
 			t.Fatalf("price %s: %v", u.label, err)
 		}
 	}
