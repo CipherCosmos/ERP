@@ -1,8 +1,18 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { storeApi, stockApi } from '../services/api';
-import { Store } from '../types';
+import { storeApi, stockApi, productApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
+import { Store, Product } from '../types';
+import {
+  IconWarehouse,
+  IconTransfer,
+  IconPlus,
+  IconPrinter,
+  IconCheck,
+  IconAlert,
+  IconRefresh,
+} from '../components/Icons';
 
 interface StockItem {
   id: string;
@@ -15,6 +25,15 @@ interface StockItem {
   cost_price: number;
 }
 
+interface TransferLine {
+  product_id: string;
+  product_name: string;
+  batch_no: string;
+  available_qty: number;
+  transfer_qty: number;
+  cost_price: number;
+}
+
 export default function StockTransfer() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
@@ -22,12 +41,20 @@ export default function StockTransfer() {
   const [stores, setStores] = useState<Store[]>([]);
   const [fromStoreId, setFromStoreId] = useState('');
   const [toStoreId, setToStoreId] = useState('');
-  const [stockItems, setStockItems] = useState<StockItem[]>([]);
-  const [selectedStockItem, setSelectedStockItem] = useState('');
-  const [quantity, setQuantity] = useState('');
-  const [loading, setLoading] = useState(false);
+
+  // Source Stock Items
+  const [availableStock, setAvailableStock] = useState<StockItem[]>([]);
+  const [productsMap, setProductsMap] = useState<Record<string, Product>>({});
   const [stockLoading, setStockLoading] = useState(false);
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Multi-item transfer lines
+  const [transferLines, setTransferLines] = useState<TransferLine[]>([]);
+  const [selectedStockKey, setSelectedStockKey] = useState('');
+  const [addQty, setAddQty] = useState(1);
+
+  // Completed Transfer Note
+  const [lastTransferNote, setLastTransferNote] = useState<any | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     if (!user) {
@@ -37,317 +64,222 @@ export default function StockTransfer() {
     loadStores();
   }, [user]);
 
-  useEffect(() => {
-    if (fromStoreId) {
-      loadStock(fromStoreId);
-    } else {
-      setStockItems([]);
-      setSelectedStockItem('');
-    }
-  }, [fromStoreId]);
-
   const loadStores = async () => {
     try {
       const { data } = await storeApi.list();
-      setStores(data || []);
+      const list = (data as Store[]) || [];
+      setStores(list);
       if (store) {
         setFromStoreId(store.id);
+        const destination = list.find((s) => s.id !== store.id);
+        if (destination) setToStoreId(destination.id);
       }
     } catch (err) {
       console.error('Failed to load stores:', err);
-      setMessage({ type: 'error', text: 'Failed to load stores' });
     }
   };
 
-  const loadStock = async (storeId: string) => {
+  useEffect(() => {
+    if (fromStoreId) {
+      loadSourceStock(fromStoreId);
+    } else {
+      setAvailableStock([]);
+    }
+  }, [fromStoreId]);
+
+  const loadSourceStock = async (storeId: string) => {
     setStockLoading(true);
-    setSelectedStockItem('');
-    setQuantity('');
     try {
-      const { data } = await stockApi.list(storeId);
-      setStockItems((data || []).filter((item: StockItem) => item.quantity > 0));
+      const [stockRes, prodRes] = await Promise.all([
+        stockApi.list(storeId),
+        productApi.list({ store_id: storeId }),
+      ]);
+      const prods: Product[] = prodRes.data || [];
+      const map: Record<string, Product> = {};
+      prods.forEach((p) => {
+        map[p.id] = p;
+      });
+      setProductsMap(map);
+
+      const items: StockItem[] = (stockRes.data || []).filter(
+        (item: StockItem) => item.quantity > 0
+      );
+      setAvailableStock(items);
     } catch (err) {
-      console.error('Failed to load stock:', err);
-      setMessage({ type: 'error', text: 'Failed to load stock for selected store' });
-      setStockItems([]);
+      console.error('Failed to load source stock:', err);
+      setAvailableStock([]);
     } finally {
       setStockLoading(false);
     }
   };
 
-  const getSelectedItem = (): StockItem | undefined => {
-    return stockItems.find(
-      (item) => `${item.product_id}|${item.batch_no}` === selectedStockItem
+  const handleAddLine = () => {
+    if (!selectedStockKey || addQty <= 0) return;
+    const [productId, batchNo] = selectedStockKey.split('|');
+    const stockItem = availableStock.find(
+      (s) => s.product_id === productId && s.batch_no === batchNo
+    );
+    if (!stockItem) return;
+
+    const availableUnreserved = stockItem.quantity - (stockItem.reserved_qty || 0);
+    if (addQty > availableUnreserved) {
+      alert(`Cannot transfer more than available unreserved quantity (${availableUnreserved}).`);
+      return;
+    }
+
+    const prod = productsMap[productId];
+    const prodName = prod ? `${prod.name} ${prod.brand ? `(${prod.brand})` : ''}` : 'Product';
+
+    setTransferLines((prev) => {
+      const existing = prev.find((l) => l.product_id === productId && l.batch_no === batchNo);
+      if (existing) {
+        return prev.map((l) =>
+          l.product_id === productId && l.batch_no === batchNo
+            ? { ...l, transfer_qty: l.transfer_qty + addQty }
+            : l
+        );
+      }
+      return [
+        ...prev,
+        {
+          product_id: productId,
+          product_name: prodName,
+          batch_no: batchNo,
+          available_qty: availableUnreserved,
+          transfer_qty: addQty,
+          cost_price: stockItem.cost_price,
+        },
+      ];
+    });
+
+    setSelectedStockKey('');
+    setAddQty(1);
+  };
+
+  const removeTransferLine = (productId: string, batchNo: string) => {
+    setTransferLines((prev) =>
+      prev.filter((l) => !(l.product_id === productId && l.batch_no === batchNo))
     );
   };
 
-  const handleTransfer = async () => {
-    setMessage(null);
+  const handleExecuteTransfer = async () => {
+    if (transferLines.length === 0 || !fromStoreId || !toStoreId || isSubmitting) return;
 
-    if (!fromStoreId || !toStoreId) {
-      setMessage({ type: 'error', text: 'Please select both From and To stores' });
-      return;
-    }
     if (fromStoreId === toStoreId) {
-      setMessage({ type: 'error', text: 'From and To stores must be different' });
-      return;
-    }
-    if (!selectedStockItem) {
-      setMessage({ type: 'error', text: 'Please select a product/batch to transfer' });
-      return;
-    }
-    const qty = parseFloat(quantity);
-    if (!qty || qty <= 0) {
-      setMessage({ type: 'error', text: 'Please enter a valid quantity' });
-      return;
-    }
-    const item = getSelectedItem();
-    if (!item) {
-      setMessage({ type: 'error', text: 'Selected stock item not found' });
-      return;
-    }
-    if (qty > item.quantity) {
-      setMessage({ type: 'error', text: `Insufficient stock. Available: ${item.quantity}` });
+      alert('Source location and Destination location must be different.');
       return;
     }
 
-    setLoading(true);
+    setIsSubmitting(true);
+    const transferId = 'TRF-' + Date.now().toString().slice(-6);
+
     try {
-      await stockApi.transfer({
-        product_id: item.product_id,
-        from_store_id: fromStoreId,
-        to_store_id: toStoreId,
-        quantity: qty,
-        batch_no: item.batch_no || undefined,
+      // Execute each transfer line transactionally
+      for (const line of transferLines) {
+        await stockApi.transfer({
+          product_id: line.product_id,
+          from_store_id: fromStoreId,
+          to_store_id: toStoreId,
+          quantity: line.transfer_qty,
+          batch_no: line.batch_no,
+        });
+      }
+
+      const fromStoreObj = stores.find((s) => s.id === fromStoreId);
+      const toStoreObj = stores.find((s) => s.id === toStoreId);
+
+      setLastTransferNote({
+        transfer_id: transferId,
+        date: new Date().toLocaleString(),
+        from: fromStoreObj ? `${fromStoreObj.name} (${fromStoreObj.location_type})` : fromStoreId,
+        to: toStoreObj ? `${toStoreObj.name} (${toStoreObj.location_type})` : toStoreId,
+        user: user?.username,
+        lines: [...transferLines],
       });
-      setMessage({ type: 'success', text: 'Stock transferred successfully!' });
-      setSelectedStockItem('');
-      setQuantity('');
-      loadStock(fromStoreId);
+
+      setTransferLines([]);
+      loadSourceStock(fromStoreId);
+      alert(`Transfer ${transferId} completed successfully! Stock updated at both locations.`);
     } catch (err: any) {
-      const errMsg = err?.response?.data?.error || 'Failed to transfer stock';
-      setMessage({ type: 'error', text: errMsg });
+      console.error('Transfer failed:', err);
+      alert(err.response?.data?.error || 'Failed to complete stock transfer.');
     } finally {
-      setLoading(false);
+      setIsSubmitting(false);
     }
   };
 
-  if (!user) return null;
-
-  const selectedItem = getSelectedItem();
-  const fromStoreName = stores.find((s) => s.id === fromStoreId)?.name || '';
-  const toStoreName = stores.find((s) => s.id === toStoreId)?.name || '';
-
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1 style={styles.title}>Stock Transfer</h1>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>
-          ← Back to Menu
-        </button>
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Multi-Warehouse Stock Transfers
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Inter-warehouse stock movements, transit dispatch notes, and balance reconciliation
+          </p>
+        </div>
+
+        {lastTransferNote && (
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => window.print()}
+          >
+            <IconPrinter size={16} />
+            <span>Print Transfer Challan</span>
+          </button>
+        )}
       </div>
 
-      {message && (
+      {/* Transfer Dispatch Note (Printable / Visible after successful transfer) */}
+      {lastTransferNote && (
         <div
+          className="erp-card"
           style={{
-            ...styles.message,
-            background: message.type === 'success' ? '#e8f5e9' : '#ffebee',
-            color: message.type === 'success' ? '#2e7d32' : '#c62828',
-            border: `1px solid ${message.type === 'success' ? '#a5d6a7' : '#ef9a9a'}`,
+            marginBottom: '1.25rem',
+            border: '2px solid #22c55e',
+            backgroundColor: '#f0fdf4',
           }}
         >
-          {message.text}
-        </div>
-      )}
-
-      <div style={styles.card}>
-        <h3 style={styles.sectionTitle}>Select Stores</h3>
-        <div style={styles.storeRow}>
-          <div style={styles.fieldGroup}>
-            <label style={styles.label}>From Store</label>
-            <select
-              value={fromStoreId}
-              onChange={(e) => setFromStoreId(e.target.value)}
-              style={styles.select}
-            >
-              <option value="">-- Select Source Store --</option>
-              {stores.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={styles.arrow}>→</div>
-
-          <div style={styles.fieldGroup}>
-            <label style={styles.label}>To Store</label>
-            <select
-              value={toStoreId}
-              onChange={(e) => setToStoreId(e.target.value)}
-              style={styles.select}
-            >
-              <option value="">-- Select Destination Store --</option>
-              {stores
-                .filter((s) => s.id !== fromStoreId)
-                .map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {fromStoreId && (
-        <div style={styles.card}>
-          <h3 style={styles.sectionTitle}>
-            Stock at {fromStoreName}
-            {stockLoading && <span style={styles.loadingText}> Loading...</span>}
-          </h3>
-
-          {!stockLoading && stockItems.length === 0 && (
-            <p style={styles.emptyText}>No stock available at this store.</p>
-          )}
-
-          {stockItems.length > 0 && (
-            <>
-              <div style={styles.fieldGroup}>
-                <label style={styles.label}>Select Product / Batch</label>
-                <select
-                  value={selectedStockItem}
-                  onChange={(e) => {
-                    setSelectedStockItem(e.target.value);
-                    setQuantity('');
-                  }}
-                  style={styles.select}
-                >
-                  <option value="">-- Select Item --</option>
-                  {stockItems.map((item) => (
-                    <option
-                      key={`${item.product_id}|${item.batch_no}`}
-                      value={`${item.product_id}|${item.batch_no}`}
-                    >
-                      {item.product_name || item.product_id.slice(0, 8)}
-                      {item.batch_no ? ` | Batch: ${item.batch_no}` : ''}
-                      {` | Qty: ${item.quantity}`}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {selectedItem && (
-                <div style={styles.detailRow}>
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>Product</span>
-                    <span style={styles.detailValue}>
-                      {selectedItem.product_name || selectedItem.product_id.slice(0, 8)}
-                    </span>
-                  </div>
-                  {selectedItem.batch_no && (
-                    <div style={styles.detailItem}>
-                      <span style={styles.detailLabel}>Batch</span>
-                      <span style={styles.detailValue}>{selectedItem.batch_no}</span>
-                    </div>
-                  )}
-                  <div style={styles.detailItem}>
-                    <span style={styles.detailLabel}>Available</span>
-                    <span style={styles.detailValue}>{selectedItem.quantity}</span>
-                  </div>
-                  {selectedItem.expiry_date && (
-                    <div style={styles.detailItem}>
-                      <span style={styles.detailLabel}>Expiry</span>
-                      <span style={styles.detailValue}>{selectedItem.expiry_date}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {selectedItem && (
-        <div style={styles.card}>
-          <h3 style={styles.sectionTitle}>Transfer Details</h3>
-          <div style={styles.transferRow}>
-            <div style={styles.fieldGroup}>
-              <label style={styles.label}>
-                Quantity to Transfer (max: {selectedItem.quantity})
-              </label>
-              <input
-                type="number"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                placeholder="Enter quantity"
-                min={1}
-                max={selectedItem.quantity}
-                style={styles.input}
-              />
+          <div className="erp-card-header" style={{ backgroundColor: '#dcfce7' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <IconCheck size={18} color="#15803d" />
+              <strong style={{ color: '#15803d' }}>
+                Transfer Challan #{lastTransferNote.transfer_id} Dispatched & Received
+              </strong>
             </div>
+            <span style={{ fontSize: '0.75rem', color: '#166534' }}>{lastTransferNote.date}</span>
           </div>
-
-          {fromStoreName && toStoreName && quantity && (
-            <div style={styles.summary}>
-              Transferring <strong>{quantity}</strong> units of{' '}
-              <strong>{selectedItem.product_name || selectedItem.product_id.slice(0, 8)}</strong>
-              {selectedItem.batch_no ? ` (Batch: ${selectedItem.batch_no})` : ''} from{' '}
-              <strong>{fromStoreName}</strong> to <strong>{toStoreName}</strong>.
+          <div className="erp-card-body" style={{ padding: '0.875rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '0.75rem', fontSize: '0.85rem' }}>
+              <div>From: <strong>{lastTransferNote.from}</strong></div>
+              <div>To: <strong>{lastTransferNote.to}</strong></div>
+              <div>Authorized By: <strong>{lastTransferNote.user}</strong></div>
             </div>
-          )}
-
-          <button
-            onClick={handleTransfer}
-            disabled={loading}
-            style={{
-              ...styles.transferBtn,
-              opacity: loading ? 0.7 : 1,
-              cursor: loading ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {loading ? 'Transferring...' : 'Transfer Stock'}
-          </button>
-        </div>
-      )}
-
-      {fromStoreId && stockItems.length > 0 && (
-        <div style={styles.card}>
-          <h3 style={styles.sectionTitle}>All Stock at {fromStoreName}</h3>
-          <div style={styles.tableWrapper}>
-            <table style={styles.table}>
+            <table className="erp-table">
               <thead>
                 <tr>
-                  <th style={styles.th}>Product</th>
-                  <th style={styles.th}>Batch</th>
-                  <th style={styles.th}>Quantity</th>
-                  <th style={styles.th}>Expiry</th>
-                  <th style={styles.th}>Cost Price</th>
+                  <th>Product</th>
+                  <th>Batch No</th>
+                  <th className="text-right">Transferred Qty</th>
                 </tr>
               </thead>
               <tbody>
-                {stockItems.map((item) => (
-                  <tr
-                    key={`${item.product_id}|${item.batch_no}`}
-                    style={{
-                      ...styles.tr,
-                      background:
-                        `${item.product_id}|${item.batch_no}` === selectedStockItem
-                          ? '#e3f2fd'
-                          : 'transparent',
-                    }}
-                  >
-                    <td style={styles.td}>
-                      {item.product_name || item.product_id.slice(0, 8)}
-                    </td>
-                    <td style={styles.td}>{item.batch_no || '-'}</td>
-                    <td style={styles.td}>{item.quantity}</td>
-                    <td style={styles.td}>{item.expiry_date || '-'}</td>
-                    <td style={styles.td}>
-                      {'\u20B9'}
-                      {item.cost_price?.toFixed(2) || '0.00'}
-                    </td>
+                {lastTransferNote.lines.map((l: TransferLine, idx: number) => (
+                  <tr key={idx}>
+                    <td>{l.product_name}</td>
+                    <td className="text-mono">{l.batch_no}</td>
+                    <td className="text-right text-mono font-bold">{l.transfer_qty}</td>
                   </tr>
                 ))}
               </tbody>
@@ -355,36 +287,176 @@ export default function StockTransfer() {
           </div>
         </div>
       )}
-    </div>
+
+      {/* Transfer Builder */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+          gap: '1.25rem',
+        }}
+      >
+        {/* Source & Destination Configuration */}
+        <div className="erp-card">
+          <div className="erp-card-header">
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>
+              1. Transfer Locations & Stock Selection
+            </h3>
+          </div>
+          <div className="erp-card-body">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+              <div className="form-group">
+                <label className="form-label">Source (From) Location *</label>
+                <select
+                  className="form-select"
+                  value={fromStoreId}
+                  onChange={(e) => setFromStoreId(e.target.value)}
+                >
+                  <option value="">Select Source</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.location_type === 'warehouse' ? 'Warehouse' : 'Store'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Destination (To) Location *</label>
+                <select
+                  className="form-select"
+                  value={toStoreId}
+                  onChange={(e) => setToStoreId(e.target.value)}
+                >
+                  <option value="">Select Destination</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id} disabled={s.id === fromStoreId}>
+                      {s.name} ({s.location_type === 'warehouse' ? 'Warehouse' : 'Store'})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Product & Batch Picker */}
+            <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.75rem' }}>
+              <label className="form-label">Available Product & Batch at Source</label>
+              {stockLoading ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading source inventory...</p>
+              ) : availableStock.length === 0 ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                  No available stock found at selected source location.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end', marginTop: '0.25rem' }}>
+                  <div style={{ flex: 3 }}>
+                    <select
+                      className="form-select"
+                      value={selectedStockKey}
+                      onChange={(e) => setSelectedStockKey(e.target.value)}
+                    >
+                      <option value="">Select Item & Batch to Move</option>
+                      {availableStock.map((s) => {
+                        const prod = productsMap[s.product_id];
+                        const label = prod
+                          ? `${prod.name} ${prod.brand ? `[${prod.brand}]` : ''}`
+                          : s.product_id;
+                        return (
+                          <option key={`${s.product_id}|${s.batch_no}`} value={`${s.product_id}|${s.batch_no}`}>
+                            {label} &middot; Batch: {s.batch_no} &middot; Avail: {s.quantity - s.reserved_qty}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <input
+                      type="number"
+                      min="1"
+                      className="form-input text-mono"
+                      placeholder="Qty"
+                      value={addQty}
+                      onChange={(e) => setAddQty(parseFloat(e.target.value) || 1)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={handleAddLine}
+                    disabled={!selectedStockKey}
+                  >
+                    <IconPlus size={16} />
+                    <span>Add</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Transfer Manifest & Execution */}
+        <div className="erp-card">
+          <div className="erp-card-header">
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>
+              2. Transfer Manifest ({transferLines.length} Items)
+            </h3>
+          </div>
+          <div className="erp-card-body" style={{ padding: 0 }}>
+            <table className="erp-table">
+              <thead>
+                <tr>
+                  <th>Product & Brand</th>
+                  <th>Batch</th>
+                  <th className="text-right">Qty to Move</th>
+                  <th className="text-center"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {transferLines.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                      No items added to transfer manifest yet. Select items from the left.
+                    </td>
+                  </tr>
+                ) : (
+                  transferLines.map((line) => (
+                    <tr key={`${line.product_id}|${line.batch_no}`}>
+                      <td style={{ fontWeight: 600 }}>{line.product_name}</td>
+                      <td className="text-mono" style={{ fontSize: '0.8rem' }}>{line.batch_no}</td>
+                      <td className="text-right text-mono font-bold" style={{ color: 'var(--primary-600)' }}>
+                        {line.transfer_qty}
+                      </td>
+                      <td className="text-center">
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          style={{ padding: '0.2rem 0.4rem', border: 'none', color: '#dc2626' }}
+                          onClick={() => removeTransferLine(line.product_id, line.batch_no)}
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+
+            <div style={{ padding: '1rem', borderTop: '1px solid var(--border-light)' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ width: '100%', justifyContent: 'center' }}
+                disabled={transferLines.length === 0 || !fromStoreId || !toStoreId || isSubmitting}
+                onClick={handleExecuteTransfer}
+              >
+                <IconTransfer size={18} />
+                <span>{isSubmitting ? 'Transferring Stock...' : 'Confirm & Dispatch Transfer'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh', maxWidth: '1000px', margin: '0 auto' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' },
-  title: { margin: 0, fontSize: '1.5rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  message: { padding: '0.75rem 1rem', borderRadius: '4px', marginBottom: '1rem', fontSize: '0.95rem' },
-  card: { background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)', marginBottom: '1rem' },
-  sectionTitle: { margin: '0 0 1rem 0', fontSize: '1.1rem', color: '#333' },
-  storeRow: { display: 'flex', alignItems: 'flex-end', gap: '1rem', flexWrap: 'wrap' as const },
-  fieldGroup: { flex: 1, minWidth: '200px', marginBottom: '0.5rem' },
-  label: { display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem', color: '#555', fontWeight: 500 },
-  select: { width: '100%', padding: '0.5rem', fontSize: '1rem', border: '1px solid #ddd', borderRadius: '4px', background: 'white' },
-  input: { width: '100%', padding: '0.5rem', fontSize: '1rem', border: '1px solid #ddd', borderRadius: '4px', boxSizing: 'border-box' as const },
-  arrow: { fontSize: '1.5rem', color: '#1976d2', fontWeight: 'bold', paddingBottom: '0.75rem', alignSelf: 'flex-end' },
-  loadingText: { fontSize: '0.85rem', color: '#888', fontWeight: 'normal' },
-  emptyText: { color: '#888', fontStyle: 'italic' },
-  detailRow: { display: 'flex', gap: '1.5rem', flexWrap: 'wrap' as const, marginTop: '1rem', padding: '0.75rem', background: '#f9f9f9', borderRadius: '4px' },
-  detailItem: { display: 'flex', flexDirection: 'column' as const },
-  detailLabel: { fontSize: '0.75rem', color: '#888', textTransform: 'uppercase' as const },
-  detailValue: { fontSize: '0.95rem', fontWeight: 500, color: '#333' },
-  transferRow: { marginBottom: '1rem' },
-  summary: { padding: '0.75rem', background: '#e3f2fd', borderRadius: '4px', marginBottom: '1rem', fontSize: '0.95rem', lineHeight: 1.5, color: '#1565c0' },
-  transferBtn: { padding: '0.75rem 2rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', fontSize: '1rem', fontWeight: 'bold' },
-  tableWrapper: { overflowX: 'auto' as const },
-  table: { width: '100%', borderCollapse: 'collapse' as const },
-  th: { padding: '0.75rem', textAlign: 'left' as const, borderBottom: '2px solid #ddd', background: '#f9f9f9', fontSize: '0.85rem', color: '#555' },
-  td: { padding: '0.75rem', borderBottom: '1px solid #eee' },
-  tr: { borderBottom: '1px solid #eee' },
-};

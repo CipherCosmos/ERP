@@ -1,9 +1,9 @@
 # Multi-stage build for GBOS backend
 
 # Stage 1: Builder
-FROM golang:1.21-alpine AS builder
+FROM golang:1.22-bookworm AS builder
 
-RUN apk add --no-cache gcc sqlite-dev musl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libsqlite3-dev libc6-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -18,9 +18,9 @@ ENV CGO_ENABLED=1 GOOS=linux
 RUN go build -o server ./cmd/server
 
 # Stage 2: Runtime
-FROM alpine:latest
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache sqlite-libs ca-certificates
+RUN apt-get update && apt-get install -y --no-install-recommends libsqlite3-0 ca-certificates curl wget && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

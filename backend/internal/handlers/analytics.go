@@ -81,21 +81,61 @@ func (h *AnalyticsHandler) Dashboard(c *gin.Context) {
 		creditOutStanding = 0
 	}
 
+	var inventoryValuation float64
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(quantity * cost_price), 0) FROM stock WHERE store_id = ? AND quantity > 0`, storeID).Scan(&inventoryValuation); err != nil {
+		inventoryValuation = 0
+	}
+
+	var expiringCount int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM stock WHERE store_id = ? AND quantity > 0 AND expiry_date IS NOT NULL AND expiry_date != '' AND date(expiry_date) <= date('now', '+30 days')`, storeID).Scan(&expiringCount); err != nil {
+		expiringCount = 0
+	}
+
+	var pendingPOCount int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM purchase_orders WHERE store_id = ? AND status = 'pending'`, storeID).Scan(&pendingPOCount); err != nil {
+		pendingPOCount = 0
+	}
+
+	var collectedPayments float64
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(total), 0) FROM invoices WHERE store_id = ? AND payment_mode != 'credit' AND date(invoice_date) >= ? AND date(invoice_date) <= ?`,
+		storeID, startDate, endDate).Scan(&collectedPayments); err != nil {
+		collectedPayments = 0
+	}
+
+	var creditCollected float64
+	if err := db.DB.QueryRow(`SELECT COALESCE(SUM(paid_amount), 0) FROM credit_entries ce JOIN customers c ON ce.customer_id = c.id WHERE c.store_id = ? AND date(ce.updated_at) >= ? AND date(ce.updated_at) <= ?`,
+		storeID, startDate, endDate).Scan(&creditCollected); err == nil {
+		collectedPayments += creditCollected
+	}
+
+	var vendorPayables float64
+	var poTotal, vpTotal float64
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(total), 0) FROM purchase_orders WHERE store_id = ? AND status != 'cancelled'`, storeID).Scan(&poTotal)
+	_ = db.DB.QueryRow(`SELECT COALESCE(SUM(amount), 0) FROM vendor_payments WHERE store_id = ?`, storeID).Scan(&vpTotal)
+	if poTotal > vpTotal {
+		vendorPayables = poTotal - vpTotal
+	}
+
 	c.JSON(http.StatusOK, map[string]interface{}{
-		"revenue":           revenue,
-		"gst_collected":     gstCollected,
-		"discount_given":    discountGiven,
-		"invoice_count":     invoiceCount,
-		"transaction_count": transactionCount,
+		"revenue":              revenue,
+		"collected_payments":   collectedPayments,
+		"gst_collected":        gstCollected,
+		"discount_given":       discountGiven,
+		"invoice_count":        invoiceCount,
+		"transaction_count":    transactionCount,
 		"avg_bill_value": func() float64 {
 			if invoiceCount > 0 {
 				return revenue / float64(invoiceCount)
 			}
 			return 0
 		}(),
-		"low_stock_count":    lowStockCount,
-		"credit_outstanding": creditOutStanding,
-		"date_range":         map[string]string{"start": startDate, "end": endDate},
+		"low_stock_count":     lowStockCount,
+		"credit_outstanding":  creditOutStanding,
+		"inventory_valuation": inventoryValuation,
+		"expiring_count":      expiringCount,
+		"pending_po_count":    pendingPOCount,
+		"vendor_payables":     vendorPayables,
+		"date_range":          map[string]string{"start": startDate, "end": endDate},
 	})
 }
 

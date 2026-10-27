@@ -215,6 +215,7 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 	sel := `
 		SELECT p.id, p.name, COALESCE(p.name_hi, ''), COALESCE(p.name_kn, ''), p.barcode, COALESCE(p.hsn_code, ''), p.gst_rate,
 		       p.uom_id, p.category_id, p.base_unit_qty, p.allow_decimal, p.min_stock, p.is_free, p.is_active,
+		       COALESCE(p.brand, ''), COALESCE(pp.cost_price, 0),
 		       COALESCE(pp.sell_price, 0), COALESCE(pp.mrp, 0), COALESCE(pp.wholesale_sell_price, 0),
 		       ` + stockSub + `
 		FROM products p
@@ -222,14 +223,15 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 	`
 
 	var (
-		id, name, nameHi, nameKn, pbarcode, hsn, uomID, categoryID   string
-		baseQty, gstRate, minStock, sellPrice, mrp, wholesale, stock float64
-		allowDec, isFree, isActive                                   int
+		id, name, nameHi, nameKn, pbarcode, hsn, uomID, categoryID, brand string
+		baseQty, gstRate, minStock, costPrice, sellPrice, mrp, wholesale, stock float64
+		allowDec, isFree, isActive                                             int
 	)
 
 	err := db.DB.QueryRow(sel+` WHERE p.barcode = ? AND p.is_active = 1`, storeID, storeID, barcode).Scan(
 		&id, &name, &nameHi, &nameKn, &pbarcode, &hsn, &gstRate,
 		&uomID, &categoryID, &baseQty, &allowDec, &minStock, &isFree, &isActive,
+		&brand, &costPrice,
 		&sellPrice, &mrp, &wholesale, &stock)
 	if err == sql.ErrNoRows {
 		err = db.DB.QueryRow(sel+`
@@ -237,6 +239,7 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 			WHERE p.is_active = 1`, storeID, storeID, barcode).Scan(
 			&id, &name, &nameHi, &nameKn, &pbarcode, &hsn, &gstRate,
 			&uomID, &categoryID, &baseQty, &allowDec, &minStock, &isFree, &isActive,
+			&brand, &costPrice,
 			&sellPrice, &mrp, &wholesale, &stock)
 	}
 	if err == sql.ErrNoRows {
@@ -263,6 +266,7 @@ func (h *BarcodeHandler) Lookup(c *gin.Context) {
 		"uom_id": uomID, "category_id": categoryID, "base_unit_qty": baseQty,
 		"allow_decimal": allowDec != 0, "min_stock": minStock,
 		"is_free": isFree != 0, "is_active": isActive != 0,
+		"brand": brand, "cost_price": costPrice,
 		"sell_price": sellPrice, "mrp": mrp, "wholesale_sell_price": wholesale, "stock": stock,
 	}
 	if packQtyInParent > 0 {

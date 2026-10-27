@@ -1,7 +1,18 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { grnApi, purchaseApi } from '../services/api';
+import { grnApi, purchaseApi, storeApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
+import { Store } from '../types';
+import {
+  IconPurchases,
+  IconPlus,
+  IconClose,
+  IconPrinter,
+  IconRefresh,
+  IconCheck,
+  IconAlert,
+} from '../components/Icons';
 
 interface GRNRow {
   id: string;
@@ -24,9 +35,20 @@ interface GRNItemRow {
   reason?: string;
 }
 
-interface POOption { id: string; po_no: string; vendor_name?: string; status: string }
+interface POOption {
+  id: string;
+  po_no: string;
+  vendor_name?: string;
+  status: string;
+}
 
-interface POItemDetail { product_id: string; name?: string; product_name?: string; quantity: number; received_qty: number }
+interface POItemDetail {
+  product_id: string;
+  name?: string;
+  product_name?: string;
+  quantity: number;
+  received_qty: number;
+}
 
 interface CreateItem {
   product_id: string;
@@ -43,19 +65,21 @@ export default function GRN() {
   const { user, store } = useAppStore();
 
   const [grns, setGrns] = useState<GRNRow[]>([]);
+  const [stores, setStores] = useState<Store[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
+  // Create Modal
   const [showCreate, setShowCreate] = useState(false);
   const [poOptions, setPoOptions] = useState<POOption[]>([]);
-  const [posLoading, setPosLoading] = useState(false);
   const [selectedPO, setSelectedPO] = useState('');
+  const [receivingWarehouseId, setReceivingWarehouseId] = useState('');
   const [receivedDate, setReceivedDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
   const [createItems, setCreateItems] = useState<CreateItem[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  // Detail Modal
   const [detailGRN, setDetailGRN] = useState<GRNRow | null>(null);
   const [detailItems, setDetailItems] = useState<GRNItemRow[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -63,113 +87,122 @@ export default function GRN() {
   const loadGRNs = useCallback(async () => {
     if (!store) return;
     setLoading(true);
-    setError('');
     try {
       const { data } = await grnApi.list({ store_id: store.id });
       setGrns(data || []);
     } catch (err) {
       console.error('Failed to load GRNs:', err);
-      setError('Failed to load Goods Receipt Notes');
     } finally {
       setLoading(false);
     }
   }, [store]);
 
   useEffect(() => {
-    if (!user) { navigate('/login'); return; }
-    if (user.role === 'cashier') navigate('/billing');
-  }, [user, navigate]);
-
-  useEffect(() => { if (store) loadGRNs(); }, [store, loadGRNs]);
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+    if (store) {
+      loadGRNs();
+      storeApi.list().then((r) => setStores(r.data || [])).catch(() => {});
+    }
+  }, [user, store?.id, loadGRNs]);
 
   const openCreateForm = async () => {
     setShowCreate(true);
     setSelectedPO('');
+    setReceivingWarehouseId(store?.id || '');
     setReceivedDate(new Date().toISOString().slice(0, 10));
     setNotes('');
     setCreateItems([]);
-    if (!store) return;
-    setPosLoading(true);
+
     try {
       const [pendingRes, partialRes] = await Promise.all([
-        purchaseApi.list({ store_id: store.id, status: 'pending' }),
-        purchaseApi.list({ store_id: store.id, status: 'partial' }),
+        purchaseApi.list({ store_id: store!.id, status: 'pending' }),
+        purchaseApi.list({ store_id: store!.id, status: 'partial' }),
       ]);
-      setPoOptions([...(pendingRes.data || []) as POOption[], ...(partialRes.data || []) as POOption[]]);
+      setPoOptions([...(pendingRes.data || []), ...(partialRes.data || [])]);
     } catch (err) {
-      console.error('Failed to load POs:', err);
-      setPoOptions([]);
-    } finally {
-      setPosLoading(false);
+      console.error('Failed to load pending POs:', err);
     }
   };
 
   const handlePOSelect = async (poId: string) => {
     setSelectedPO(poId);
-    setCreateItems([]);
-    if (!poId) return;
+    if (!poId) {
+      setCreateItems([]);
+      return;
+    }
     setItemsLoading(true);
     try {
       const { data } = await purchaseApi.get(poId);
-      const items = (data as { items?: POItemDetail[] }).items || [];
-      setCreateItems(items.map((it) => {
-        const remaining = Math.max(0, it.quantity - it.received_qty);
-        return {
-          product_id: it.product_id,
-          product_name: it.name || it.product_name || it.product_id.slice(0, 8),
-          ordered_qty: it.quantity,
-          received_qty: String(remaining),
-          accepted_qty: String(remaining),
-          rejected_qty: '0',
-          reason: '',
-        };
-      }));
+      const items: POItemDetail[] = data.items || [];
+      setCreateItems(
+        items.map((it) => {
+          const remaining = Math.max(0, it.quantity - (it.received_qty || 0));
+          return {
+            product_id: it.product_id,
+            product_name: it.name || it.product_name || it.product_id,
+            ordered_qty: it.quantity,
+            received_qty: String(remaining),
+            accepted_qty: String(remaining),
+            rejected_qty: '0',
+            reason: '',
+          };
+        })
+      );
     } catch (err) {
-      console.error('Failed to load PO details:', err);
-      alert('Failed to load purchase order items');
+      console.error('Failed to load PO items:', err);
     } finally {
       setItemsLoading(false);
     }
   };
 
-  const updateCreateItem = (index: number, field: keyof CreateItem, value: string) => {
+  const handleItemChange = (index: number, field: keyof CreateItem, val: string) => {
     setCreateItems((prev) => {
-      const next = [...prev];
-      next[index] = { ...next[index], [field]: value };
+      const copy = [...prev];
+      copy[index] = { ...copy[index], [field]: val };
       if (field === 'received_qty') {
-        const received = parseFloat(value) || 0;
-        next[index].accepted_qty = String(Math.max(0, received - (parseFloat(next[index].rejected_qty) || 0)));
-      } else if (field === 'rejected_qty') {
-        const received = parseFloat(next[index].received_qty) || 0;
-        next[index].accepted_qty = String(Math.max(0, received - (parseFloat(value) || 0)));
+        const rQty = parseFloat(val) || 0;
+        const rejQty = parseFloat(copy[index].rejected_qty) || 0;
+        copy[index].accepted_qty = String(Math.max(0, rQty - rejQty));
       }
-      return next;
+      if (field === 'rejected_qty') {
+        const rQty = parseFloat(copy[index].received_qty) || 0;
+        const rejQty = parseFloat(val) || 0;
+        copy[index].accepted_qty = String(Math.max(0, rQty - rejQty));
+      }
+      return copy;
     });
   };
 
-  const submitCreate = async () => {
-    if (!selectedPO) { alert('Please select a purchase order'); return; }
-    if (createItems.length === 0) { alert('No items to receive'); return; }
-    const items = createItems.map((it) => ({
-      product_id: it.product_id,
-      ordered_qty: it.ordered_qty,
-      received_qty: parseFloat(it.received_qty) || 0,
-      accepted_qty: parseFloat(it.accepted_qty) || 0,
-      rejected_qty: parseFloat(it.rejected_qty) || 0,
-      reason: it.reason || undefined,
-    }));
-    if (!items.some((it) => it.received_qty > 0)) {
-      alert('At least one item must have a received quantity greater than 0');
-      return;
-    }
+  const handleCreateSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPO || saving) return;
+
     setSaving(true);
     try {
-      await grnApi.create({ po_id: selectedPO, received_date: receivedDate, notes: notes || undefined, items });
+      const payload = {
+        po_id: selectedPO,
+        received_date: receivedDate,
+        notes: notes || undefined,
+        warehouse_id: receivingWarehouseId || store?.id,
+        items: createItems.map((it) => ({
+          product_id: it.product_id,
+          ordered_qty: it.ordered_qty,
+          received_qty: parseFloat(it.received_qty) || 0,
+          accepted_qty: parseFloat(it.accepted_qty) || 0,
+          rejected_qty: parseFloat(it.rejected_qty) || 0,
+          reason: it.reason || undefined,
+        })),
+      };
+
+      await grnApi.create(payload);
       setShowCreate(false);
-      await loadGRNs();
-    } catch (err: unknown) {
-      const ax = err as { response?: { data?: { error?: string } } };
-      alert(ax.response?.data?.error || 'Failed to create GRN');
+      loadGRNs();
+      alert('Goods Receipt Note (GRN) created and inventory updated successfully!');
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to create Goods Receipt Note.');
     } finally {
       setSaving(false);
     }
@@ -177,263 +210,358 @@ export default function GRN() {
 
   const openDetail = async (grn: GRNRow) => {
     setDetailGRN(grn);
-    setDetailItems([]);
     setDetailLoading(true);
     try {
       const { data } = await grnApi.get(grn.id);
-      const body = data as GRNRow;
-      setDetailGRN(body);
-      setDetailItems(body.items || []);
+      setDetailItems(data.items || []);
     } catch (err) {
-      console.error('Failed to load GRN detail:', err);
-      alert('Failed to load GRN details');
-      setDetailGRN(null);
+      console.error('Failed to load GRN details:', err);
     } finally {
       setDetailLoading(false);
     }
   };
 
-  if (!user || user.role === 'cashier') return null;
-
   return (
-    <div style={s.container}>
-      <div style={s.header}>
-        <div style={s.headerLeft}>
-          <button type="button" onClick={() => navigate('/')} style={s.backBtn}>← Back</button>
-          <h1 style={s.title}>Goods Receipt Notes</h1>
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Goods Receipt Notes (GRN) & Receiving
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Inspect incoming shipments against POs, record accepted vs rejected items, and update warehouse stock
+          </p>
         </div>
-        <button type="button" style={s.createBtn} onClick={openCreateForm}>+ New GRN</button>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => navigate('/purchases')}
+          >
+            <span>Purchase Orders</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={openCreateForm}
+          >
+            <IconPlus size={16} />
+            <span>New Goods Receipt (GRN)</span>
+          </button>
+        </div>
       </div>
 
-      {error && (
-        <div style={s.errorBar}>
-          {error}
-          <button type="button" style={s.dismissBtn} onClick={() => setError('')}>x</button>
+      {/* GRN History Table */}
+      <div className="erp-table-container">
+        <table className="erp-table">
+          <thead>
+            <tr>
+              <th>GRN Ref</th>
+              <th>PO Number</th>
+              <th>Received Date</th>
+              <th className="text-center">Items Inspected</th>
+              <th>Notes / Remarks</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                  Loading Goods Receipt Notes...
+                </td>
+              </tr>
+            ) : grns.length === 0 ? (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                  No Goods Receipt Notes recorded yet. Create one when goods arrive from suppliers.
+                </td>
+              </tr>
+            ) : (
+              grns.map((g) => (
+                <tr key={g.id}>
+                  <td className="text-mono font-bold" style={{ color: 'var(--primary-600)' }}>
+                    #{g.id.slice(-6)}
+                  </td>
+                  <td className="text-mono font-bold">{g.po_no || `#${g.po_id.slice(-6)}`}</td>
+                  <td className="text-mono">{g.received_date ? g.received_date.slice(0, 10) : '—'}</td>
+                  <td className="text-center text-mono">
+                    {g.item_count ?? (g.items ? g.items.length : '—')}
+                  </td>
+                  <td style={{ color: 'var(--text-secondary)' }}>{g.notes || '—'}</td>
+                  <td className="text-right">
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={() => openDetail(g)}
+                    >
+                      View Receipt
+                    </button>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ===================================================================
+          Create GRN Modal
+          =================================================================== */}
+      {showCreate && (
+        <div className="erp-modal-backdrop" onClick={() => setShowCreate(false)}>
+          <div className="erp-modal" style={{ maxWidth: 760 }} onClick={(e) => e.stopPropagation()}>
+            <div className="erp-modal-header">
+              <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>
+                Receive Goods Against Purchase Order (GRN)
+              </h3>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => setShowCreate(false)}
+              >
+                <IconClose size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateSubmit}>
+              <div className="erp-modal-body">
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', marginBottom: '1rem' }}>
+                  <div className="form-group">
+                    <label className="form-label">Purchase Order *</label>
+                    <select
+                      required
+                      className="form-select"
+                      value={selectedPO}
+                      onChange={(e) => handlePOSelect(e.target.value)}
+                    >
+                      <option value="">Select Pending PO</option>
+                      {poOptions.map((po) => (
+                        <option key={po.id} value={po.id}>
+                          {po.po_no} {po.vendor_name ? `(${po.vendor_name})` : ''} [{po.status}]
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Receiving Warehouse *</label>
+                    <select
+                      required
+                      className="form-select"
+                      value={receivingWarehouseId}
+                      onChange={(e) => setReceivingWarehouseId(e.target.value)}
+                    >
+                      {stores.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name} ({s.location_type})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Received Date</label>
+                    <input
+                      type="date"
+                      className="form-input text-mono"
+                      value={receivedDate}
+                      onChange={(e) => setReceivedDate(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* Items Quality Inspection Grid */}
+                {itemsLoading ? (
+                  <p style={{ textAlign: 'center', padding: '1rem', color: 'var(--text-muted)' }}>
+                    Loading items from PO...
+                  </p>
+                ) : createItems.length > 0 ? (
+                  <div>
+                    <label className="form-label">Physical Inspection & Acceptance</label>
+                    <table className="erp-table">
+                      <thead>
+                        <tr>
+                          <th>Product</th>
+                          <th className="text-center" style={{ width: 80 }}>Ordered</th>
+                          <th style={{ width: 90 }}>Received</th>
+                          <th style={{ width: 90 }}>Accepted</th>
+                          <th style={{ width: 90 }}>Rejected</th>
+                          <th style={{ width: 140 }}>Rejection Reason</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {createItems.map((item, idx) => (
+                          <tr key={item.product_id + idx}>
+                            <td style={{ fontWeight: 600 }}>{item.product_name}</td>
+                            <td className="text-center text-mono font-bold">{item.ordered_qty}</td>
+                            <td>
+                              <input
+                                type="number"
+                                className="form-input text-mono"
+                                value={item.received_qty}
+                                onChange={(e) => handleItemChange(idx, 'received_qty', e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="form-input text-mono font-bold"
+                                style={{ color: '#16a34a' }}
+                                value={item.accepted_qty}
+                                onChange={(e) => handleItemChange(idx, 'accepted_qty', e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="form-input text-mono"
+                                style={{ color: '#dc2626' }}
+                                value={item.rejected_qty}
+                                onChange={(e) => handleItemChange(idx, 'rejected_qty', e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="text"
+                                className="form-input"
+                                placeholder="Damage, expiry, etc."
+                                value={item.reason}
+                                onChange={(e) => handleItemChange(idx, 'reason', e.target.value)}
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+
+                <div className="form-group" style={{ marginTop: '0.875rem' }}>
+                  <label className="form-label">Inspection Notes</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Delivery vehicle number, seal check, carrier remarks..."
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="erp-modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setShowCreate(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={!selectedPO || saving}
+                >
+                  {saving ? 'Recording Receipt...' : 'Confirm Acceptance & Ingest Stock'}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
-      <div style={s.card}>
-        {loading ? (
-          <div style={s.centered}><p style={s.hint}>Loading GRNs...</p></div>
-        ) : grns.length === 0 ? (
-          <div style={s.centered}>
-            <p style={s.emptyText}>No Goods Receipt Notes found.</p>
-            <p style={s.hint}>Click "+ New GRN" to record goods received against a purchase order.</p>
-          </div>
-        ) : (
-          <div style={s.tableWrap}>
-            <table style={s.table}>
-              <thead>
-                <tr>
-                  <th style={s.th}>GRN ID</th>
-                  <th style={s.th}>PO Reference</th>
-                  <th style={s.th}>Received Date</th>
-                  <th style={s.th}>Notes</th>
-                  <th style={s.th}>Items</th>
-                </tr>
-              </thead>
-              <tbody>
-                {grns.map((grn, idx) => (
-                  <tr
-                    key={grn.id}
-                    style={{ ...s.tr, background: idx % 2 === 1 ? '#f9f9f9' : 'white', cursor: 'pointer' }}
-                    onClick={() => openDetail(grn)}
-                  >
-                    <td style={s.td}><span style={s.idText}>{grn.id.slice(0, 8)}</span></td>
-                    <td style={s.td}>{grn.po_no || grn.po_id.slice(0, 8)}</td>
-                    <td style={s.td}>{grn.received_date}</td>
-                    <td style={s.td}>{grn.notes || '-'}</td>
-                    <td style={s.td}>{grn.item_count ?? grn.items?.length ?? '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Create GRN Modal */}
-      {showCreate && (
-        <div style={s.modalBackdrop}>
-          <div style={s.modal}>
-            <h3 style={{ margin: '0 0 1rem 0' }}>Create Goods Receipt Note</h3>
-            <label style={s.lbl}>Purchase Order</label>
-            {posLoading ? (
-              <p style={s.hint}>Loading purchase orders...</p>
-            ) : (
-              <select style={s.selectFull} value={selectedPO} onChange={(e) => handlePOSelect(e.target.value)}>
-                <option value="">-- Select Purchase Order --</option>
-                {poOptions.map((po) => (
-                  <option key={po.id} value={po.id}>
-                    {po.po_no} {po.vendor_name ? `(${po.vendor_name})` : ''} [{po.status}]
-                  </option>
-                ))}
-              </select>
-            )}
-            <label style={s.lbl}>Received Date</label>
-            <input type="date" style={s.selectFull} value={receivedDate} onChange={(e) => setReceivedDate(e.target.value)} />
-            <label style={s.lbl}>Notes (optional)</label>
-            <input type="text" style={s.selectFull} placeholder="e.g. Partial shipment, damaged cartons..." value={notes} onChange={(e) => setNotes(e.target.value)} />
-
-            {itemsLoading ? (
-              <p style={{ ...s.hint, marginTop: '1rem' }}>Loading PO items...</p>
-            ) : createItems.length > 0 ? (
-              <>
-                <h4 style={{ marginTop: '1.25rem', marginBottom: '0.5rem' }}>Line Items</h4>
-                <div style={s.tableWrap}>
-                  <table style={s.table}>
-                    <thead>
-                      <tr>
-                        <th style={s.th}>Product</th>
-                        <th style={s.th}>Ordered</th>
-                        <th style={s.th}>Received</th>
-                        <th style={s.th}>Accepted</th>
-                        <th style={s.th}>Rejected</th>
-                        <th style={s.th}>Reason</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {createItems.map((item, idx) => (
-                        <tr key={item.product_id} style={{ background: idx % 2 === 1 ? '#f9f9f9' : 'white' }}>
-                          <td style={s.td}>{item.product_name}</td>
-                          <td style={s.td}>{item.ordered_qty}</td>
-                          <td style={s.td}>
-                            <input type="number" min={0} style={s.inSm} value={item.received_qty} onChange={(e) => updateCreateItem(idx, 'received_qty', e.target.value)} />
-                          </td>
-                          <td style={s.td}>
-                            <input type="number" min={0} style={s.inSm} value={item.accepted_qty} onChange={(e) => updateCreateItem(idx, 'accepted_qty', e.target.value)} />
-                          </td>
-                          <td style={s.td}>
-                            <input type="number" min={0} style={s.inSm} value={item.rejected_qty} onChange={(e) => updateCreateItem(idx, 'rejected_qty', e.target.value)} />
-                          </td>
-                          <td style={s.td}>
-                            <input type="text" placeholder="If rejected" style={s.inReason} value={item.reason} onChange={(e) => updateCreateItem(idx, 'reason', e.target.value)} />
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+      {/* ===================================================================
+          View GRN Details Modal (Printable)
+          =================================================================== */}
+      {detailGRN && (
+        <div className="erp-modal-backdrop" onClick={() => setDetailGRN(null)}>
+          <div className="erp-modal" style={{ maxWidth: 700 }} onClick={(e) => e.stopPropagation()}>
+            <div className="erp-modal-header">
+              <div>
+                <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700 }}>
+                  Goods Receipt Note #{detailGRN.id.slice(-6)}
+                </h3>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  PO: <strong>{detailGRN.po_no || detailGRN.po_id}</strong> &middot; Date: {detailGRN.received_date?.slice(0, 10)}
                 </div>
-              </>
-            ) : selectedPO ? (
-              <p style={{ ...s.emptyText, marginTop: '1rem' }}>No items found for the selected purchase order.</p>
-            ) : null}
-
-            <div style={s.modalActions}>
-              <button type="button" style={s.cancelBtn} onClick={() => setShowCreate(false)}>Cancel</button>
+              </div>
               <button
                 type="button"
-                style={{ ...s.submitBtn, opacity: saving || !selectedPO ? 0.6 : 1, cursor: saving || !selectedPO ? 'not-allowed' : 'pointer' }}
-                disabled={saving || !selectedPO}
-                onClick={submitCreate}
+                className="btn btn-outline btn-sm"
+                onClick={() => setDetailGRN(null)}
               >
-                {saving ? 'Saving...' : 'Create GRN'}
+                <IconClose size={18} />
+              </button>
+            </div>
+
+            <div className="erp-modal-body">
+              {detailLoading ? (
+                <p style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-muted)' }}>
+                  Loading receipt items...
+                </p>
+              ) : (
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>Product</th>
+                      <th className="text-center">Ordered</th>
+                      <th className="text-center">Received</th>
+                      <th className="text-center">Accepted</th>
+                      <th className="text-center">Rejected</th>
+                      <th>Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detailItems.map((item, idx) => (
+                      <tr key={item.id || idx}>
+                        <td style={{ fontWeight: 600 }}>{item.product_name || item.product_id}</td>
+                        <td className="text-center text-mono">{item.ordered_qty}</td>
+                        <td className="text-center text-mono font-bold">{item.received_qty}</td>
+                        <td className="text-center text-mono font-bold" style={{ color: '#16a34a' }}>
+                          {item.accepted_qty}
+                        </td>
+                        <td className="text-center text-mono" style={{ color: item.rejected_qty > 0 ? '#dc2626' : 'inherit' }}>
+                          {item.rejected_qty}
+                        </td>
+                        <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{item.reason || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="erp-modal-footer">
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => window.print()}
+              >
+                <IconPrinter size={16} />
+                <span>Print GRN</span>
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setDetailGRN(null)}
+              >
+                Close
               </button>
             </div>
           </div>
         </div>
       )}
-
-      {/* Detail Modal */}
-      {detailGRN && (
-        <div style={s.modalBackdrop}>
-          <div style={s.modal}>
-            <h3 style={{ margin: '0 0 1rem 0' }}>GRN Detail</h3>
-            <div style={s.detailGrid}>
-              <div style={s.detailField}>
-                <span style={s.detailLabel}>GRN ID</span>
-                <span style={s.detailValue}>{detailGRN.id.slice(0, 8)}</span>
-              </div>
-              <div style={s.detailField}>
-                <span style={s.detailLabel}>PO Reference</span>
-                <span style={s.detailValue}>{detailGRN.po_no || detailGRN.po_id.slice(0, 8)}</span>
-              </div>
-              <div style={s.detailField}>
-                <span style={s.detailLabel}>Received Date</span>
-                <span style={s.detailValue}>{detailGRN.received_date}</span>
-              </div>
-              <div style={s.detailField}>
-                <span style={s.detailLabel}>Notes</span>
-                <span style={s.detailValue}>{detailGRN.notes || '-'}</span>
-              </div>
-            </div>
-
-            {detailLoading ? (
-              <p style={{ ...s.hint, marginTop: '1rem' }}>Loading items...</p>
-            ) : detailItems.length > 0 ? (
-              <div style={{ ...s.tableWrap, marginTop: '1rem' }}>
-                <table style={s.table}>
-                  <thead>
-                    <tr>
-                      <th style={s.th}>Product</th>
-                      <th style={s.th}>Ordered</th>
-                      <th style={s.th}>Received</th>
-                      <th style={s.th}>Accepted</th>
-                      <th style={s.th}>Rejected</th>
-                      <th style={s.th}>Reason</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detailItems.map((item, idx) => (
-                      <tr key={item.id || item.product_id} style={{ background: idx % 2 === 1 ? '#f9f9f9' : 'white' }}>
-                        <td style={s.td}>{item.product_name || item.product_id.slice(0, 8)}</td>
-                        <td style={s.td}>{item.ordered_qty}</td>
-                        <td style={s.td}>{item.received_qty}</td>
-                        <td style={s.td}>{item.accepted_qty}</td>
-                        <td style={s.td}>
-                          {item.rejected_qty > 0 ? <span style={s.rejBadge}>{item.rejected_qty}</span> : 0}
-                        </td>
-                        <td style={s.td}>{item.reason || '-'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <p style={{ ...s.emptyText, marginTop: '1rem' }}>No items in this GRN.</p>
-            )}
-
-            <div style={s.modalActions}>
-              <button type="button" style={s.cancelBtn} onClick={() => setDetailGRN(null)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+    </AppLayout>
   );
 }
-
-const s: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#1976d2', color: 'white', padding: '0.75rem 1rem', borderRadius: '8px', marginBottom: '1rem' },
-  headerLeft: { display: 'flex', alignItems: 'center', gap: '1rem' },
-  backBtn: { padding: '0.4rem 0.75rem', background: 'rgba(255,255,255,0.2)', color: 'white', border: '1px solid rgba(255,255,255,0.4)', borderRadius: '4px', cursor: 'pointer', fontSize: '0.9rem' },
-  title: { margin: 0, fontSize: '1.25rem', fontWeight: 600 },
-  createBtn: { padding: '0.5rem 1.25rem', background: 'white', color: '#1976d2', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' },
-  errorBar: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem 1rem', background: '#ffebee', color: '#c62828', border: '1px solid #ef9a9a', borderRadius: '4px', marginBottom: '1rem' },
-  dismissBtn: { background: 'none', border: 'none', color: '#c62828', fontSize: '1.25rem', cursor: 'pointer', padding: '0 0.25rem' },
-  card: { background: 'white', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)', padding: '1rem' },
-  centered: { textAlign: 'center' as const, padding: '2rem 1rem' },
-  hint: { color: '#888', fontSize: '0.9rem' },
-  emptyText: { color: '#666', fontSize: '1rem', margin: '0 0 0.5rem 0' },
-  tableWrap: { overflowX: 'auto' as const },
-  table: { width: '100%', borderCollapse: 'collapse' as const },
-  th: { padding: '0.75rem', textAlign: 'left' as const, borderBottom: '2px solid #ddd', background: '#f9f9f9', fontSize: '0.85rem', color: '#555', whiteSpace: 'nowrap' as const },
-  td: { padding: '0.75rem', borderBottom: '1px solid #eee', fontSize: '0.9rem' },
-  tr: { borderBottom: '1px solid #eee' },
-  idText: { fontFamily: 'monospace', fontSize: '0.85rem', color: '#1976d2', fontWeight: 500 },
-  modalBackdrop: { position: 'fixed' as const, inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '1rem' },
-  modal: { background: 'white', borderRadius: '8px', padding: '1.5rem', maxWidth: '800px', width: '100%', maxHeight: '90vh', overflow: 'auto', boxShadow: '0 4px 24px rgba(0,0,0,0.15)' },
-  lbl: { display: 'block', marginTop: '0.75rem', marginBottom: '0.25rem', fontWeight: 500, fontSize: '0.9rem', color: '#444' },
-  selectFull: { width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px', fontSize: '0.95rem', boxSizing: 'border-box' as const },
-  inSm: { width: '72px', padding: '0.4rem', border: '1px solid #ddd', borderRadius: '4px', fontSize: '0.9rem' },
-  inReason: { width: '120px', padding: '0.4rem', border: '1px solid #ddd', borderRadius: '4px', fontSize: '0.85rem' },
-  modalActions: { display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1.25rem' },
-  cancelBtn: { padding: '0.5rem 1.25rem', background: '#e0e0e0', color: '#333', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.9rem' },
-  submitBtn: { padding: '0.5rem 1.5rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '0.9rem' },
-  detailGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', padding: '0.75rem', background: '#f9f9f9', borderRadius: '4px' },
-  detailField: { display: 'flex', flexDirection: 'column' as const },
-  detailLabel: { fontSize: '0.75rem', color: '#888', textTransform: 'uppercase' as const, marginBottom: '0.2rem' },
-  detailValue: { fontSize: '0.95rem', fontWeight: 500, color: '#333' },
-  rejBadge: { display: 'inline-block', padding: '0.15rem 0.5rem', background: '#ffebee', color: '#c62828', borderRadius: '4px', fontSize: '0.85rem', fontWeight: 600 },
-};

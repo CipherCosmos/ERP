@@ -33,6 +33,13 @@ export interface Category {
   is_active: boolean;
 }
 
+export interface UOM {
+  id: string;
+  code: string;
+  name: string;
+  short_name?: string;
+}
+
 export interface Product {
   id: string;
   name: string;

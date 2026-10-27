@@ -2,45 +2,41 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { vendorApi } from '../services/api';
-
-interface Vendor {
-  id: string;
-  name: string;
-  phone: string;
-  address: string;
-  gstin: string;
-  state: string;
-  credit_days?: number;
-  credit_limit?: number;
-  total_purchase?: number;
-}
+import { AppLayout } from '../components/Layout/AppLayout';
+import { Vendor } from '../types';
+import {
+  IconVendors,
+  IconPlus,
+  IconClose,
+  IconPurchases,
+} from '../components/Icons';
 
 export default function Vendors() {
   const navigate = useNavigate();
   const { user } = useAppStore();
+
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [showModal, setShowModal] = useState(false);
+
   const [form, setForm] = useState({
     name: '',
     phone: '',
     address: '',
     gstin: '',
     state: '',
-    credit_days: 0,
-    credit_limit: 0,
+    credit_days: 30,
+    credit_limit: 50000,
   });
 
   useEffect(() => {
-    if (!user || user.role === 'cashier') {
-      navigate('/billing');
+    if (!user) {
+      navigate('/login');
+      return;
     }
-  }, [user]);
-
-  useEffect(() => {
     loadVendors();
-  }, [search]);
+  }, [user, search]);
 
   const loadVendors = async () => {
     setLoading(true);
@@ -56,6 +52,8 @@ export default function Vendors() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!form.name) return;
+
     try {
       await vendorApi.create({
         name: form.name,
@@ -63,91 +61,259 @@ export default function Vendors() {
         address: form.address || undefined,
         gstin: form.gstin || undefined,
         state: form.state || undefined,
-        credit_days: form.credit_days || 0,
-        credit_limit: form.credit_limit || 0,
+        credit_days: Number(form.credit_days) || 0,
+        credit_limit: Number(form.credit_limit) || 0,
       });
       setShowModal(false);
-      setForm({ name: '', phone: '', address: '', gstin: '', state: '', credit_days: 0, credit_limit: 0 });
+      setForm({
+        name: '',
+        phone: '',
+        address: '',
+        gstin: '',
+        state: '',
+        credit_days: 30,
+        credit_limit: 50000,
+      });
       loadVendors();
-    } catch (err) {
-      console.error('Failed to create vendor:', err);
+      alert('Vendor profile saved successfully.');
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to create vendor.');
     }
   };
 
-  if (!user || user.role === 'cashier') return null;
-
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Vendors</h1>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>← Back</button>
-      </div>
-
-      <div style={styles.toolbar}>
-        <input type="text" placeholder="Search vendors..." value={search} onChange={e => setSearch(e.target.value)} style={styles.searchInput} />
-        <button onClick={() => setShowModal(true)} style={styles.addBtn}>+ Add Vendor</button>
-      </div>
-
-      {loading ? (
-        <p>Loading...</p>
-      ) : (
-        <div style={styles.grid}>
-          {vendors.map((v) => (
-            <div key={v.id} style={styles.card}>
-              <h3 style={styles.cardTitle}>{v.name}</h3>
-              <p style={styles.cardText}>Phone: {v.phone || '-'}</p>
-              <p style={styles.cardText}>GSTIN: {v.gstin || '-'}</p>
-              <p style={styles.cardText}>State: {v.state || '-'}</p>
-              <p style={styles.cardText}>Credit: {v.credit_days ?? 0} days · limit ₹{(v.credit_limit ?? 0).toFixed(2)}</p>
-              <p style={styles.cardText}>Address: {v.address || '-'}</p>
-              {v.total_purchase !== undefined && v.total_purchase > 0 && (
-                <p style={styles.cardValue}>Total Purchase: ₹{v.total_purchase.toFixed(2)}</p>
-              )}
-            </div>
-          ))}
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Vendors & Suppliers Directory
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Supplier profiles, agreed payment terms, credit days, and purchase history
+          </p>
         </div>
-      )}
 
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => navigate('/vendor-payments')}
+          >
+            <span>Accounts Payable</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowModal(true)}
+          >
+            <IconPlus size={16} />
+            <span>Add Supplier</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Search Toolbar */}
+      <div
+        className="erp-card"
+        style={{ padding: '0.75rem 1rem', marginBottom: '1.25rem', backgroundColor: '#fff' }}
+      >
+        <div style={{ maxWidth: 360 }}>
+          <input
+            type="text"
+            className="form-input"
+            placeholder="Search suppliers by name..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Vendors Table */}
+      <div className="erp-table-container">
+        <table className="erp-table">
+          <thead>
+            <tr>
+              <th>Vendor / Supplier Name</th>
+              <th>Phone</th>
+              <th>Address</th>
+              <th>GSTIN</th>
+              <th>State</th>
+              <th className="text-center">Credit Days</th>
+              <th className="text-right">Credit Limit (₹)</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr>
+                <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                  Loading suppliers...
+                </td>
+              </tr>
+            ) : vendors.length === 0 ? (
+              <tr>
+                <td colSpan={8} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                  No vendor records found. Click "+ Add Supplier" to add a supplier.
+                </td>
+              </tr>
+            ) : (
+              vendors.map((v) => (
+                <tr key={v.id}>
+                  <td style={{ fontWeight: 600 }}>{v.name}</td>
+                  <td className="text-mono">{v.phone || '—'}</td>
+                  <td style={{ color: 'var(--text-secondary)' }}>{v.address || '—'}</td>
+                  <td className="text-mono" style={{ fontSize: '0.8rem' }}>{v.gstin || '—'}</td>
+                  <td>{v.state || '—'}</td>
+                  <td className="text-center text-mono font-bold">
+                    {v.credit_days ? `${v.credit_days} d` : 'Immediate'}
+                  </td>
+                  <td className="text-right text-mono font-bold">
+                    ₹{(v.credit_limit || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </td>
+                  <td className="text-right">
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={() => navigate('/purchases')}
+                    >
+                      New PO
+                    </button>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Add Vendor Modal */}
       {showModal && (
-        <div style={styles.modal}>
-          <div style={styles.modalContent}>
-            <h2>Add Vendor</h2>
+        <div className="erp-modal-backdrop" onClick={() => setShowModal(false)}>
+          <div className="erp-modal" style={{ maxWidth: 540 }} onClick={(e) => e.stopPropagation()}>
+            <div className="erp-modal-header">
+              <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>
+                Add New Supplier Profile
+              </h3>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => setShowModal(false)}
+              >
+                <IconClose size={18} />
+              </button>
+            </div>
+
             <form onSubmit={handleCreate}>
-              <input type="text" placeholder="Name" value={form.name} onChange={e => setForm({...form, name: e.target.value})} style={styles.input} required />
-              <input type="text" placeholder="Phone" value={form.phone} onChange={e => setForm({...form, phone: e.target.value})} style={styles.input} />
-              <input type="text" placeholder="GSTIN" value={form.gstin} onChange={e => setForm({...form, gstin: e.target.value})} style={styles.input} />
-              <input type="text" placeholder="State" value={form.state} onChange={e => setForm({...form, state: e.target.value})} style={styles.input} />
-              <input type="text" placeholder="Address" value={form.address} onChange={e => setForm({...form, address: e.target.value})} style={styles.input} />
-              <input type="number" placeholder="Credit days (0 = cash)" value={form.credit_days} onChange={e => setForm({ ...form, credit_days: parseInt(e.target.value, 10) || 0 })} style={styles.input} />
-              <input type="number" placeholder="Credit limit ₹" value={form.credit_limit} onChange={e => setForm({ ...form, credit_limit: parseFloat(e.target.value) || 0 })} style={styles.input} />
-              <div style={styles.modalActions}>
-                <button type="button" onClick={() => setShowModal(false)} style={styles.cancelBtn}>Cancel</button>
-                <button type="submit" style={styles.submitBtn}>Save</button>
+              <div className="erp-modal-body">
+                <div className="form-group">
+                  <label className="form-label">Vendor / Company Name *</label>
+                  <input
+                    type="text"
+                    required
+                    className="form-input"
+                    placeholder="e.g. Adani Wilmar Distributors"
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  />
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                  <div className="form-group">
+                    <label className="form-label">Phone Number</label>
+                    <input
+                      type="tel"
+                      className="form-input text-mono"
+                      placeholder="Contact number"
+                      value={form.phone}
+                      onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">GSTIN</label>
+                    <input
+                      type="text"
+                      className="form-input text-mono"
+                      placeholder="15-digit GSTIN"
+                      value={form.gstin}
+                      onChange={(e) => setForm({ ...form, gstin: e.target.value })}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '0.75rem' }}>
+                  <div className="form-group">
+                    <label className="form-label">Address</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="Warehouse or office location"
+                      value={form.address}
+                      onChange={(e) => setForm({ ...form, address: e.target.value })}
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">State</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      placeholder="e.g. KA, MH"
+                      value={form.state}
+                      onChange={(e) => setForm({ ...form, state: e.target.value })}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                  <div className="form-group">
+                    <label className="form-label">Credit Period (Days)</label>
+                    <input
+                      type="number"
+                      className="form-input text-mono font-bold"
+                      value={form.credit_days}
+                      onChange={(e) => setForm({ ...form, credit_days: parseInt(e.target.value) || 0 })}
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Agreed Credit Limit (₹)</label>
+                    <input
+                      type="number"
+                      className="form-input text-mono font-bold"
+                      value={form.credit_limit}
+                      onChange={(e) => setForm({ ...form, credit_limit: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="erp-modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setShowModal(false)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  Save Supplier Profile
+                </button>
               </div>
             </form>
           </div>
         </div>
       )}
-    </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  toolbar: { display: 'flex', gap: '1rem', marginBottom: '1rem' },
-  searchInput: { flex: 1, padding: '0.75rem', border: '1px solid #ddd', borderRadius: '4px' },
-  addBtn: { padding: '0.75rem 1.5rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '1rem' },
-  card: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
-  cardTitle: { margin: '0 0 0.5rem', color: '#1976d2' },
-  cardText: { margin: '0.25rem 0', color: '#666', fontSize: '0.875rem' },
-  cardValue: { margin: '0.5rem 0 0', fontWeight: 'bold', color: '#388e3c' },
-  modal: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  modalContent: { background: 'white', padding: '2rem', borderRadius: '8px', width: '400px' },
-  input: { width: '100%', padding: '0.75rem', marginBottom: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' },
-  modalActions: { display: 'flex', gap: '1rem', justifyContent: 'flex-end', marginTop: '1rem' },
-  cancelBtn: { padding: '0.75rem 1.5rem', background: '#ddd', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  submitBtn: { padding: '0.75rem 1.5rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-};

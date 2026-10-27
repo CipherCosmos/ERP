@@ -60,10 +60,14 @@ func main() {
 		c.Next()
 	})
 
+	r.GET("/health", handlers.Health)
+	r.HEAD("/health", handlers.Health)
+
 	api := r.Group("/api/v1")
 	api.Use(middleware.AuditMutationRequests())
 	{
 		api.GET("/health", handlers.Health)
+		api.HEAD("/health", handlers.Health)
 
 		api.POST("/auth/login", rateLimiter.LoginRateLimit(), handlers.Login)
 		api.POST("/auth/register", authMw.RequireAuth(), authMw.RequirePermission(rbac.PermUserRegister), handlers.Register)

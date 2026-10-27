@@ -92,6 +92,7 @@ func (h *ProductHandler) List(c *gin.Context) {
 	}
 	categoryID := c.Query("category_id")
 	barcode := c.Query("barcode")
+	brand := c.Query("brand")
 	search := c.Query("search")
 
 	query := `
@@ -116,9 +117,13 @@ func (h *ProductHandler) List(c *gin.Context) {
 		query += " AND p.barcode = ?"
 		args = append(args, barcode)
 	}
+	if brand != "" {
+		query += " AND p.brand = ?"
+		args = append(args, brand)
+	}
 	if search != "" {
-		query += " AND (p.name LIKE ? OR p.barcode LIKE ?)"
-		args = append(args, "%"+search+"%", "%"+search+"%")
+		query += " AND (p.name LIKE ? OR p.barcode LIKE ? OR p.brand LIKE ?)"
+		args = append(args, "%"+search+"%", "%"+search+"%", "%"+search+"%")
 	}
 	query += " ORDER BY p.name LIMIT 100"
 

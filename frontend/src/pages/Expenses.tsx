@@ -2,32 +2,49 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { expenseApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
+import { IconExpenses, IconPlus, IconClose, IconRefresh } from '../components/Icons';
 
 export default function Expenses() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
+
   const [expenses, setExpenses] = useState<any[]>([]);
   const [categories, setCategories] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [summary, setSummary] = useState<any>(null);
   const [dateRange, setDateRange] = useState({ start: '', end: '' });
-  const [form, setForm] = useState({ category_id: '', amount: '', description: '', expense_date: new Date().toISOString().split('T')[0] });
+
+  const [form, setForm] = useState({
+    category_id: '',
+    amount: '',
+    description: '',
+    expense_date: new Date().toISOString().split('T')[0],
+  });
 
   useEffect(() => {
-    if (!user || !store) {
+    if (!user) {
       navigate('/login');
       return;
     }
     loadCategories();
-    loadExpenses();
-    loadSummary();
-  }, [user, store, dateRange]);
+  }, [user]);
+
+  useEffect(() => {
+    if (store) {
+      loadExpenses();
+      loadSummary();
+    }
+  }, [store?.id, dateRange]);
 
   const loadCategories = async () => {
     try {
       const { data } = await expenseApi.getCategories();
-      setCategories(data);
+      setCategories(data || []);
+      if (data && data.length > 0 && !form.category_id) {
+        setForm((prev) => ({ ...prev, category_id: data[0].id }));
+      }
     } catch (err) {
       console.error('Failed to load categories:', err);
     }
@@ -38,7 +55,7 @@ export default function Expenses() {
     setLoading(true);
     try {
       const { data } = await expenseApi.list({ store_id: store.id, ...dateRange });
-      setExpenses(data);
+      setExpenses(data || []);
     } catch (err) {
       console.error('Failed to load expenses:', err);
     } finally {
@@ -56,126 +73,210 @@ export default function Expenses() {
     }
   };
 
-  const handleSubmit = async () => {
-    if (!store || !user || !form.category_id || !form.amount) {
-      alert('Please fill required fields');
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const amt = parseFloat(form.amount);
+    if (!store || !user || !form.category_id || !amt || amt <= 0) {
+      alert('Please select a category and enter a valid positive amount.');
       return;
     }
+
     try {
       await expenseApi.create({
         store_id: store.id,
         category_id: form.category_id,
-        amount: parseFloat(form.amount),
+        amount: amt,
         description: form.description,
         expense_date: form.expense_date,
       });
       setShowForm(false);
-      setForm({ category_id: '', amount: '', description: '', expense_date: new Date().toISOString().split('T')[0] });
+      setForm({
+        category_id: categories.length > 0 ? categories[0].id : '',
+        amount: '',
+        description: '',
+        expense_date: new Date().toISOString().split('T')[0],
+      });
       loadExpenses();
       loadSummary();
-      alert('Expense added');
+      alert('Expense recorded successfully.');
     } catch (err) {
       console.error('Failed to add expense:', err);
     }
   };
 
+  const totalExpense = summary?.total_expense ?? expenses.reduce((s, e) => s + (e.amount || 0), 0);
+
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>← Back</button>
-        <h1>Expenses</h1>
-        <button onClick={() => setShowForm(true)} style={styles.addBtn}>+ Add Expense</button>
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Operating Expenses & Overhead Ledger
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Store: <strong>{store?.name}</strong> &middot; Track rent, electricity, wages, freight, packaging, and store overheads
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => setShowForm(true)}
+          >
+            <IconPlus size={16} />
+            <span>Record Expense</span>
+          </button>
+        </div>
       </div>
 
-      <div style={styles.dateFilter}>
-        <input type="date" value={dateRange.start} onChange={(e) => setDateRange({ ...dateRange, start: e.target.value })} style={styles.input} />
-        <span>to</span>
-        <input type="date" value={dateRange.end} onChange={(e) => setDateRange({ ...dateRange, end: e.target.value })} style={styles.input} />
+      {/* KPI Card */}
+      <div className="erp-card" style={{ borderLeft: '4px solid #dc2626', marginBottom: '1.25rem' }}>
+        <div className="erp-card-body" style={{ padding: '1rem 1.25rem' }}>
+          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+            Total Operating Overhead
+          </div>
+          <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#dc2626', margin: '0.25rem 0' }}>
+            ₹{totalExpense.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+          </div>
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+            Across {expenses.length} expense line items logged
+          </div>
+        </div>
       </div>
 
-      {summary && (
-        <div style={styles.summaryCard}>
-          <h3>Expense Summary</h3>
-          <div style={styles.summaryGrid}>
-            {summary.summary?.map((s: any) => (
-              <div key={s.category} style={styles.summaryItem}>
-                <span style={styles.categoryName}>{s.category}</span>
-                <span style={styles.categoryTotal}>₹{s.total?.toFixed(2)}</span>
-              </div>
-            ))}
-          </div>
-          <div style={styles.grandTotal}>
-            <span>Grand Total</span>
-            <span>₹{summary.grand_total?.toFixed(2)}</span>
-          </div>
-        </div>
-      )}
-
-      {showForm && (
-        <div style={styles.formCard}>
-          <h3>Add Expense</h3>
-          <div style={styles.formGrid}>
-            <select value={form.category_id} onChange={(e) => setForm({ ...form, category_id: e.target.value })} style={styles.select}>
-              <option value="">Select Category</option>
-              {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <input type="number" placeholder="Amount" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} style={styles.input} />
-            <input type="date" value={form.expense_date} onChange={(e) => setForm({ ...form, expense_date: e.target.value })} style={styles.input} />
-            <input type="text" placeholder="Description (optional)" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} style={styles.input} />
-          </div>
-          <div style={styles.formActions}>
-            <button onClick={handleSubmit} style={styles.submitBtn}>Submit</button>
-            <button onClick={() => setShowForm(false)} style={styles.cancelBtn}>Cancel</button>
-          </div>
-        </div>
-      )}
-
-      <div style={styles.listCard}>
-        <table style={styles.table}>
+      {/* Expenses Table */}
+      <div className="erp-table-container">
+        <table className="erp-table">
           <thead>
             <tr>
               <th>Date</th>
               <th>Category</th>
-              <th>Description</th>
-              <th>Amount</th>
+              <th>Description / Remarks</th>
+              <th className="text-right">Amount (₹)</th>
             </tr>
           </thead>
           <tbody>
-            {expenses.map((e) => (
-              <tr key={e.id}>
-                <td>{new Date(e.expense_date).toLocaleDateString()}</td>
-                <td>{e.category_name}</td>
-                <td>{e.description || '-'}</td>
-                <td style={{ fontWeight: 'bold' }}>₹{e.amount?.toFixed(2)}</td>
+            {loading ? (
+              <tr>
+                <td colSpan={4} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                  Loading expenses...
+                </td>
               </tr>
-            ))}
-            {expenses.length === 0 && <tr><td colSpan={4} style={{ textAlign: 'center', padding: '2rem' }}>No expenses</td></tr>}
+            ) : expenses.length === 0 ? (
+              <tr>
+                <td colSpan={4} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                  No expenses recorded for this period.
+                </td>
+              </tr>
+            ) : (
+              expenses.map((e) => (
+                <tr key={e.id}>
+                  <td className="text-mono">{e.expense_date ? e.expense_date.slice(0, 10) : '—'}</td>
+                  <td style={{ fontWeight: 600 }}>{e.category_name || 'General'}</td>
+                  <td style={{ color: 'var(--text-secondary)' }}>{e.description || '—'}</td>
+                  <td className="text-right text-mono font-bold" style={{ color: '#dc2626' }}>
+                    ₹{(e.amount || 0).toFixed(2)}
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>
-    </div>
+
+      {/* Add Expense Modal */}
+      {showForm && (
+        <div className="erp-modal-backdrop" onClick={() => setShowForm(false)}>
+          <div className="erp-modal" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
+            <div className="erp-modal-header">
+              <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>Record Store Expense</h3>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => setShowForm(false)}
+              >
+                <IconClose size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmit}>
+              <div className="erp-modal-body">
+                <div className="form-group">
+                  <label className="form-label">Expense Category *</label>
+                  <select
+                    required
+                    className="form-select"
+                    value={form.category_id}
+                    onChange={(e) => setForm({ ...form, category_id: e.target.value })}
+                  >
+                    <option value="">Select Category</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Amount (₹) *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    required
+                    className="form-input text-mono font-bold"
+                    placeholder="0.00"
+                    value={form.amount}
+                    onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Expense Date</label>
+                  <input
+                    type="date"
+                    className="form-input text-mono"
+                    value={form.expense_date}
+                    onChange={(e) => setForm({ ...form, expense_date: e.target.value })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Description / Remarks</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. Monthly shop electricity bill"
+                    value={form.description}
+                    onChange={(e) => setForm({ ...form, description: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="erp-modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setShowForm(false)}
+                >
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  Record Expense
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', maxWidth: '1000px', margin: '0 auto' },
-  header: { display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#f5f5f5', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' },
-  addBtn: { marginLeft: 'auto', padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  dateFilter: { display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' },
-  input: { padding: '0.5rem', fontSize: '1rem', border: '1px solid #ddd', borderRadius: '4px' },
-  summaryCard: { background: '#fff3e0', padding: '1rem', borderRadius: '8px', marginBottom: '1rem' },
-  summaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(150px, 1fr))', gap: '0.5rem', marginBottom: '1rem' },
-  summaryItem: { display: 'flex', justifyContent: 'space-between', padding: '0.5rem', background: 'white', borderRadius: '4px' },
-  categoryName: { color: '#666' },
-  categoryTotal: { fontWeight: 'bold' },
-  grandTotal: { display: 'flex', justifyContent: 'space-between', padding: '1rem', background: '#ff9800', color: 'white', borderRadius: '4px', fontWeight: 'bold', fontSize: '1.1rem' },
-  formCard: { background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)', marginBottom: '1rem' },
-  formGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '0.5rem', marginBottom: '1rem' },
-  formActions: { display: 'flex', gap: '0.5rem' },
-  submitBtn: { padding: '0.5rem 1rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  cancelBtn: { padding: '0.5rem 1rem', background: '#f5f5f5', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' },
-  select: { padding: '0.5rem', fontSize: '1rem', border: '1px solid #ddd', borderRadius: '4px' },
-  listCard: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-};

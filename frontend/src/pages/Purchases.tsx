@@ -2,6 +2,16 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { purchaseApi, vendorApi, productApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
+import { Product, Vendor } from '../types';
+import {
+  IconPurchases,
+  IconPlus,
+  IconClose,
+  IconCheck,
+  IconPrinter,
+  IconRefresh,
+} from '../components/Icons';
 
 interface PurchaseOrder {
   id: string;
@@ -12,18 +22,6 @@ interface PurchaseOrder {
   expected_date: string | null;
   total: number;
   status: string;
-}
-
-interface VendorRow {
-  id: string;
-  name: string;
-}
-
-interface ProductRow {
-  id: string;
-  name: string;
-  uom_id?: string;
-  gst_rate?: number;
 }
 
 interface POLine {
@@ -42,42 +40,31 @@ interface POItemDetail {
   rate: number;
   discount: number;
   total: number;
-  uom_id?: string;
-}
-
-function lineTotalServer(rate: number, qty: number, discount: number, gstRate: number): number {
-  const taxable = rate * qty - discount;
-  const gst = taxable * (gstRate / 100);
-  return taxable + gst;
 }
 
 export default function Purchases() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
+
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
-  const [vendors, setVendors] = useState<VendorRow[]>([]);
-  const [products, setProducts] = useState<ProductRow[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
   const [statusFilter, setStatusFilter] = useState('');
 
+  // Create PO Modal
   const [showCreate, setShowCreate] = useState(false);
   const [createVendor, setCreateVendor] = useState('');
   const [createExpected, setCreateExpected] = useState('');
   const [createLines, setCreateLines] = useState<POLine[]>([
-    { product_id: '', quantity: '1', rate: '0', discount: '0' },
+    { product_id: '', quantity: '10', rate: '0', discount: '0' },
   ]);
   const [createSaving, setCreateSaving] = useState(false);
 
+  // Detail View Modal
   const [detailPO, setDetailPO] = useState<PurchaseOrder | null>(null);
-  const [detailVendorName, setDetailVendorName] = useState('');
   const [detailItems, setDetailItems] = useState<POItemDetail[]>([]);
   const [detailLoading, setDetailLoading] = useState(false);
-
-  const [receivePO, setReceivePO] = useState<PurchaseOrder | null>(null);
-  const [receiveLineItems, setReceiveLineItems] = useState<POItemDetail[]>([]);
-  const [receiveQtyByProduct, setReceiveQtyByProduct] = useState<Record<string, string>>({});
-  const [receiveLoading, setReceiveLoading] = useState(false);
-  const [receiveSaving, setReceiveSaving] = useState(false);
 
   const loadOrders = useCallback(async () => {
     if (!store) return;
@@ -95,563 +82,510 @@ export default function Purchases() {
     }
   }, [store, statusFilter]);
 
-  const loadVendorsProducts = useCallback(async () => {
+  const loadVendorsAndProducts = useCallback(async () => {
     if (!store) return;
     try {
       const [vRes, pRes] = await Promise.all([
         vendorApi.list(),
         productApi.list({ store_id: store.id }),
       ]);
-      setVendors((vRes.data as VendorRow[]) || []);
-      setProducts((pRes.data as ProductRow[]) || []);
+      setVendors(vRes.data || []);
+      setProducts(pRes.data || []);
     } catch (err) {
-      console.error(err);
+      console.warn('Failed to load vendors/products:', err);
     }
   }, [store]);
 
   useEffect(() => {
-    if (!user || user.role === 'cashier') {
-      navigate('/billing');
+    if (!user) {
+      navigate('/login');
+      return;
     }
-  }, [user, navigate]);
-
-  useEffect(() => {
     if (store) {
       loadOrders();
-      loadVendorsProducts();
+      loadVendorsAndProducts();
     }
-  }, [store, loadOrders, loadVendorsProducts]);
+  }, [user, store?.id, loadOrders, loadVendorsAndProducts]);
 
   const openDetail = async (po: PurchaseOrder) => {
     setDetailPO(po);
     setDetailLoading(true);
-    setDetailItems([]);
-    setDetailVendorName(po.vendor_name);
     try {
       const { data } = await purchaseApi.get(po.id);
-      const body = data as { po?: { vendor_id?: string }; vendor_name?: string; items?: POItemDetail[] };
-      setDetailVendorName(body.vendor_name || po.vendor_name);
-      setDetailItems(body.items || []);
+      setDetailItems(data.items || []);
     } catch (err) {
-      console.error(err);
-      alert('Failed to load purchase order');
-      setDetailPO(null);
+      console.error('Failed to load PO details:', err);
     } finally {
       setDetailLoading(false);
     }
   };
 
-  const openReceive = async (po: PurchaseOrder) => {
-    setReceivePO(po);
-    setReceiveLoading(true);
-    try {
-      const { data } = await purchaseApi.get(po.id);
-      const body = data as { items?: POItemDetail[] };
-      const items = body.items || [];
-      setReceiveLineItems(items);
-      const m: Record<string, string> = {};
-      for (const it of items) {
-        const rem = Math.max(0, it.quantity - it.received_qty);
-        m[it.product_id] = rem > 0 ? String(rem) : '0';
-      }
-      setReceiveQtyByProduct(m);
-    } catch (err) {
-      console.error(err);
-      alert('Failed to load lines for receiving');
-      setReceivePO(null);
-      setReceiveLineItems([]);
-    } finally {
-      setReceiveLoading(false);
-    }
+  const handleAddLine = () => {
+    setCreateLines((prev) => [...prev, { product_id: '', quantity: '1', rate: '0', discount: '0' }]);
   };
 
-  const submitCreate = async () => {
-    if (!store || !createVendor || createLines.length === 0) {
-      alert('Select vendor and add at least one line');
+  const handleRemoveLine = (idx: number) => {
+    setCreateLines((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleLineProductChange = (idx: number, productId: string) => {
+    const prod = products.find((p) => p.id === productId);
+    const cost = (prod as any)?.cost_price || prod?.sell_price || 0;
+    setCreateLines((prev) =>
+      prev.map((l, i) => (i === idx ? { ...l, product_id: productId, rate: String(cost) } : l))
+    );
+  };
+
+  const handleCreateSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createVendor || !store || createSaving) return;
+
+    const validLines = createLines.filter(
+      (l) => l.product_id && parseFloat(l.quantity) > 0 && parseFloat(l.rate) >= 0
+    );
+    if (validLines.length === 0) {
+      alert('Please add at least one valid product line with quantity > 0.');
       return;
     }
-    const items: { product_id: string; quantity: number; uom_id?: string; rate: number; discount: number; total: number }[] = [];
-    for (const ln of createLines) {
-      if (!ln.product_id) continue;
-      const qty = parseFloat(ln.quantity) || 0;
-      const rate = parseFloat(ln.rate) || 0;
-      const discount = parseFloat(ln.discount) || 0;
-      const p = products.find((x) => x.id === ln.product_id);
-      const gst = p?.gst_rate ?? 0;
-      if (qty <= 0 || rate < 0) {
-        alert('Each line needs quantity > 0 and valid rate');
-        return;
-      }
-      const total = lineTotalServer(rate, qty, discount, gst);
-      items.push({
-        product_id: ln.product_id,
-        quantity: qty,
-        uom_id: p?.uom_id,
-        rate,
-        discount,
-        total,
-      });
-    }
-    if (items.length === 0) {
-      alert('Add at least one product line');
-      return;
-    }
+
     setCreateSaving(true);
     try {
-      const orderDate = new Date().toISOString().slice(0, 10);
       await purchaseApi.create({
         store_id: store.id,
         vendor_id: createVendor,
-        order_date: orderDate,
+        order_date: new Date().toISOString().slice(0, 10),
         expected_date: createExpected || undefined,
-        items,
+        items: validLines.map((l) => {
+          const prod = products.find((p) => p.id === l.product_id);
+          return {
+            product_id: l.product_id,
+            quantity: parseFloat(l.quantity),
+            rate: parseFloat(l.rate),
+            discount: parseFloat(l.discount) || 0,
+            uom_id: prod?.uom_id,
+          };
+        }),
       });
+
       setShowCreate(false);
-      setCreateLines([{ product_id: '', quantity: '1', rate: '0', discount: '0' }]);
+      setCreateVendor('');
       setCreateExpected('');
-      await loadOrders();
-    } catch (err: unknown) {
-      const ax = err as { response?: { data?: { error?: string } } };
-      alert(ax.response?.data?.error || 'Failed to create PO');
+      setCreateLines([{ product_id: '', quantity: '10', rate: '0', discount: '0' }]);
+      loadOrders();
+      alert('Purchase order created successfully!');
+    } catch (err: any) {
+      alert(err.response?.data?.error || 'Failed to create purchase order.');
     } finally {
       setCreateSaving(false);
     }
   };
 
-  const submitReceive = async () => {
-    if (!store || !receivePO) return;
-    const items: { product_id: string; quantity: number }[] = [];
-    for (const [productId, qStr] of Object.entries(receiveQtyByProduct)) {
-      const q = parseFloat(qStr) || 0;
-      if (q > 0) items.push({ product_id: productId, quantity: q });
-    }
-    if (items.length === 0) {
-      alert('Enter quantity to receive for at least one line');
-      return;
-    }
-    setReceiveSaving(true);
-    try {
-      await purchaseApi.receive({ po_id: receivePO.id, store_id: store.id, items });
-      setReceivePO(null);
-      setReceiveLineItems([]);
-      await loadOrders();
-    } catch (err: unknown) {
-      const ax = err as { response?: { data?: { error?: string } } };
-      alert(ax.response?.data?.error || 'Receive failed');
-    } finally {
-      setReceiveSaving(false);
-    }
-  };
-
-  const cancelPO = async (id: string) => {
-    if (!window.confirm('Cancel this purchase order? Only pending orders can be cancelled.')) return;
-    try {
-      await purchaseApi.cancel(id);
-      await loadOrders();
-      setDetailPO(null);
-    } catch (err: unknown) {
-      const ax = err as { response?: { data?: { error?: string } } };
-      alert(ax.response?.data?.error || 'Cancel failed');
-    }
-  };
-
-  if (!user || user.role === 'cashier') return null;
-
-  const pendingCount = orders.filter((o) => o.status === 'pending').length;
-  const receivedCount = orders.filter((o) => o.status === 'received').length;
-  const partialCount = orders.filter((o) => o.status === 'partial').length;
-
-  const gstForProduct = (id: string) => products.find((p) => p.id === id)?.gst_rate ?? 0;
-
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Purchase Orders</h1>
-        <button type="button" onClick={() => navigate('/')} style={styles.backBtn}>
-          ← Back
-        </button>
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Purchase Orders & Procurement
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Supplier purchase orders, expected delivery dates, and Goods Receiving Notes (GRN)
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => navigate('/grn')}
+          >
+            <span>Goods Receipt (GRN)</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => {
+              setShowCreate(true);
+              if (vendors.length > 0) setCreateVendor(vendors[0].id);
+            }}
+          >
+            <IconPlus size={16} />
+            <span>Create Purchase Order</span>
+          </button>
+        </div>
       </div>
 
-      <div style={styles.summary}>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryLabel}>Pending</div>
-          <div style={styles.summaryValue}>{pendingCount}</div>
-        </div>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryLabel}>Partial</div>
-          <div style={styles.summaryValue}>{partialCount}</div>
-        </div>
-        <div style={styles.summaryCard}>
-          <div style={styles.summaryLabel}>Received</div>
-          <div style={styles.summaryValue}>{receivedCount}</div>
+      {/* Filter Bar */}
+      <div
+        className="erp-card"
+        style={{ padding: '0.75rem 1rem', marginBottom: '1.25rem', backgroundColor: '#fff' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <div style={{ minWidth: 180 }}>
+            <select
+              className="form-select"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="">All Orders ({orders.length})</option>
+              <option value="pending">Pending Receipt</option>
+              <option value="partial">Partially Received</option>
+              <option value="completed">Completed / Received</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={loadOrders}
+            disabled={loading}
+          >
+            <IconRefresh size={16} />
+            <span>Refresh</span>
+          </button>
         </div>
       </div>
 
-      <div style={styles.filters}>
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={styles.select}>
-          <option value="">All Status</option>
-          <option value="pending">Pending</option>
-          <option value="partial">Partial</option>
-          <option value="received">Received</option>
-          <option value="cancelled">Cancelled</option>
-        </select>
-        <button type="button" style={styles.createBtn} onClick={() => setShowCreate(true)}>
-          + New Purchase Order
-        </button>
-      </div>
-
-      {loading ? (
-        <p>Loading...</p>
-      ) : (
-        <table style={styles.table}>
+      {/* Orders Table */}
+      <div className="erp-table-container">
+        <table className="erp-table">
           <thead>
             <tr>
-              <th style={styles.th}>PO No</th>
-              <th style={styles.th}>Vendor</th>
-              <th style={styles.th}>Order Date</th>
-              <th style={styles.th}>Expected</th>
-              <th style={styles.th}>Total</th>
-              <th style={styles.th}>Status</th>
-              <th style={styles.th}>Action</th>
+              <th>PO Number</th>
+              <th>Vendor / Supplier</th>
+              <th>Order Date</th>
+              <th>Expected Date</th>
+              <th className="text-right">Order Value (₹)</th>
+              <th className="text-center">Status</th>
+              <th className="text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {orders.map((po) => (
-              <tr key={po.id} style={styles.tr}>
-                <td style={styles.td}>{po.po_no}</td>
-                <td style={styles.td}>{po.vendor_name}</td>
-                <td style={styles.td}>{po.order_date}</td>
-                <td style={styles.td}>{po.expected_date || '-'}</td>
-                <td style={styles.td}>₹{Number(po.total).toFixed(2)}</td>
-                <td style={styles.td}>
-                  <span
-                    style={{
-                      ...styles.statusBadge,
-                      background:
-                        po.status === 'received'
-                          ? '#e8f5e9'
-                          : po.status === 'pending'
-                            ? '#fff3e0'
-                            : po.status === 'partial'
-                              ? '#e3f2fd'
-                              : '#ffebee',
-                    }}
-                  >
-                    {po.status}
-                  </span>
-                </td>
-                <td style={styles.td}>
-                  <button type="button" style={styles.viewBtn} onClick={() => openDetail(po)}>
-                    View
-                  </button>
-                  {(po.status === 'pending' || po.status === 'partial') && (
-                    <button type="button" style={styles.receiveBtn} onClick={() => openReceive(po)}>
-                      Receive
-                    </button>
-                  )}
+            {loading ? (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                  Loading purchase orders...
                 </td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-
-      {showCreate && (
-        <div style={styles.modalBackdrop}>
-          <div style={styles.modal}>
-            <h3>New purchase order</h3>
-            <label style={styles.lbl}>Vendor</label>
-            <select
-              style={styles.selectFull}
-              value={createVendor}
-              onChange={(e) => setCreateVendor(e.target.value)}
-            >
-              <option value="">— Select —</option>
-              {vendors.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.name}
-                </option>
-              ))}
-            </select>
-            <label style={styles.lbl}>Expected date (optional)</label>
-            <input
-              type="date"
-              style={styles.selectFull}
-              value={createExpected}
-              onChange={(e) => setCreateExpected(e.target.value)}
-            />
-            <h4 style={{ marginTop: '1rem' }}>Lines</h4>
-            {createLines.map((ln, idx) => (
-              <div key={idx} style={styles.lineRow}>
-                <select
-                  style={{ ...styles.selectFull, flex: 2 }}
-                  value={ln.product_id}
-                  onChange={(e) => {
-                    const next = [...createLines];
-                    next[idx].product_id = e.target.value;
-                    setCreateLines(next);
-                  }}
-                >
-                  <option value="">Product</option>
-                  {products.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-                <input
-                  type="number"
-                  placeholder="Qty"
-                  style={styles.inSm}
-                  value={ln.quantity}
-                  onChange={(e) => {
-                    const next = [...createLines];
-                    next[idx].quantity = e.target.value;
-                    setCreateLines(next);
-                  }}
-                />
-                <input
-                  type="number"
-                  placeholder="Rate"
-                  style={styles.inSm}
-                  value={ln.rate}
-                  onChange={(e) => {
-                    const next = [...createLines];
-                    next[idx].rate = e.target.value;
-                    setCreateLines(next);
-                  }}
-                />
-                <input
-                  type="number"
-                  placeholder="Disc"
-                  style={styles.inSm}
-                  value={ln.discount}
-                  onChange={(e) => {
-                    const next = [...createLines];
-                    next[idx].discount = e.target.value;
-                    setCreateLines(next);
-                  }}
-                />
-                <span style={styles.lineHint}>
-                  {ln.product_id
-                    ? `≈ ₹${lineTotalServer(
-                        parseFloat(ln.rate) || 0,
-                        parseFloat(ln.quantity) || 0,
-                        parseFloat(ln.discount) || 0,
-                        gstForProduct(ln.product_id),
-                      ).toFixed(2)}`
-                    : ''}
-                </span>
-                <button
-                  type="button"
-                  style={styles.rmBtn}
-                  onClick={() => setCreateLines(createLines.filter((_, i) => i !== idx))}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              style={styles.addLineBtn}
-              onClick={() =>
-                setCreateLines([...createLines, { product_id: '', quantity: '1', rate: '0', discount: '0' }])
-              }
-            >
-              + Line
-            </button>
-            <div style={styles.modalActions}>
-              <button type="button" style={styles.backBtn} onClick={() => setShowCreate(false)}>
-                Cancel
-              </button>
-              <button type="button" style={styles.createBtn} disabled={createSaving} onClick={submitCreate}>
-                {createSaving ? 'Saving…' : 'Create PO'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {detailPO && !receivePO && (
-        <div style={styles.modalBackdrop}>
-          <div style={styles.modal}>
-            <h3>{detailPO.po_no}</h3>
-            <p>
-              Vendor: {detailVendorName} · Status: {detailPO.status}
-            </p>
-            {detailLoading ? (
-              <p>Loading lines…</p>
+            ) : orders.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+                  No purchase orders found matching this filter.
+                </td>
+              </tr>
             ) : (
-              <table style={{ ...styles.table, marginTop: '0.5rem' }}>
-                <thead>
-                  <tr>
-                    <th style={styles.th}>Product</th>
-                    <th style={styles.th}>Qty</th>
-                    <th style={styles.th}>Recv</th>
-                    <th style={styles.th}>Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detailItems.map((it) => (
-                    <tr key={it.id}>
-                      <td style={styles.td}>{it.name}</td>
-                      <td style={styles.td}>{it.quantity}</td>
-                      <td style={styles.td}>{it.received_qty}</td>
-                      <td style={styles.td}>₹{it.total.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-            <div style={styles.modalActions}>
-              {detailPO.status === 'pending' && (
-                <button type="button" style={styles.dangerBtn} onClick={() => cancelPO(detailPO.id)}>
-                  Cancel PO
-                </button>
-              )}
-              <button type="button" style={styles.backBtn} onClick={() => setDetailPO(null)}>
-                Close
-              </button>
-              {(detailPO.status === 'pending' || detailPO.status === 'partial') && (
-                <button
-                  type="button"
-                  style={styles.receiveBtn}
-                  onClick={() => {
-                    const po = detailPO;
-                    setDetailPO(null);
-                    openReceive(po);
-                  }}
-                >
-                  Receive stock
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+              orders.map((po) => {
+                const isPending = po.status === 'pending';
+                const isPartial = po.status === 'partial';
 
-      {receivePO && (
-        <div style={styles.modalBackdrop}>
-          <div style={styles.modal}>
-            <h3>Receive — {receivePO.po_no}</h3>
-            <p style={styles.hint}>Quantities add to stock; cost uses catalog cost if not overridden per batch later.</p>
-            {receiveLoading ? (
-              <p>Loading lines…</p>
-            ) : (
-            <table style={{ ...styles.table, marginTop: '0.5rem' }}>
-              <thead>
-                <tr>
-                  <th style={styles.th}>Product</th>
-                  <th style={styles.th}>Remaining</th>
-                  <th style={styles.th}>Receive now</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.keys(receiveQtyByProduct).length === 0 ? (
-                  <tr>
-                    <td colSpan={3} style={styles.td}>
-                      No lines
+                return (
+                  <tr key={po.id}>
+                    <td className="text-mono font-bold" style={{ color: 'var(--primary-600)' }}>
+                      {po.po_no}
+                    </td>
+                    <td style={{ fontWeight: 600 }}>{po.vendor_name || 'Vendor'}</td>
+                    <td className="text-mono">{po.order_date ? po.order_date.slice(0, 10) : '—'}</td>
+                    <td className="text-mono">{po.expected_date ? po.expected_date.slice(0, 10) : '—'}</td>
+                    <td className="text-right text-mono font-bold">
+                      ₹{(po.total || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                    </td>
+                    <td className="text-center">
+                      {po.status === 'completed' ? (
+                        <span className="badge badge-success">Received</span>
+                      ) : isPartial ? (
+                        <span className="badge badge-warning">Partial</span>
+                      ) : po.status === 'cancelled' ? (
+                        <span className="badge badge-neutral">Cancelled</span>
+                      ) : (
+                        <span className="badge badge-info">Pending</span>
+                      )}
+                    </td>
+                    <td className="text-right">
+                      <div style={{ display: 'inline-flex', gap: '0.25rem' }}>
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          onClick={() => openDetail(po)}
+                        >
+                          View
+                        </button>
+                        {(isPending || isPartial) && (
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-sm"
+                            onClick={() => navigate('/grn')}
+                          >
+                            Receive Goods
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
-                ) : (
-                  Object.entries(receiveQtyByProduct).map(([pid, q]) => {
-                    const it = receiveLineItems.find((x) => x.product_id === pid);
-                    const rem = it ? Math.max(0, it.quantity - it.received_qty) : 0;
-                    return (
-                      <tr key={pid}>
-                        <td style={styles.td}>{it?.name || pid}</td>
-                        <td style={styles.td}>{rem}</td>
-                        <td style={styles.td}>
-                          <input
-                            type="number"
-                            style={styles.inSm}
-                            min={0}
-                            value={q}
-                            onChange={(e) =>
-                              setReceiveQtyByProduct((prev) => ({ ...prev, [pid]: e.target.value }))
-                            }
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+                );
+              })
             )}
-            <div style={styles.modalActions}>
+          </tbody>
+        </table>
+      </div>
+
+      {/* ===================================================================
+          Create Purchase Order Modal
+          =================================================================== */}
+      {showCreate && (
+        <div className="erp-modal-backdrop" onClick={() => setShowCreate(false)}>
+          <div className="erp-modal" style={{ maxWidth: 740 }} onClick={(e) => e.stopPropagation()}>
+            <div className="erp-modal-header">
+              <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>
+                Create Purchase Order (PO)
+              </h3>
               <button
                 type="button"
-                style={styles.backBtn}
-                onClick={() => {
-                  setReceivePO(null);
-                  setReceiveLineItems([]);
-                }}
+                className="btn btn-outline btn-sm"
+                onClick={() => setShowCreate(false)}
               >
-                Cancel
+                <IconClose size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateSubmit}>
+              <div className="erp-modal-body">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.875rem', marginBottom: '1rem' }}>
+                  <div className="form-group">
+                    <label className="form-label">Vendor / Supplier *</label>
+                    <select
+                      required
+                      className="form-select"
+                      value={createVendor}
+                      onChange={(e) => setCreateVendor(e.target.value)}
+                    >
+                      <option value="">Select Vendor</option>
+                      {vendors.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name} {v.gstin ? `(GST: ${v.gstin})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Expected Delivery Date</label>
+                    <input
+                      type="date"
+                      className="form-input text-mono"
+                      value={createExpected}
+                      onChange={(e) => setCreateExpected(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {/* Items Line Editor */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                    <label className="form-label" style={{ margin: 0 }}>Order Items</label>
+                    <button
+                      type="button"
+                      className="btn btn-outline btn-sm"
+                      onClick={handleAddLine}
+                    >
+                      + Add Line
+                    </button>
+                  </div>
+
+                  <table className="erp-table">
+                    <thead>
+                      <tr>
+                        <th>Product (Brand)</th>
+                        <th style={{ width: 100 }}>Quantity</th>
+                        <th style={{ width: 110 }}>Rate (₹)</th>
+                        <th style={{ width: 90 }}>Discount</th>
+                        <th style={{ width: 50 }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {createLines.map((line, idx) => (
+                        <tr key={idx}>
+                          <td>
+                            <select
+                              required
+                              className="form-select"
+                              value={line.product_id}
+                              onChange={(e) => handleLineProductChange(idx, e.target.value)}
+                            >
+                              <option value="">Select Product</option>
+                              {products.map((p) => (
+                                <option key={p.id} value={p.id}>
+                                  {p.name} {p.brand ? `[${p.brand}]` : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              required
+                              min="1"
+                              className="form-input text-mono"
+                              value={line.quantity}
+                              onChange={(e) =>
+                                setCreateLines((prev) =>
+                                  prev.map((l, i) => (i === idx ? { ...l, quantity: e.target.value } : l))
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="0.01"
+                              required
+                              className="form-input text-mono"
+                              value={line.rate}
+                              onChange={(e) =>
+                                setCreateLines((prev) =>
+                                  prev.map((l, i) => (i === idx ? { ...l, rate: e.target.value } : l))
+                                )
+                              }
+                            />
+                          </td>
+                          <td>
+                            <input
+                              type="number"
+                              step="0.01"
+                              className="form-input text-mono"
+                              value={line.discount}
+                              onChange={(e) =>
+                                setCreateLines((prev) =>
+                                  prev.map((l, i) => (i === idx ? { ...l, discount: e.target.value } : l))
+                                )
+                              }
+                            />
+                          </td>
+                          <td className="text-center">
+                            {createLines.length > 1 && (
+                              <button
+                                type="button"
+                                style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer' }}
+                                onClick={() => handleRemoveLine(idx)}
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="erp-modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setShowCreate(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={createSaving}
+                >
+                  {createSaving ? 'Creating PO...' : 'Submit Purchase Order'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================
+          PO Details View Modal
+          =================================================================== */}
+      {detailPO && (
+        <div className="erp-modal-backdrop" onClick={() => setDetailPO(null)}>
+          <div className="erp-modal" style={{ maxWidth: 680 }} onClick={(e) => e.stopPropagation()}>
+            <div className="erp-modal-header">
+              <div>
+                <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 700 }}>
+                  Purchase Order: #{detailPO.po_no}
+                </h3>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                  Vendor: <strong>{detailPO.vendor_name}</strong> &middot; Status: {detailPO.status}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => setDetailPO(null)}
+              >
+                <IconClose size={18} />
+              </button>
+            </div>
+
+            <div className="erp-modal-body">
+              {detailLoading ? (
+                <p style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-muted)' }}>
+                  Loading line items...
+                </p>
+              ) : (
+                <table className="erp-table">
+                  <thead>
+                    <tr>
+                      <th>Product</th>
+                      <th className="text-center">Ordered</th>
+                      <th className="text-center">Received</th>
+                      <th className="text-right">Unit Rate</th>
+                      <th className="text-right">Total (₹)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detailItems.map((item, i) => (
+                      <tr key={item.id || i}>
+                        <td style={{ fontWeight: 600 }}>{item.name}</td>
+                        <td className="text-center text-mono font-bold">{item.quantity}</td>
+                        <td className="text-center text-mono" style={{ color: item.received_qty > 0 ? '#16a34a' : 'inherit' }}>
+                          {item.received_qty}
+                        </td>
+                        <td className="text-right text-mono">₹{item.rate.toFixed(2)}</td>
+                        <td className="text-right text-mono font-bold">₹{item.total.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            <div className="erp-modal-footer">
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => window.print()}
+              >
+                <IconPrinter size={16} />
+                <span>Print PO</span>
               </button>
               <button
                 type="button"
-                style={styles.createBtn}
-                disabled={receiveSaving || receiveLoading}
-                onClick={submitReceive}
+                className="btn btn-secondary"
+                onClick={() => setDetailPO(null)}
               >
-                {receiveSaving ? 'Posting…' : 'Confirm receive'}
+                Close
               </button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  summary: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '1rem', marginBottom: '1rem' },
-  summaryCard: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
-  summaryLabel: { fontSize: '0.875rem', color: '#666' },
-  summaryValue: { fontSize: '1.5rem', fontWeight: 'bold', color: '#1976d2' },
-  filters: { display: 'flex', gap: '1rem', marginBottom: '1rem', flexWrap: 'wrap' },
-  select: { padding: '0.75rem', border: '1px solid #ddd', borderRadius: '4px' },
-  createBtn: { padding: '0.75rem 1.5rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  table: { width: '100%', background: 'white', borderCollapse: 'collapse', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
-  th: { padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #ddd', background: '#f9f9f9' },
-  td: { padding: '0.75rem', borderBottom: '1px solid #eee' },
-  tr: { borderBottom: '1px solid #eee' },
-  statusBadge: { padding: '0.25rem 0.5rem', borderRadius: '4px', fontSize: '0.75rem', textTransform: 'capitalize' },
-  viewBtn: { padding: '0.25rem 0.75rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', marginRight: '0.25rem' },
-  receiveBtn: { padding: '0.25rem 0.75rem', background: '#4caf50', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  modalBackdrop: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0,0,0,0.4)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1000,
-    padding: '1rem',
-  },
-  modal: {
-    background: 'white',
-    borderRadius: '8px',
-    padding: '1.25rem',
-    maxWidth: '640px',
-    width: '100%',
-    maxHeight: '90vh',
-    overflow: 'auto',
-    boxShadow: '0 4px 24px rgba(0,0,0,0.15)',
-  },
-  lbl: { display: 'block', marginTop: '0.5rem', marginBottom: '0.25rem', fontWeight: 500 },
-  selectFull: { width: '100%', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' },
-  lineRow: { display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center', marginBottom: '0.5rem' },
-  inSm: { width: '72px', padding: '0.4rem', border: '1px solid #ddd', borderRadius: '4px' },
-  lineHint: { fontSize: '0.8rem', color: '#666', minWidth: '80px' },
-  rmBtn: { padding: '0.25rem 0.5rem', background: '#f44336', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  addLineBtn: { marginTop: '0.5rem', padding: '0.4rem 0.8rem', background: '#eee', border: '1px solid #ccc', borderRadius: '4px', cursor: 'pointer' },
-  modalActions: { display: 'flex', gap: '0.5rem', marginTop: '1rem', flexWrap: 'wrap' },
-  dangerBtn: { padding: '0.5rem 1rem', background: '#c62828', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  hint: { color: '#666', fontSize: '0.875rem' },
-};

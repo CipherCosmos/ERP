@@ -98,8 +98,8 @@ export const customerApi = {
 export const barcodeApi = {
   lookup: (barcode: string, storeId: string) =>
     api.get(`/barcodes/lookup/${encodeURIComponent(barcode)}`, { params: { store_id: storeId } }),
-  generate: (data: { category_id?: string; product_id?: string; prefix?: string }) =>
-    api.post('/barcodes/generate', data),
+  generate: (data?: { category_id?: string; product_id?: string; prefix?: string }) =>
+    api.post('/barcodes/generate', data || {}),
 };
 
 export const vendorApi = {
@@ -149,6 +149,8 @@ export const lossApi = {
 
 export const stockApi = {
   list: (storeId: string) => api.get('/stock', { params: { store_id: storeId } }),
+  getProductStock: (productId: string, storeId: string) =>
+    api.get('/stock', { params: { product_id: productId, store_id: storeId } }),
   low: (storeId: string) => api.get('/stock/low', { params: { store_id: storeId } }),
   adjustments: (storeId: string) => api.get('/stock/adjustments', { params: { store_id: storeId } }),
   adjust: (data: {

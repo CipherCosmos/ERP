@@ -2,19 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi } from '../services/api';
-import { BarChart, LineChart, PieChart } from '../components/Charts';
-
-interface SalesReport {
-  category: string;
-  sales: number;
-  item_count: number;
-}
-
-interface TopProduct {
-  product: string;
-  quantity: number;
-  sales: number;
-}
+import { AppLayout } from '../components/Layout/AppLayout';
+import { IconReports, IconPrinter, IconRefresh } from '../components/Icons';
 
 export default function Reports() {
   const navigate = useNavigate();
@@ -26,14 +15,15 @@ export default function Reports() {
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 10));
 
   useEffect(() => {
-    if (!user || user.role === 'cashier') {
-      navigate('/billing');
+    if (!user) {
+      navigate('/login');
+      return;
     }
   }, [user]);
 
   useEffect(() => {
     if (store) loadReport();
-  }, [store, activeTab, startDate, endDate]);
+  }, [store?.id, activeTab, startDate, endDate]);
 
   const loadReport = async () => {
     if (!store) return;
@@ -65,192 +55,195 @@ export default function Reports() {
     }
   };
 
-  if (!user || user.role === 'cashier') return null;
-
-  const categoryData = reportData as SalesReport[] | null;
-  const productsData = reportData as TopProduct[] | null;
-  const hourlyData = reportData as { hour: string; count: number; sales: number }[] | null;
-  const paymentData = reportData as { mode: string; count: number; total: number }[] | null;
-
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Reports</h1>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>&larr; Back</button>
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Operational Sales & Commercial Reports
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Store: <strong>{store?.name}</strong> &middot; Category performance, sales volume, peak hours, and payment modes
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => navigate('/profit-loss')}
+          >
+            <span>P&L Statement</span>
+          </button>
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => window.print()}
+          >
+            <IconPrinter size={16} />
+            <span>Print Report</span>
+          </button>
+        </div>
       </div>
 
-      <div style={styles.filters}>
-        <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={styles.input} />
-        <span>to</span>
-        <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={styles.input} />
+      {/* Date Filter & Tabs Bar */}
+      <div className="erp-card" style={{ padding: '0.75rem 1rem', marginBottom: '1.25rem', backgroundColor: '#fff' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+          <div style={{ display: 'flex', gap: '0.25rem' }}>
+            {[
+              { id: 'category', label: 'Sales by Category' },
+              { id: 'products', label: 'Top Products' },
+              { id: 'payment', label: 'Payment Modes' },
+              { id: 'hourly', label: 'Hourly Peak Trend' },
+            ].map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                className={activeTab === t.id ? 'btn btn-primary btn-sm' : 'btn btn-outline btn-sm'}
+                onClick={() => setActiveTab(t.id as any)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <input
+              type="date"
+              className="form-input text-mono"
+              style={{ width: 'auto' }}
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+            />
+            {activeTab !== 'hourly' && (
+              <>
+                <span style={{ color: 'var(--text-muted)' }}>to</span>
+                <input
+                  type="date"
+                  className="form-input text-mono"
+                  style={{ width: 'auto' }}
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                />
+              </>
+            )}
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={loadReport}
+              disabled={loading}
+            >
+              <IconRefresh size={16} />
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div style={styles.tabs}>
-        <button style={activeTab === 'category' ? styles.tabActive : styles.tab} onClick={() => setActiveTab('category')}>By Category</button>
-        <button style={activeTab === 'products' ? styles.tabActive : styles.tab} onClick={() => setActiveTab('products')}>Top Products</button>
-        <button style={activeTab === 'hourly' ? styles.tabActive : styles.tab} onClick={() => setActiveTab('hourly')}>Hourly</button>
-        <button style={activeTab === 'payment' ? styles.tabActive : styles.tab} onClick={() => setActiveTab('payment')}>Payment Mode</button>
+      {/* Report Tables */}
+      <div className="erp-table-container">
+        {loading ? (
+          <p style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+            Loading report data...
+          </p>
+        ) : !reportData || (Array.isArray(reportData) && reportData.length === 0) ? (
+          <p style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+            No sales data recorded for the selected date range.
+          </p>
+        ) : activeTab === 'category' ? (
+          <table className="erp-table">
+            <thead>
+              <tr>
+                <th>Category Name</th>
+                <th className="text-center">Items Sold Count</th>
+                <th className="text-right">Total Revenue (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reportData.map((row: any, i: number) => (
+                <tr key={row.name || i}>
+                  <td style={{ fontWeight: 600 }}>{row.name}</td>
+                  <td className="text-center text-mono">{row.item_count || 0}</td>
+                  <td className="text-right text-mono font-bold">
+                    ₹{(row.sales || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : activeTab === 'products' ? (
+          <table className="erp-table">
+            <thead>
+              <tr>
+                <th>Product Name</th>
+                <th className="text-center">Units Sold</th>
+                <th className="text-right">Total Revenue (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reportData.map((row: any, i: number) => (
+                <tr key={row.product || i}>
+                  <td style={{ fontWeight: 600 }}>{row.product}</td>
+                  <td className="text-center text-mono font-bold">{row.quantity}</td>
+                  <td className="text-right text-mono font-bold">
+                    ₹{(row.sales || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : activeTab === 'payment' ? (
+          <table className="erp-table">
+            <thead>
+              <tr>
+                <th>Payment Tender</th>
+                <th className="text-center">Bill Count</th>
+                <th className="text-right">Total Amount (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reportData.map((row: any, i: number) => (
+                <tr key={row.mode || i}>
+                  <td style={{ fontWeight: 600, textTransform: 'capitalize' }}>{row.mode}</td>
+                  <td className="text-center text-mono">{row.count}</td>
+                  <td className="text-right text-mono font-bold">
+                    ₹{(row.total || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : activeTab === 'hourly' ? (
+          <table className="erp-table">
+            <thead>
+              <tr>
+                <th>Hour Window</th>
+                <th className="text-center">Transactions</th>
+                <th className="text-right">Sales Volume (₹)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {reportData.map((row: any, i: number) => (
+                <tr key={row.hour || i}>
+                  <td className="text-mono font-bold">{row.hour}:00 - {row.hour}:59</td>
+                  <td className="text-center text-mono">{row.count}</td>
+                  <td className="text-right text-mono font-bold">
+                    ₹{(row.sales || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
       </div>
-
-      {loading ? (
-        <p>Loading...</p>
-      ) : (
-        <>
-          {/* ---- By Category ---- */}
-          {activeTab === 'category' && (
-            <>
-              <div style={styles.chartCard}>
-                <h3 style={styles.chartTitle}>Category-wise Sales</h3>
-                <BarChart
-                  data={(categoryData || []).map(r => ({ label: r.category, value: r.sales }))}
-                  height={230}
-                  width={560}
-                />
-              </div>
-              <div style={styles.tableContainer}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Category</th>
-                      <th style={styles.th}>Sales</th>
-                      <th style={styles.th}>Items Sold</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {categoryData?.map((r, i) => (
-                      <tr key={i} style={styles.tr}>
-                        <td style={styles.td}>{r.category}</td>
-                        <td style={styles.td}>{'\u20B9'}{r.sales.toFixed(2)}</td>
-                        <td style={styles.td}>{r.item_count}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
-
-          {/* ---- Top Products ---- */}
-          {activeTab === 'products' && (
-            <>
-              <div style={styles.chartCard}>
-                <h3 style={styles.chartTitle}>Top Products by Sales</h3>
-                <BarChart
-                  data={(productsData || []).map(r => ({ label: r.product, value: r.sales }))}
-                  height={230}
-                  width={560}
-                />
-              </div>
-              <div style={styles.tableContainer}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Product</th>
-                      <th style={styles.th}>Quantity</th>
-                      <th style={styles.th}>Sales</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {productsData?.map((r, i) => (
-                      <tr key={i} style={styles.tr}>
-                        <td style={styles.td}>{r.product}</td>
-                        <td style={styles.td}>{r.quantity.toFixed(2)}</td>
-                        <td style={styles.td}>{'\u20B9'}{r.sales.toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
-
-          {/* ---- Hourly ---- */}
-          {activeTab === 'hourly' && (
-            <>
-              <div style={styles.chartCard}>
-                <h3 style={styles.chartTitle}>Hourly Sales Pattern</h3>
-                <LineChart
-                  data={(hourlyData || []).map(r => ({ label: r.hour, value: r.sales }))}
-                  height={230}
-                  width={560}
-                  color="#1976d2"
-                />
-              </div>
-              <div style={styles.tableContainer}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Hour</th>
-                      <th style={styles.th}>Transactions</th>
-                      <th style={styles.th}>Sales</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {hourlyData?.map((r, i) => (
-                      <tr key={i} style={styles.tr}>
-                        <td style={styles.td}>{r.hour}</td>
-                        <td style={styles.td}>{r.count}</td>
-                        <td style={styles.td}>{'\u20B9'}{r.sales.toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
-
-          {/* ---- Payment Mode ---- */}
-          {activeTab === 'payment' && (
-            <>
-              <div style={styles.chartCard}>
-                <h3 style={styles.chartTitle}>Payment Mode Breakdown</h3>
-                <PieChart
-                  data={(paymentData || []).map(r => ({ label: r.mode, value: r.total }))}
-                  size={200}
-                />
-              </div>
-              <div style={styles.tableContainer}>
-                <table style={styles.table}>
-                  <thead>
-                    <tr>
-                      <th style={styles.th}>Mode</th>
-                      <th style={styles.th}>Count</th>
-                      <th style={styles.th}>Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {paymentData?.map((r, i) => (
-                      <tr key={i} style={styles.tr}>
-                        <td style={styles.td}>{r.mode}</td>
-                        <td style={styles.td}>{r.count}</td>
-                        <td style={styles.td}>{'\u20B9'}{r.total.toFixed(2)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
-        </>
-      )}
-    </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  filters: { display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' },
-  input: { padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' },
-  tabs: { display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' },
-  tab: { padding: '0.5rem 1rem', background: 'white', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' },
-  tabActive: { padding: '0.5rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-  chartCard: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', marginBottom: '1rem' },
-  chartTitle: { margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#333' },
-  tableContainer: { background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', overflow: 'hidden' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { padding: '0.75rem', textAlign: 'left', borderBottom: '2px solid #ddd', background: '#f9f9f9' },
-  td: { padding: '0.75rem', borderBottom: '1px solid #eee' },
-  tr: { borderBottom: '1px solid #eee' },
-};
