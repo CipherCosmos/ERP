@@ -85,9 +85,7 @@ func (h *Catalogue) Register(r gin.IRoutes) {
 	// boxed" but "what it may be transacted as", which is a different question
 	// and deserves the plainer path.
 	r.GET("/products/:id/units", mw.RequirePermission(rbac.PermCatalogRead), h.ListProductUnits)
-	r.GET("/products/:id/packing-units", mw.RequirePermission(rbac.PermCatalogRead), h.ListProductUnits)
 	r.POST("/products/:id/units", mw.RequirePermission(rbac.PermProductCatalogWrite), h.CreateProductUnit)
-	r.POST("/products/:id/packing-units", mw.RequirePermission(rbac.PermProductCatalogWrite), h.CreateProductUnit)
 	r.PUT("/products/:id/units/:unit_id", mw.RequirePermission(rbac.PermProductCatalogWrite), h.UpdateProductUnit)
 	r.POST("/products/:id/units/:unit_id/default", mw.RequirePermission(rbac.PermProductCatalogWrite), h.SetDefaultUnit)
 	r.POST("/products/:id/units/:unit_id/deactivate", mw.RequirePermission(rbac.PermProductCatalogWrite), h.DeactivateProductUnit)

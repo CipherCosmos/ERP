@@ -175,3 +175,69 @@ func TestLocationTypeIsConstrained(t *testing.T) {
 		t.Errorf("location type = %q, want %q", created.LocationType, domain.LocationStore)
 	}
 }
+
+// Goods are sold from shops only. Stock still moves to and from a godown
+// freely — that is a transfer — but a godown must never be able to bill, and
+// the cheapest place to guarantee that is to refuse it a counter at all.
+func TestAGodownCannotHaveABillingCounter(t *testing.T) {
+	t.Parallel()
+	svc := newService(t)
+	ctx := context.Background()
+
+	godown, err := svc.Create(ctx, "Back Godown", "Warehouse Road", "9990002222", "29ABCDE1234F1Z5", domain.LocationWarehouse)
+	if err != nil {
+		t.Fatalf("create godown: %v", err)
+	}
+
+	_, err = svc.RegisterTerminal(ctx, godown.ID, "T1", "Counter 1")
+	if err == nil {
+		t.Fatal("registering a counter in a godown should be refused")
+	}
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Errorf("want a validation error, got %v", err)
+	}
+
+	// The same counter in a shop is ordinary.
+	shop, err := svc.Create(ctx, "Front Shop", "Main Road", "9990003333", "29ABCDE1234F1Z5", domain.LocationStore)
+	if err != nil {
+		t.Fatalf("create shop: %v", err)
+	}
+	if _, err := svc.RegisterTerminal(ctx, shop.ID, "T1", "Counter 1"); err != nil {
+		t.Fatalf("a shop should accept a counter: %v", err)
+	}
+}
+
+// Demoting a shop that still has counters would strand them: they would keep
+// their invoice series and lose the right to use it.
+func TestAShopWithCountersCannotBecomeAGodown(t *testing.T) {
+	t.Parallel()
+	svc := newService(t)
+	ctx := context.Background()
+
+	shop, err := svc.Create(ctx, "Corner Shop", "Main Road", "9990004444", "29ABCDE1234F1Z5", domain.LocationStore)
+	if err != nil {
+		t.Fatalf("create shop: %v", err)
+	}
+	terminal, err := svc.RegisterTerminal(ctx, shop.ID, "T1", "Counter 1")
+	if err != nil {
+		t.Fatalf("register terminal: %v", err)
+	}
+
+	_, err = svc.Update(ctx, shop.ID, "Corner Shop", "Main Road", "9990004444", "29ABCDE1234F1Z5", domain.LocationWarehouse)
+	if err == nil {
+		t.Fatal("a shop with a live counter should not become a godown")
+	}
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Errorf("want a validation error, got %v", err)
+	}
+
+	// Retiring the counter is the deliberate act that unblocks it. The
+	// terminal row remains for its invoice history, so the guard counts rows
+	// rather than active ones and the conversion stays refused.
+	if err := svc.SetTerminalActive(ctx, terminal.ID, false); err != nil {
+		t.Fatalf("retire terminal: %v", err)
+	}
+	if _, err := svc.Update(ctx, shop.ID, "Corner Shop", "Main Road", "9990004444", "29ABCDE1234F1Z5", domain.LocationWarehouse); err == nil {
+		t.Error("a retired counter still carries an invoice series, so the conversion should stay refused")
+	}
+}

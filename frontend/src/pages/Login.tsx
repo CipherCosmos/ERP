@@ -12,16 +12,18 @@ export default function Login() {
   const setPermissions = useAppStore((s) => s.setPermissions);
   const setTerminal = useAppStore((s) => s.setTerminal);
 
-  const [form, setForm] = useState({ username: 'admin', password: 'admin12345' });
+  const [form, setForm] = useState({ username: 'admin', password: 'admin123' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // If already logged in, redirect away from the login page immediately
-  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-  if (user || token) {
-    const target = user?.role === 'cashier' ? '/billing' : '/dashboard';
-    return <Navigate to={target} replace />;
-  }
+  // If already logged in with valid token and user, redirect to dashboard or pos
+  useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (user && token) {
+      const target = user.role === 'cashier' ? '/billing' : '/dashboard';
+      navigate(target, { replace: true });
+    }
+  }, [user, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,7 +58,14 @@ export default function Login() {
         navigate('/dashboard', { replace: true });
       }
     } catch (err: any) {
-      setError(err.response?.data?.error || 'Invalid username or password.');
+      console.warn('Login error:', err);
+      const errPayload = err.response?.data?.error;
+      const errMsg =
+        (typeof errPayload === 'object' && errPayload?.message ? errPayload.message : '') ||
+        (typeof errPayload === 'string' ? errPayload : '') ||
+        err.message ||
+        'Invalid username or password.';
+      setError(String(errMsg));
     } finally {
       setLoading(false);
     }

@@ -146,8 +146,17 @@ export const useAppStore = create<AppState>()(
        */
       version: 2,
       migrate: (persisted: any, from: number) => {
-        if (!persisted) return persisted;
-        if (from < 2) {
+        if (!persisted || typeof persisted !== 'object') {
+          return {
+            user: null,
+            permissions: [],
+            store: null,
+            terminal: null,
+            language: 'en',
+            cart: [],
+          };
+        }
+        if (from < 2 && persisted.cart) {
           persisted.cart = [];
         }
         return persisted;

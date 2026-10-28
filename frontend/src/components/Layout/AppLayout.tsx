@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAppStore } from '../../stores/appStore';
-import { storeApi } from '../../services/api';
+import { storeApi, authApi } from '../../services/api';
 import { Store } from '../../types';
 import {
   IconDashboard,
@@ -303,12 +303,17 @@ export function AppLayout({ children, fullWidth = false }: AppLayoutProps) {
   };
 
   const handleLogout = () => {
+    try {
+      authApi.logout().catch(() => {});
+    } catch {}
+    localStorage.removeItem('token');
+    localStorage.removeItem('storeId');
     localStorage.clear();
     useAppStore.getState().setUser(null);
     useAppStore.getState().setStore(null);
     useAppStore.getState().setTerminal(null);
     useAppStore.getState().setPermissions([]);
-    navigate('/login', { replace: true });
+    window.location.href = '/login';
   };
 
   // Breadcrumb generator

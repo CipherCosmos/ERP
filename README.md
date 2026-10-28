@@ -324,6 +324,20 @@ bash scripts/restore-drill.sh            # prove a backup restores. Safe; never 
 
 One decision deliberately left as it is, rather than changed quietly:
 
+**Goods are sold from shops only; stock moves anywhere.** `stores.location_type`
+distinguishes a shop from a godown, and the two halves of that rule are
+deliberately asymmetric. Selling is restricted: a godown can never issue an
+invoice, enforced by refusing it a billing counter at all, and by checking the
+location when a sale resolves its terminal. Stock movement is not restricted:
+any location transfers to any other, godown to shop, shop to shop, godown to
+godown. There is no hierarchy of locations and none is needed — a flat list plus
+that one selling rule expresses the whole arrangement.
+
+A shop that still has counters cannot be converted into a godown. The counters
+would keep their invoice series and lose the right to use it, so retiring them
+is asked for rather than done silently. The guard counts counters rather than
+active ones, because a retired counter still owns the invoice numbers it issued.
+
 **Rejected goods close a purchase order.** The goods came, they were refused,
 nothing more is coming. The remedy is a debit note or a purchase return, not a
 line left open waiting for a replacement nobody promised. This is the documented

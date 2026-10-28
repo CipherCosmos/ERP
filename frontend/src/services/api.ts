@@ -98,16 +98,12 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token');
-      localStorage.removeItem('storeId');
-      // Not if we are already there. The login screen still renders components
-      // that load data, and a persisted session whose token has expired makes
-      // each of those 401 — every one of which used to reassign location and
-      // reload the page, which loaded them again. Measured on a real tab before
-      // the guard: eight thousand requests and a rate-limited server, from a
-      // till nobody had touched.
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+      if (!error.config?.url?.includes('/auth/login')) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('storeId');
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
       }
     }
     const data = error.response?.data;

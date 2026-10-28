@@ -1,20 +1,16 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-// Types only: the ~300kB decoder itself is imported on demand in startScanning so it
-// stays out of the main bundle, which counter tablets load on every shift.
-import type { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
 import { IconBarcode, IconCamera, IconClose, IconSearch } from './Icons';
 
 /**
  * getUserMedia only exists in a secure context. Serving the app over plain HTTP on a LAN
- * address (http://192.168.x.x) therefore removes navigator.mediaDevices entirely, which
- * looks to the user like the camera is simply dead. Report that case specifically.
+ * address (http://192.168.x.x) therefore removes navigator.mediaDevices entirely.
  */
 function getCameraUnavailableReason(): string | null {
   if (typeof window !== 'undefined' && !window.isSecureContext) {
-    return 'The camera needs a secure connection. Open this app over HTTPS (or on localhost) to scan with the camera. Manual entry and USB scanners still work.';
+    return 'The camera needs a secure connection. Open this app over HTTPS or on localhost to scan with the camera. Manual entry and USB scanners still work.';
   }
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return 'Camera access is not supported by this browser.';
+  if (!navigator?.mediaDevices?.getUserMedia) {
+    return 'Camera access is not supported by this browser. Manual entry and USB scanners still work.';
   }
   return null;
 }
@@ -26,6 +22,11 @@ interface BarcodeScannerModalProps {
   title?: string;
 }
 
+interface VideoDevice {
+  deviceId: string;
+  label: string;
+}
+
 export function BarcodeScannerModal({
   isOpen,
   onClose,
@@ -35,154 +36,375 @@ export function BarcodeScannerModal({
   const [manualCode, setManualCode] = useState('');
   const [isScanning, setIsScanning] = useState(false);
   const [cameraError, setCameraError] = useState('');
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const controlsRef = useRef<IScannerControls | null>(null);
-  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [statusMessage, setStatusMessage] = useState('Initializing camera...');
+  const [devices, setDevices] = useState<VideoDevice[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+  const [imageScanning, setImageScanning] = useState(false);
 
-  const stopScanning = useCallback(() => {
-    if (controlsRef.current) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isScanningRef = useRef<boolean>(false);
+  const timerRef = useRef<any>(null);
+  const zxingReaderRef = useRef<any>(null);
+
+  const playBeep = useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1850, ctx.currentTime);
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.12);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.12);
+    } catch {
+      // Audio playback might be restricted without user interaction
+    }
+  }, []);
+
+  const stopStream = useCallback(() => {
+    isScanningRef.current = false;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    if (streamRef.current) {
       try {
-        controlsRef.current.stop();
+        streamRef.current.getTracks().forEach((t) => t.stop());
       } catch {
         // ignore
       }
-      controlsRef.current = null;
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     setIsScanning(false);
   }, []);
 
-  const startScanning = useCallback(async () => {
-    setCameraError('');
-    setIsScanning(true);
+  const handleBarcodeFound = useCallback(
+    (code: string) => {
+      const trimmed = code.trim();
+      if (!trimmed) return;
+      playBeep();
+      stopStream();
+      onScan(trimmed);
+      onClose();
+    },
+    [onScan, onClose, playBeep, stopStream]
+  );
 
-    try {
-      const unavailableReason = getCameraUnavailableReason();
-      if (unavailableReason) {
-        setCameraError(unavailableReason);
-        setIsScanning(false);
-        return;
+  // Initialize or decode from video frames
+  const runDetectionLoop = useCallback(
+    async (stream: MediaStream) => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      isScanningRef.current = true;
+      setIsScanning(true);
+      setStatusMessage('Align barcode inside the green target box');
+
+      // Check for native BarcodeDetector API (built into modern Chrome, Safari, Android)
+      const hasNativeBarcodeDetector = 'BarcodeDetector' in window;
+      let nativeDetector: any = null;
+
+      if (hasNativeBarcodeDetector) {
+        try {
+          const supported = await (window as any).BarcodeDetector.getSupportedFormats?.();
+          const desired = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'itf', 'qr_code'];
+          const formats = Array.isArray(supported) ? desired.filter((f) => supported.includes(f)) : desired;
+          nativeDetector = new (window as any).BarcodeDetector({ formats });
+        } catch (e) {
+          console.warn('Native BarcodeDetector initialization warning:', e);
+          nativeDetector = null;
+        }
       }
 
-      if (!readerRef.current) {
-        const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
-          import('@zxing/browser'),
-          import('@zxing/library'),
-        ]);
+      // If native detector isn't available, lazy load ZXing library
+      let zxingModules: any = null;
+      let canvas: HTMLCanvasElement | null = null;
+      let ctx: CanvasRenderingContext2D | null = null;
 
-        // Restricting formats to the ones retail products actually carry makes each
-        // decode attempt cheaper and removes false reads from unrelated symbologies.
-        const hints = new Map<number, unknown>([
-          [
-            DecodeHintType.POSSIBLE_FORMATS,
+      if (!nativeDetector) {
+        try {
+          const zxing = await import('@zxing/library');
+          const hints = new Map<number, unknown>([
             [
-              BarcodeFormat.EAN_13,
-              BarcodeFormat.EAN_8,
-              BarcodeFormat.UPC_A,
-              BarcodeFormat.UPC_E,
-              BarcodeFormat.CODE_128,
-              BarcodeFormat.CODE_39,
-              BarcodeFormat.ITF,
-              BarcodeFormat.CODABAR,
-              BarcodeFormat.QR_CODE,
+              zxing.DecodeHintType.POSSIBLE_FORMATS,
+              [
+                zxing.BarcodeFormat.EAN_13,
+                zxing.BarcodeFormat.EAN_8,
+                zxing.BarcodeFormat.UPC_A,
+                zxing.BarcodeFormat.UPC_E,
+                zxing.BarcodeFormat.CODE_128,
+                zxing.BarcodeFormat.CODE_39,
+                zxing.BarcodeFormat.ITF,
+                zxing.BarcodeFormat.QR_CODE,
+              ],
             ],
-          ],
-          [DecodeHintType.TRY_HARDER, true],
-        ]);
+            [zxing.DecodeHintType.TRY_HARDER, true],
+          ]);
+          const reader = new zxing.MultiFormatReader();
+          reader.setHints(hints);
+          zxingReaderRef.current = reader;
+          zxingModules = zxing;
 
-        readerRef.current = new BrowserMultiFormatReader(hints as any, {
-          delayBetweenScanAttempts: 150,
-        });
+          canvas = document.createElement('canvas');
+          ctx = canvas.getContext('2d', { willReadFrequently: true });
+        } catch (err) {
+          console.error('Failed to load barcode decoder:', err);
+          setCameraError('Unable to load barcode reader engine. Please use manual entry or USB scanner.');
+          stopStream();
+          return;
+        }
       }
 
-      // Small delay to ensure the video DOM node is mounted and ready
-      await new Promise((r) => setTimeout(r, 100));
+      // Frame loop with safe readyState checking
+      const scanFrame = async () => {
+        if (!isScanningRef.current) return;
+        const currentVideo = videoRef.current;
 
-      if (!videoRef.current) {
-        setIsScanning(false);
-        return;
-      }
-
-      const scanCallback = (result: any) => {
-        if (result) {
-          const scannedCode = result.getText();
+        if (
+          currentVideo &&
+          currentVideo.readyState >= 2 &&
+          currentVideo.videoWidth > 0 &&
+          !currentVideo.paused &&
+          !currentVideo.ended
+        ) {
           try {
-            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.type = 'sine';
-            osc.frequency.setValueAtTime(1800, ctx.currentTime);
-            gain.gain.setValueAtTime(0.15, ctx.currentTime);
-            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start();
-            osc.stop(ctx.currentTime + 0.1);
-          } catch {
-            // audio context not allowed
+            if (nativeDetector) {
+              const detected = await nativeDetector.detect(currentVideo);
+              if (detected && detected.length > 0 && detected[0].rawValue) {
+                handleBarcodeFound(detected[0].rawValue);
+                return;
+              }
+            } else if (zxingModules && canvas && ctx && zxingReaderRef.current) {
+              canvas.width = currentVideo.videoWidth;
+              canvas.height = currentVideo.videoHeight;
+              ctx.drawImage(currentVideo, 0, 0, canvas.width, canvas.height);
+              const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const luminanceSource = new zxingModules.RGBLuminanceSource(
+                imgData.data,
+                canvas.width,
+                canvas.height
+              );
+              const binaryBitmap = new zxingModules.BinaryBitmap(
+                new zxingModules.HybridBinarizer(luminanceSource)
+              );
+              const result = zxingReaderRef.current.decode(binaryBitmap);
+              if (result && result.getText()) {
+                handleBarcodeFound(result.getText());
+                return;
+              }
+            }
+          } catch (e: any) {
+            // NotFoundException or normal non-match during video streaming is expected
           }
-          stopScanning();
-          onScan(scannedCode);
-          onClose();
+        }
+
+        if (isScanningRef.current) {
+          timerRef.current = setTimeout(scanFrame, 120);
         }
       };
 
-      let controls: IScannerControls;
-      try {
-        controls = await readerRef.current.decodeFromConstraints(
-          { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
-          videoRef.current,
-          scanCallback
-        );
-      } catch (firstErr) {
-        console.warn('Primary camera constraint failed, retrying with fallback:', firstErr);
-        controls = await readerRef.current.decodeFromConstraints(
-          { video: true },
-          videoRef.current,
-          scanCallback
-        );
+      // Start frame scanning loop
+      timerRef.current = setTimeout(scanFrame, 150);
+    },
+    [handleBarcodeFound, stopStream]
+  );
+
+  const startCamera = useCallback(
+    async (deviceIdToUse?: string) => {
+      stopStream();
+      setCameraError('');
+      setStatusMessage('Starting camera stream...');
+
+      const unavailableReason = getCameraUnavailableReason();
+      if (unavailableReason) {
+        setCameraError(unavailableReason);
+        return;
       }
 
-      controlsRef.current = controls;
+      try {
+        const constraints: MediaStreamConstraints = deviceIdToUse
+          ? {
+              video: {
+                deviceId: { exact: deviceIdToUse },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+            }
+          : {
+              video: {
+                facingMode: { ideal: 'environment' },
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+            };
+
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (firstErr) {
+          console.warn('Initial camera constraint failed, retrying with simple constraint:', firstErr);
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        }
+
+        streamRef.current = stream;
+
+        // Query available devices for the switcher
+        try {
+          const deviceList = await navigator.mediaDevices.enumerateDevices();
+          const videoInputs = deviceList
+            .filter((d) => d.kind === 'videoinput')
+            .map((d, idx) => ({
+              deviceId: d.deviceId,
+              label: d.label || `Camera ${idx + 1}`,
+            }));
+          setDevices(videoInputs);
+
+          const activeTrack = stream.getVideoTracks()[0];
+          const activeSettings = activeTrack?.getSettings?.();
+          if (activeSettings?.deviceId) {
+            setSelectedDeviceId(activeSettings.deviceId);
+          }
+        } catch {
+          // Device enumeration optional
+        }
+
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          video.muted = true;
+          video.playsInline = true;
+          await video.play().catch((playErr) => {
+            console.warn('video.play() failed:', playErr);
+          });
+        }
+
+        void runDetectionLoop(stream);
+      } catch (err: any) {
+        console.warn('Barcode camera startup error:', err);
+        setCameraError(
+          err?.name === 'NotAllowedError'
+            ? 'Camera permission denied. Please allow camera access in your browser address bar.'
+            : err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError'
+              ? 'No usable camera found on this device.'
+              : err?.name === 'NotReadableError'
+                ? 'Camera is in use by another program. Close it and try again.'
+                : 'Could not access camera. You can enter the barcode manually or upload an image.'
+        );
+        stopStream();
+      }
+    },
+    [runDetectionLoop, stopStream]
+  );
+
+  // Switch camera device
+  const handleDeviceChange = (deviceId: string) => {
+    setSelectedDeviceId(deviceId);
+    void startCamera(deviceId);
+  };
+
+  // Upload & scan barcode image
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImageScanning(true);
+    setCameraError('');
+
+    try {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = objectUrl;
+      });
+
+      // Try native BarcodeDetector first
+      let foundBarcode: string | null = null;
+      if ('BarcodeDetector' in window) {
+        try {
+          const detector = new (window as any).BarcodeDetector({
+            formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code'],
+          });
+          const results = await detector.detect(img);
+          if (results && results.length > 0 && results[0].rawValue) {
+            foundBarcode = results[0].rawValue;
+          }
+        } catch {
+          // Fall back to ZXing
+        }
+      }
+
+      if (!foundBarcode) {
+        const zxing = await import('@zxing/library');
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth || img.width;
+        canvas.height = img.naturalHeight || img.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const luminanceSource = new zxing.RGBLuminanceSource(imgData.data, canvas.width, canvas.height);
+          const binaryBitmap = new zxing.BinaryBitmap(new zxing.HybridBinarizer(luminanceSource));
+          const reader = new zxing.MultiFormatReader();
+          const result = reader.decode(binaryBitmap);
+          if (result && result.getText()) {
+            foundBarcode = result.getText();
+          }
+        }
+      }
+
+      URL.revokeObjectURL(objectUrl);
+
+      if (foundBarcode) {
+        handleBarcodeFound(foundBarcode);
+      } else {
+        setCameraError('No barcode was detected in this photo. Please try a clearer picture or enter manually.');
+      }
     } catch (err: any) {
-      console.warn('Barcode camera error:', err);
-      setCameraError(
-        err?.name === 'NotAllowedError'
-          ? 'Camera permission denied. Please allow camera access in your browser settings.'
-          : err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError'
-            ? 'No usable camera was found on this device.'
-            : err?.name === 'NotReadableError'
-              ? 'The camera is already in use by another app. Close it and try again.'
-              : 'Could not start camera. You can enter the barcode manually below.'
-      );
-      setIsScanning(false);
+      console.warn('Image barcode detection error:', err);
+      setCameraError('Could not decode barcode from this photo. Please enter manually.');
+    } finally {
+      setImageScanning(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
-  }, [onScan, onClose, stopScanning]);
+  };
 
   useEffect(() => {
     if (isOpen) {
       setManualCode('');
       setCameraError('');
-      // Auto-start camera when modal opens
-      void startScanning();
+      void startCamera();
       setTimeout(() => {
         inputRef.current?.focus();
-      }, 200);
+      }, 250);
     } else {
-      stopScanning();
+      stopStream();
     }
     return () => {
-      stopScanning();
+      stopStream();
     };
-  }, [isOpen, startScanning, stopScanning]);
+  }, [isOpen, startCamera, stopStream]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = manualCode.trim();
     if (trimmed) {
-      stopScanning();
-      onScan(trimmed);
-      onClose();
+      handleBarcodeFound(trimmed);
     }
   };
 
@@ -208,7 +430,7 @@ export function BarcodeScannerModal({
       <div
         style={{
           backgroundColor: '#ffffff',
-          borderRadius: '8px',
+          borderRadius: '10px',
           boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 10px 10px -5px rgba(0, 0, 0, 0.1)',
           width: '100%',
           maxWidth: '480px',
@@ -226,11 +448,12 @@ export function BarcodeScannerModal({
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
+            backgroundColor: '#f8fafc',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <IconBarcode size={20} color="#2563eb" />
-            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>{title}</h3>
+            <IconBarcode size={22} color="#2563eb" />
+            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600, color: '#0f172a' }}>{title}</h3>
           </div>
           <button
             type="button"
@@ -240,8 +463,10 @@ export function BarcodeScannerModal({
               cursor: 'pointer',
               color: '#64748b',
               padding: '0.25rem',
+              borderRadius: '4px',
             }}
             onClick={onClose}
+            aria-label="Close"
           >
             <IconClose size={20} />
           </button>
@@ -255,9 +480,9 @@ export function BarcodeScannerModal({
               style={{
                 position: 'relative',
                 width: '100%',
-                height: 240,
-                backgroundColor: '#0f172a',
-                borderRadius: '6px',
+                height: 250,
+                backgroundColor: '#090d16',
+                borderRadius: '8px',
                 overflow: 'hidden',
                 display: 'flex',
                 alignItems: 'center',
@@ -277,6 +502,7 @@ export function BarcodeScannerModal({
                 }}
               />
 
+              {/* Viewfinder Target Reticle */}
               {isScanning && !cameraError && (
                 <div
                   style={{
@@ -285,57 +511,133 @@ export function BarcodeScannerModal({
                     left: '12%',
                     right: '12%',
                     bottom: '20%',
-                    border: '2px dashed #22c55e',
-                    borderRadius: 4,
-                    boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.35)',
+                    border: '2px solid #22c55e',
+                    borderRadius: 6,
+                    boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.4)',
                     pointerEvents: 'none',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                   }}
                 >
+                  {/* Animated Laser Scan Line */}
                   <div
                     style={{
                       width: '90%',
                       height: '2px',
                       backgroundColor: '#22c55e',
-                      opacity: 0.8,
-                      boxShadow: '0 0 8px #22c55e',
+                      boxShadow: '0 0 10px #22c55e',
                     }}
                   />
                 </div>
               )}
 
+              {/* Overlay / Fallback Message */}
               {(!isScanning || cameraError) && (
-                <div style={{ padding: '1.5rem', color: '#94a3b8' }}>
-                  <IconCamera size={36} color="#64748b" style={{ margin: '0 auto 0.5rem', display: 'block' }} />
-                  <p style={{ margin: 0, fontSize: '0.85rem' }}>
+                <div style={{ padding: '1.5rem', color: '#94a3b8', maxWidth: '380px' }}>
+                  <IconCamera size={38} color="#64748b" style={{ margin: '0 auto 0.75rem', display: 'block' }} />
+                  <p style={{ margin: 0, fontSize: '0.85rem', color: cameraError ? '#ef4444' : '#94a3b8' }}>
                     {cameraError || 'Camera paused.'}
                   </p>
                 </div>
               )}
+
+              {/* Status Pill */}
+              {isScanning && !cameraError && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    bottom: '8px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    backgroundColor: 'rgba(15, 23, 42, 0.8)',
+                    color: '#ffffff',
+                    padding: '3px 10px',
+                    borderRadius: '12px',
+                    fontSize: '0.75rem',
+                    pointerEvents: 'none',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {statusMessage}
+                </div>
+              )}
             </div>
 
-            <div style={{ marginTop: '0.5rem', display: 'flex', justifyContent: 'center', gap: '0.5rem' }}>
-              {isScanning ? (
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
-                  onClick={stopScanning}
+            {/* Controls under camera: Camera switcher & pause */}
+            <div
+              style={{
+                marginTop: '0.65rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '0.5rem',
+                flexWrap: 'wrap',
+              }}
+            >
+              {/* Device Selector if multiple cameras exist */}
+              {devices.length > 1 && (
+                <select
+                  value={selectedDeviceId}
+                  onChange={(e) => handleDeviceChange(e.target.value)}
+                  style={{
+                    fontSize: '0.78rem',
+                    padding: '0.25rem 0.5rem',
+                    borderRadius: '4px',
+                    border: '1px solid #cbd5e1',
+                    backgroundColor: '#f8fafc',
+                    color: '#334155',
+                    maxWidth: '180px',
+                  }}
+                  title="Choose Camera"
                 >
-                  Pause Camera
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn btn-outline btn-sm"
-                  style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
-                  onClick={() => void startScanning()}
-                >
-                  <IconCamera size={14} /> Resume Camera
-                </button>
+                  {devices.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
               )}
+
+              <div style={{ display: 'flex', gap: '0.5rem', marginLeft: 'auto' }}>
+                {/* Upload Image Option */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: 'none' }}
+                  onChange={handleImageUpload}
+                />
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  style={{ fontSize: '0.78rem', padding: '0.3rem 0.65rem' }}
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={imageScanning}
+                >
+                  {imageScanning ? 'Scanning photo...' : 'Upload Photo'}
+                </button>
+
+                {isScanning ? (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.65rem' }}
+                    onClick={stopStream}
+                  >
+                    Pause
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.65rem' }}
+                    onClick={() => void startCamera(selectedDeviceId)}
+                  >
+                    <IconCamera size={13} /> Resume
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -355,8 +657,9 @@ export function BarcodeScannerModal({
                 backgroundColor: '#ffffff',
                 padding: '0 0.5rem',
                 color: '#64748b',
-                fontSize: '0.75rem',
+                fontSize: '0.72rem',
                 fontWeight: 600,
+                letterSpacing: '0.04em',
               }}
             >
               OR ENTER BARCODE MANUALLY
@@ -365,7 +668,7 @@ export function BarcodeScannerModal({
 
           {/* Manual Entry */}
           <form onSubmit={handleManualSubmit}>
-            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem' }}>
               <input
                 ref={inputRef}
                 type="text"
@@ -378,7 +681,7 @@ export function BarcodeScannerModal({
               <button
                 type="submit"
                 className="btn btn-primary"
-                style={{ padding: '0.55rem 1rem' }}
+                style={{ padding: '0.55rem 1.1rem' }}
                 disabled={!manualCode.trim()}
               >
                 <IconSearch size={16} /> Enter
@@ -386,8 +689,8 @@ export function BarcodeScannerModal({
             </div>
           </form>
 
-          <p style={{ color: '#64748b', fontSize: '0.75rem', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
-            Tip: Point the barcode at your webcam or phone camera. USB barcode scanners work automatically without opening this window.
+          <p style={{ color: '#64748b', fontSize: '0.74rem', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
+            💡 <strong>Hardware Scanners:</strong> USB and Bluetooth barcode scanners automatically type into search and POS without opening this modal.
           </p>
         </div>
       </div>

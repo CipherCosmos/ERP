@@ -79,6 +79,22 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, name, address, phone
 	}
 	st.ID = id
 
+	// Turning a shop into a godown would strand its counters: they would still
+	// exist, still carry an invoice series, and no longer be allowed to bill.
+	// Retiring them is a deliberate act, so it is asked for rather than done
+	// silently here.
+	if locationType != domain.LocationStore {
+		terminals, err := s.repo.ListTerminals(ctx, s.db, id)
+		if err != nil {
+			return domain.Store{}, fmt.Errorf("load terminals: %w", err)
+		}
+		if len(terminals) > 0 {
+			return domain.Store{}, fmt.Errorf(
+				"%w: %s still has %d billing counter(s); retire them before making it a %s",
+				domain.ErrValidation, name, len(terminals), locationType)
+		}
+	}
+
 	found, err := s.repo.Update(ctx, s.db, st)
 	if err != nil {
 		return domain.Store{}, fmt.Errorf("update store: %w", err)
@@ -109,7 +125,21 @@ func (s *Service) ListTerminals(ctx context.Context, storeID uuid.UUID) ([]domai
 // RegisterTerminal adds a billing counter to a store. The code becomes part of
 // every invoice number the counter issues, so it cannot be changed afterwards
 // without breaking the series.
+//
+// A godown cannot have one. Goods are sold from shops only, so a counter in a
+// godown is a counter that can never legitimately bill; refusing it here stops
+// the bad state being created rather than catching it at the till.
 func (s *Service) RegisterTerminal(ctx context.Context, storeID uuid.UUID, code, name string) (domain.Terminal, error) {
+	location, err := s.repo.Get(ctx, s.db, storeID)
+	if err != nil {
+		return domain.Terminal{}, fmt.Errorf("load store: %w", err)
+	}
+	if location.LocationType != domain.LocationStore {
+		return domain.Terminal{}, fmt.Errorf(
+			"%w: %s is a %s, and only a shop can have a billing counter",
+			domain.ErrValidation, location.Name, location.LocationType)
+	}
+
 	t, err := domain.NewTerminal(storeID, code, name)
 	if err != nil {
 		return domain.Terminal{}, err

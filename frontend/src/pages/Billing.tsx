@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi, stockApi } from '../services/api';
+import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi, stockApi, terminalApi } from '../services/api';
 import {
   enqueuePendingInvoice,
   flushPendingInvoiceQueue,
@@ -24,20 +24,38 @@ import { Product, Customer } from '../types';
 
 interface ExtendedProduct extends Product {
   stock?: number;
+  uom_name?: string;
 }
 
+/**
+ * One line on the bill: a product sold *by a particular unit*.
+ *
+ * A sack and a loose kilo of the same rice are two different lines at two
+ * different rates, which is why `lineKey` keys on the unit as well as the
+ * product. Keying on the product alone merges them and one rate silently wins.
+ *
+ * `quantity` counts selling units — 2 sacks, not 50 kg — and `rate` is the
+ * price of one of them, so the line total stays a multiplication. The server
+ * converts to the base unit using the unit's own size.
+ */
 interface CartEntry {
   product: ExtendedProduct;
+  /** The product unit this line sells by. Absent means the product's default. */
+  unitId?: string;
+  unitLabel: string;
   quantity: number;
   rate: number;
   discount: number;
-  unitLabel?: string;
-  unitMultiplier?: number;
+}
+
+/** Identity of a bill line. Two units of one product are two lines. */
+function lineKey(productId: string, unitId?: string): string {
+  return `${productId}::${unitId ?? 'default'}`;
 }
 
 export default function Billing() {
   const navigate = useNavigate();
-  const { user, store } = useAppStore();
+  const { user, store, terminal, setTerminal } = useAppStore();
 
   const [products, setProducts] = useState<ExtendedProduct[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -129,13 +147,18 @@ export default function Billing() {
   // Listen to global layout barcode event
   useEffect(() => {
     const handleGlobalScan = (e: any) => {
-      if (e.detail?.barcode) {
-        handleBarcodeScanned(e.detail.barcode);
+      const code = e.detail?.barcode || e.detail?.code;
+      if (code) {
+        handleBarcodeScanned(code);
       }
     };
     window.addEventListener('gbos-barcode-scan', handleGlobalScan);
-    return () => window.removeEventListener('gbos-barcode-scan', handleGlobalScan);
-  }, [products]);
+    window.addEventListener('gbos:barcode-scanned', handleGlobalScan);
+    return () => {
+      window.removeEventListener('gbos-barcode-scan', handleGlobalScan);
+      window.removeEventListener('gbos:barcode-scanned', handleGlobalScan);
+    };
+  }, [products, store]);
 
   // Keyboard shortcut listener (F2, F4, F8, F9, Esc)
   useEffect(() => {
@@ -174,6 +197,20 @@ export default function Billing() {
       console.warn('Load customers failed:', err);
     }
   };
+
+  useEffect(() => {
+    if (store && !terminal) {
+      terminalApi
+        .list(store.id)
+        .then(({ data: terms }) => {
+          const active = (terms || []).find((t) => t.is_active) || terms?.[0];
+          if (active) {
+            setTerminal(active);
+          }
+        })
+        .catch((e) => console.warn('Could not load terminals:', e));
+    }
+  }, [store, terminal, setTerminal]);
 
   // Selected customer details
   const selectedCustomer = useMemo(() => {
@@ -241,8 +278,28 @@ export default function Billing() {
           wholesale_sell_price: data.wholesale_sell_price,
           brand: data.brand,
         };
-        const packingQty = Number(data.packing_qty) || 1;
-        addProductToCart(prod, packingQty, data.packing_label);
+        // The server says which unit this barcode identified and what that
+        // unit costs in this store. A sack's barcode must bill a sack at the
+        // sack's rate — reading the product's own price here would charge the
+        // loose rate for a bulk pack, which is the opposite of the trade.
+        const scannedUnit = data.scanned_unit;
+        if (scannedUnit?.id && data.scanned_has_price) {
+          addProductToCart(prod, 1, {
+            id: scannedUnit.id,
+            label: scannedUnit.label || 'Piece',
+            rate: Number(data.scanned_price?.sell_price) || 0,
+            wholesaleRate: Number(data.scanned_price?.wholesale_sell_price) || 0,
+          });
+        } else if (scannedUnit?.id && !data.scanned_has_price) {
+          // An unpriced pack must be refused, not sold at zero: a free item and
+          // one nobody has priced look identical otherwise.
+          alert(
+            `${data.name} has no price set for the ${scannedUnit.label || 'scanned unit'} in this shop. Set its price before selling it.`
+          );
+          return;
+        } else {
+          addProductToCart(prod, 1);
+        }
         setSearchInput('');
         setSearchResults([]);
         return;
@@ -255,49 +312,79 @@ export default function Billing() {
     setSearchInput('');
   };
 
-  const addProductToCart = (product: ExtendedProduct, qty = 1, unitLabel?: string) => {
-    const rate = useWholesalePrices && (product.wholesale_sell_price ?? 0) > 0
-      ? product.wholesale_sell_price!
-      : product.sell_price;
+  /**
+   * Puts a product on the bill by a given unit.
+   *
+   * `unit` comes from a barcode scan, which tells us exactly which pack was
+   * scanned and what that pack costs here. Without it the line is sold by the
+   * product's default unit at the product's own price, which is what the server
+   * assumes when no unit is named.
+   */
+  const addProductToCart = (
+    product: ExtendedProduct,
+    qty = 1,
+    unit?: { id: string; label: string; rate: number; wholesaleRate?: number }
+  ) => {
+    const rate = unit
+      ? useWholesalePrices && (unit.wholesaleRate ?? 0) > 0
+        ? unit.wholesaleRate!
+        : unit.rate
+      : useWholesalePrices && (product.wholesale_sell_price ?? 0) > 0
+        ? product.wholesale_sell_price!
+        : product.sell_price;
+
+    const key = lineKey(product.id, unit?.id);
 
     setCart((prev) => {
-      const existingIdx = prev.findIndex((entry) => entry.product.id === product.id);
+      const existingIdx = prev.findIndex(
+        (entry) => lineKey(entry.product.id, entry.unitId) === key
+      );
       if (existingIdx >= 0) {
         const copy = [...prev];
-        copy[existingIdx].quantity += qty;
+        copy[existingIdx] = { ...copy[existingIdx], quantity: copy[existingIdx].quantity + qty };
         return copy;
       }
       return [
         ...prev,
         {
           product,
+          unitId: unit?.id,
+          unitLabel: unit?.label || 'Piece',
           quantity: qty,
           rate,
           discount: 0,
-          unitLabel: unitLabel || 'Piece',
         },
       ];
     });
   };
 
-  const updateQuantity = (productId: string, newQty: number) => {
+  // All three take the line's key rather than a product id: the same product
+  // can be on the bill twice, once as a sack and once loose, and editing one
+  // must not edit the other.
+  const updateQuantity = (key: string, newQty: number) => {
     if (newQty <= 0) {
-      removeFromCart(productId);
+      removeFromCart(key);
       return;
     }
     setCart((prev) =>
-      prev.map((item) => (item.product.id === productId ? { ...item, quantity: newQty } : item))
+      prev.map((item) =>
+        lineKey(item.product.id, item.unitId) === key ? { ...item, quantity: newQty } : item
+      )
     );
   };
 
-  const updateDiscount = (productId: string, discount: number) => {
+  const updateDiscount = (key: string, discount: number) => {
     setCart((prev) =>
-      prev.map((item) => (item.product.id === productId ? { ...item, discount: Math.max(0, discount) } : item))
+      prev.map((item) =>
+        lineKey(item.product.id, item.unitId) === key
+          ? { ...item, discount: Math.max(0, discount) }
+          : item
+      )
     );
   };
 
-  const removeFromCart = (productId: string) => {
-    setCart((prev) => prev.filter((item) => item.product.id !== productId));
+  const removeFromCart = (key: string) => {
+    setCart((prev) => prev.filter((item) => lineKey(item.product.id, item.unitId) !== key));
   };
 
   const clearActiveCart = () => {
@@ -401,7 +488,28 @@ export default function Billing() {
 
     setIsProcessing(true);
 
+    let currentTerminalId = terminal?.id;
+    if (!currentTerminalId && store) {
+      try {
+        const { data: terms } = await terminalApi.list(store.id);
+        const active = (terms || []).find((t) => t.is_active) || terms?.[0];
+        if (active) {
+          currentTerminalId = active.id;
+          setTerminal(active);
+        }
+      } catch (e) {
+        console.warn('Terminal check failed:', e);
+      }
+    }
+
+    if (!currentTerminalId) {
+      alert('Billing error: No active counter terminal configured for this shop.');
+      setIsProcessing(false);
+      return;
+    }
+
     const invoicePayload = {
+      terminal_id: currentTerminalId,
       store_id: store.id,
       customer_id: selectedCustomerId || undefined,
       invoice_date: new Date().toISOString(),
@@ -414,9 +522,14 @@ export default function Billing() {
       total: grandTotal,
       status: 'completed',
       payment_mode: paymentMode,
+      round_total: true,
+      // product_unit_id names which pack is leaving; unit_qty counts packs, not
+      // base units. Omitting the unit makes the server fall back to the
+      // product's default, so a sack would bill as a loose kilo.
       items: cart.map((item) => ({
         product_id: item.product.id,
-        quantity: item.quantity,
+        ...(item.unitId ? { product_unit_id: item.unitId } : {}),
+        unit_qty: item.quantity,
         rate: item.rate,
         discount: item.discount,
         total: item.rate * item.quantity - item.discount,
@@ -442,14 +555,15 @@ export default function Billing() {
         });
       }
 
-      setLastInvoice(invoice);
+      const createdInvoice = (invoice as any)?.invoice || invoice;
+      setLastInvoice(createdInvoice);
       setCart([]);
       setSelectedCustomerId('');
       setPaymentMode('cash');
       setSplitCash(0);
       setSplitUpi(0);
       setSplitCredit(0);
-      alert(`Sale completed successfully! Invoice #${invoice.invoice_no}`);
+      alert(`Sale completed successfully! Invoice #${createdInvoice.invoice_no || createdInvoice.id}`);
     } catch (err: any) {
       console.warn('Checkout network failure, saving offline:', err);
       // Fallback: Queue invoice locally for offline sync
@@ -684,7 +798,7 @@ export default function Billing() {
                     cart.map((item, idx) => {
                       const lineTotal = item.rate * item.quantity - item.discount;
                       return (
-                        <tr key={item.product.id}>
+                        <tr key={lineKey(item.product.id, item.unitId)}>
                           <td className="text-mono" style={{ color: 'var(--text-muted)' }}>{idx + 1}</td>
                           <td>
                             <div style={{ fontWeight: 600 }}>{item.product.name}</div>
@@ -706,7 +820,7 @@ export default function Billing() {
                                 type="button"
                                 className="btn btn-outline btn-sm"
                                 style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem' }}
-                                onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
+                                onClick={() => updateQuantity(lineKey(item.product.id, item.unitId), item.quantity - 1)}
                               >
                                 -
                               </button>
@@ -715,13 +829,13 @@ export default function Billing() {
                                 className="form-input text-mono"
                                 style={{ width: 60, padding: '0.2rem', textAlign: 'center' }}
                                 value={item.quantity}
-                                onChange={(e) => updateQuantity(item.product.id, parseFloat(e.target.value) || 0)}
+                                onChange={(e) => updateQuantity(lineKey(item.product.id, item.unitId), parseFloat(e.target.value) || 0)}
                               />
                               <button
                                 type="button"
                                 className="btn btn-outline btn-sm"
                                 style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem' }}
-                                onClick={() => updateQuantity(item.product.id, item.quantity + 1)}
+                                onClick={() => updateQuantity(lineKey(item.product.id, item.unitId), item.quantity + 1)}
                               >
                                 +
                               </button>
@@ -734,7 +848,7 @@ export default function Billing() {
                               style={{ width: 75, padding: '0.2rem', textAlign: 'right' }}
                               value={item.discount || ''}
                               placeholder="0"
-                              onChange={(e) => updateDiscount(item.product.id, parseFloat(e.target.value) || 0)}
+                              onChange={(e) => updateDiscount(lineKey(item.product.id, item.unitId), parseFloat(e.target.value) || 0)}
                             />
                           </td>
                           <td className="text-center text-mono" style={{ fontSize: '0.8rem' }}>
@@ -746,7 +860,7 @@ export default function Billing() {
                           <td className="text-center">
                             <button
                               type="button"
-                              onClick={() => removeFromCart(item.product.id)}
+                              onClick={() => removeFromCart(lineKey(item.product.id, item.unitId))}
                               style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer' }}
                               title="Remove item"
                             >

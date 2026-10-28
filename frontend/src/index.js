@@ -12,17 +12,12 @@ root.render(
   </React.StrictMode>
 );
 
-// Register the service worker for offline-first capabilities.
-// In production this is enabled by default.
-// To also enable in development, pass { enableInDev: true }.
-serviceWorkerRegistration.register({
-  onSuccess: (registration) => {
-    console.log('GBOS service worker registered successfully', registration);
-  },
-  onUpdate: (registration) => {
-    console.log('GBOS service worker updated', registration);
-  },
-  onOffline: () => {
-    console.log('GBOS app is running in offline mode');
-  },
-});
+// Unregister service workers in development to prevent stale caching issues
+serviceWorkerRegistration.unregister();
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    for (const registration of registrations) {
+      registration.unregister();
+    }
+  });
+}

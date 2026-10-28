@@ -18,6 +18,7 @@ import (
 	"gbos/internal/domain/money"
 	"gbos/internal/domain/reconcile"
 	stockdomain "gbos/internal/domain/stock"
+	storedomain "gbos/internal/domain/store"
 	platform "gbos/internal/platform/postgres"
 	repo "gbos/internal/repo/postgres"
 
@@ -725,23 +726,39 @@ func (s *Service) recordExceptions(ctx context.Context, tx platform.Tx,
 	return nil
 }
 
-// terminalCode resolves the counter's code for the invoice number.
+// terminalCode resolves the counter's code for the invoice number, and is the
+// one chokepoint every sale passes through.
 //
 // The store is part of the lookup, not just the terminal id. Terminal codes
 // are unique per store, so borrowing another shop's terminal would open a
 // counter row under this store keyed to their id and stamp their code onto
 // this store's invoice series.
+//
+// The location type is checked here for the same reason: goods are sold from
+// shops only, never from a godown, and every sale needs a terminal. Guarding
+// the terminal lookup therefore guards billing as a whole, rather than leaving
+// each caller to remember. Stock still moves to and from a godown freely —
+// that is a transfer, not a sale.
 func (s *Service) terminalCode(ctx context.Context, tx platform.Tx, storeID, terminalID uuid.UUID) (string, error) {
 	var code string
+	var locationType storedomain.LocationType
 	err := tx.QueryRowContext(ctx,
-		`SELECT code FROM terminals WHERE id = $1 AND store_id = $2 AND is_active`,
-		terminalID, storeID).Scan(&code)
+		`SELECT t.code, s.location_type
+		   FROM terminals t
+		   JOIN stores s ON s.id = t.store_id
+		  WHERE t.id = $1 AND t.store_id = $2 AND t.is_active`,
+		terminalID, storeID).Scan(&code, &locationType)
 	if err != nil {
 		mapped := platform.MapError(err)
 		if errors.Is(mapped, platform.ErrNotFound) {
 			return "", fmt.Errorf("%w: no active terminal %s in this store", domain.ErrValidation, terminalID)
 		}
 		return "", fmt.Errorf("load terminal: %w", mapped)
+	}
+	if locationType != storedomain.LocationStore {
+		return "", fmt.Errorf(
+			"%w: this location is a %s, and goods are sold from shops only — transfer the stock to a shop first",
+			domain.ErrValidation, locationType)
 	}
 	return code, nil
 }
