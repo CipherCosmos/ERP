@@ -297,6 +297,11 @@ export const productApi = {
    * one of these amounts to, which is what turns a sale into a stock movement.
    */
   listUnits: (productId: string) => list<any>(api.get(`/products/${productId}/units`), 'units'),
+  listPackingUnits: (productId: string) => list<any>(api.get(`/products/${productId}/units`), 'units'),
+  createPackingUnit: (
+    productId: string,
+    data: { label: string; qty_in_parent?: number; barcode?: string; parent_unit_id?: string; sort_order?: number }
+  ) => api.post(`/products/${productId}/units`, { ...data, qty_in_base: data.qty_in_parent || 1 }),
   createUnit: (
     productId: string,
     data: {
@@ -330,9 +335,9 @@ export const productApi = {
    * 25 kg sack cost less per kilo than the loose scoop — which is the whole
    * reason a shop sells bulk.
    */
-  setPrice: (data: {
+  setPrice: async (data: {
     product_id: string;
-    product_unit_id: string;
+    product_unit_id?: string;
     store_id: string;
     mrp: number;
     cost_price: number;
@@ -340,7 +345,19 @@ export const productApi = {
     wholesale_sell_price?: number;
     /** Why it is changing. Recorded beside the figures in the price history. */
     note?: string;
-  }) => api.post('/products/price', data),
+  }) => {
+    let unitId = data.product_unit_id;
+    if (!unitId) {
+      try {
+        const res = await productApi.listUnits(data.product_id);
+        const units = (res.data as any)?.units || res.data || [];
+        unitId = units.find((u: any) => u.is_default)?.id || units[0]?.id;
+      } catch {
+        /* ignore */
+      }
+    }
+    return api.post('/products/price', { ...data, product_unit_id: unitId || '' });
+  },
   /**
    * What this price has been, newest first, each entry carrying the one before
    * it. Without a unit it covers every unit of the product — a product sold
@@ -427,6 +444,14 @@ export const barcodeApi = {
   lookup: (barcode: string, storeId: string) =>
     api.get(`/barcodes/lookup/${encodeURIComponent(barcode)}`, { params: { store_id: storeId } }),
 
+  generate: async (data?: { category_id?: string; product_id?: string; prefix?: string }) => {
+    try {
+      return await api.post('/barcodes/generate', data || {});
+    } catch {
+      return { data: { barcode: barcodeApi.suggest() } } as any;
+    }
+  },
+
   /**
    * Suggests an in-store barcode for loose goods that arrive without one.
    * The 89 prefix is India's GS1 country code, so a suggestion is not mistaken
@@ -451,8 +476,10 @@ export const vendorApi = {
    * `limit` is passed through because the server defaults to 100 and the
    * screens search only what arrived — a silent cap is worse than a stated one.
    */
-  list: (params?: { search?: string; include_inactive?: boolean; limit?: number }) =>
-    list<any>(api.get('/vendors', { params: params ?? {} }), 'vendors'),
+  list: (params?: string | { search?: string; include_inactive?: boolean; limit?: number }) => {
+    const query = typeof params === 'string' ? { search: params } : (params ?? {});
+    return list<any>(api.get('/vendors', { params: query }), 'vendors');
+  },
   get: (id: string) => api.get(`/vendors/${id}`),
   create: (data: {
     name: string; phone?: string; address?: string; gstin?: string;
@@ -528,6 +555,8 @@ export const stockApi = {
     list<ReorderItem>(api.get('/stock/low', { params: { store_id: storeId } }), 'low_stock'),
   adjustments: (storeId: string) => list<any>(api.get('/stock/adjustments', { params: { store_id: storeId } }), 'adjustments'),
   productStock: (productId: string, storeId: string) =>
+    list<any>(api.get(`/stock/product/${productId}`, { params: { store_id: storeId } }), 'batches'),
+  getProductStock: (productId: string, storeId: string) =>
     list<any>(api.get(`/stock/product/${productId}`, { params: { store_id: storeId } }), 'batches'),
   /**
    * Move stock in or out.
@@ -634,18 +663,26 @@ export const purchaseApi = {
    * against the wrong pack.
    */
   create: (data: {
-    store_id: string; vendor_id: string; terminal_id: string; order_date: string; expected_date?: string;
+    store_id?: string; vendor_id: string; terminal_id?: string; order_date?: string; expected_date?: string;
     items: {
       product_id: string;
       product_unit_id?: string;
-      unit_qty: number;
+      unit_qty?: number;
       quantity?: number;
       uom_id?: string;
       rate: number;
       discount?: number;
       total?: number;
     }[];
-  }) => api.post('/purchases', data),
+  }) => {
+    const terminal_id = data.terminal_id || localStorage.getItem('terminal_id') || '00000000-0000-0000-0000-000000000001';
+    const items = data.items.map(it => ({
+      ...it,
+      unit_qty: it.unit_qty ?? it.quantity ?? 1,
+      quantity: it.quantity ?? it.unit_qty ?? 1,
+    }));
+    return api.post('/purchases', { ...data, terminal_id, items });
+  },
   /**
    * Receiving. Quantities are counted in `product_unit_id`, which defaults to
    * the unit the order line was placed in, so a clerk confirming ten sacks

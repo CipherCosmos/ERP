@@ -47,6 +47,57 @@ rejects known placeholder secrets by name.
 The owner password comes from `GBOS_ADMIN_PASSWORD` if set; otherwise one is
 generated and printed once at startup, because nothing stores it in the clear.
 
+### Hot reload
+
+Both halves reload on save, so neither side needs a full build during
+development:
+
+```bash
+make backend-watch   # rebuilds and restarts the API on save (~1s)
+make frontend        # React Fast Refresh, already instant
+```
+
+`make frontend` has always hot-reloaded: `react-scripts start` ships Fast
+Refresh, which patches a changed component without losing its state. Editing
+something that is not a component — a service, a hook, a plain helper — falls
+back to a full page reload instead.
+
+`make backend-watch` adds the same loop to the API using
+[air](https://github.com/air-verse/air), configured in `backend/.air.toml`. It
+watches `cmd/`, `internal/` and `migrations/` for `.go` and `.sql` changes, so a
+new migration applies from the same save that writes it. Install it with:
+
+```bash
+go install github.com/air-verse/air@v1.67.4
+```
+
+Deliberately a standalone binary and **not** a `go.mod` tool dependency: `go get
+-tool` pulls air's own dependency tree into this module — Hugo among them — and
+upgrades production dependencies, `golang-jwt` included, as a side effect.
+
+`make backend` stays the documented way to start the API, and is what the
+deployment and the runbook use. `backend/tmp/` holds the binaries air rebuilds
+and is ignored.
+
+Two things the watcher does not do. A `touch` alone is ignored, because
+`exclude_unchanged` compares contents rather than timestamps. And a rebuild
+gives in-flight requests 5s to drain before it kills them, rather than the 15s
+the server allows itself — fine for development, never for a deployment, where
+that request is somebody's sale.
+
+### Scanning barcodes from a phone or tablet
+
+```bash
+make frontend-https   # self-signed cert, reachable on the LAN
+```
+
+Browsers expose `getUserMedia` only in a secure context, so the camera scanner
+is dead on a plain `http://192.168.x.x` address — `navigator.mediaDevices` is
+not merely blocked, it is absent. `make frontend` is fine on this machine, where
+`localhost` already counts as secure; testing the camera on a real counter
+device needs the HTTPS target above, and the device must be told to trust the
+certificate on first visit.
+
 ## How it is put together
 
 ```
@@ -279,6 +330,15 @@ line left open waiting for a replacement nobody promised. This is the documented
 convention and a test pins it. Some trades instead expect a short receipt to
 leave the order open; changing it would mean deciding what happens to the orders
 already closed under the current rule, so it stays until somebody needs it.
+
+**The camera barcode scanner needs HTTPS.** Browsers expose `getUserMedia` only
+in a secure context, so a counter tablet opening the app at `http://192.168.x.x`
+has no camera at all — `navigator.mediaDevices` is simply absent. The scanner
+says so explicitly rather than appearing broken, but the fix is to serve the app
+over HTTPS (or reach it on `localhost`). Manual entry and USB or Bluetooth
+handheld scanners work either way, which is why they are not hidden behind the
+camera button. Decoding itself uses `@zxing/browser`, imported on demand so the
+~450 kB decoder stays out of the bundle every shift start pays for.
 
 ## Licence
 

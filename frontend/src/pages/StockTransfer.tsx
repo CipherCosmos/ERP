@@ -1,13 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { auditApi, productApi, stockApi, storeApi, uomApi } from '../services/api';
-import { Store } from '../types';
-import { DataTable, Column } from '../components/DataTable';
-import { Modal } from '../components/Modal';
-import { Field, FormError, FormGrid, NumberInput, Select } from '../components/Form';
-import { badge, color, font, space, ui } from '../theme';
-import { formatDate, formatMoney, formatQty } from '../utils/format';
+import { storeApi, stockApi, productApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
+import { Store, Product } from '../types';
+import {
+  IconWarehouse,
+  IconTransfer,
+  IconPlus,
+  IconPrinter,
+  IconCheck,
+  IconAlert,
+  IconRefresh,
+} from '../components/Icons';
 
 interface StockItem {
   id: string;
@@ -15,111 +20,20 @@ interface StockItem {
   product_name?: string;
   batch_no: string;
   quantity: number;
-  /** Spoken for by an order already placed. The server refuses to move it. */
   reserved_qty: number;
   expiry_date: string | null;
   cost_price: number;
 }
 
-interface Product {
-  id: string;
-  name: string;
-  uom_id?: string;
-}
-
-interface Uom {
-  id: string;
-  code: string;
-}
-
-/** One row of the audit trail, which is where past transfers live. */
-interface AuditEntry {
-  id: string;
-  action: string;
-  table_name: string;
-  /** The store the request was authorised against — the source of the move. */
-  store_id: string;
-  username: string;
-  /** The request body, as JSON text. */
-  new_value: string;
-  created_at: string;
-}
-
-interface Transfer {
-  id: string;
-  at: string;
-  by: string;
-  from_store_id: string;
-  to_store_id: string;
+interface TransferLine {
   product_id: string;
+  product_name: string;
   batch_no: string;
-  quantity: number | null;
+  available_qty: number;
+  transfer_qty: number;
+  cost_price: number;
 }
 
-/** A batch is identified by its product and its batch number, not either alone. */
-function keyOf(item: Pick<StockItem, 'product_id' | 'batch_no'>): string {
-  return `${item.product_id}|${item.batch_no}`;
-}
-
-/** What may actually move: reserved stock belongs to an order already taken. */
-function availableOf(item: StockItem): number {
-  return (item.quantity || 0) - (item.reserved_qty || 0);
-}
-
-/**
- * A past transfer, read out of one audit row.
- *
- * The source is the row's own `store_id` — the store the request was authorised
- * against, which is where the stock actually left from. The `from_store_id` in
- * the recorded body is only what the client asked for, and the server does not
- * read it, so trusting it here would reprint the same mistake in the history.
- */
-function parseTransfer(entry: AuditEntry): Transfer {
-  let body: Record<string, unknown> = {};
-  try {
-    body = JSON.parse(entry.new_value || '{}') as Record<string, unknown>;
-  } catch {
-    body = {};
-  }
-  const text = (v: unknown) => (typeof v === 'string' ? v : '');
-  return {
-    id: entry.id,
-    at: entry.created_at,
-    by: entry.username,
-    from_store_id: entry.store_id,
-    to_store_id: text(body.to_store_id),
-    product_id: text(body.product_id),
-    batch_no: text(body.batch_no),
-    quantity: typeof body.quantity === 'number' ? body.quantity : null,
-  };
-}
-
-/**
- * Stock transfer, rebuilt on the shared table and dialog.
- *
- * What this screen moves is a batch, and the old one asked for it through a
- * `<select>` whose options were three fields glued together — "Basmati Rice |
- * Batch: GRN-0085c50c | Qty: 4". A dropdown cannot be searched, sorted or
- * scanned, so with four batches of the same rice on hand the only way to find
- * the right one was to read every option to the end. Below it, a hand-written
- * table repeated the same rows with no search and no sorting either, and every
- * quantity on the screen was a bare number: "4" of a product stocked in kg is
- * four kilos, and nothing said so.
- *
- * So the list *is* the picker now — one table, searchable and sortable, and
- * picking a row opens the dialog that moves it.
- *
- * Two things the old screen got wrong at the counter are fixed here. It checked
- * the quantity against the batch total while the server checks it against the
- * unreserved part, so a transfer of stock promised to an open order passed
- * every check the screen made and was refused afterwards, with the reason shown
- * nowhere near the field that caused it. And once a transfer went through there
- * was no record of it on the screen at all; the audit trail is now the second
- * view.
- *
- * The third thing is not fixed here because it cannot be, and saying so is the
- * next best thing — see the note beside the source store below.
- */
 export default function StockTransfer() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
@@ -127,99 +41,20 @@ export default function StockTransfer() {
   const [stores, setStores] = useState<Store[]>([]);
   const [fromStoreId, setFromStoreId] = useState('');
   const [toStoreId, setToStoreId] = useState('');
-  const [stockItems, setStockItems] = useState<StockItem[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [uoms, setUoms] = useState<Uom[]>([]);
-  const [history, setHistory] = useState<Transfer[]>([]);
-  const [historyBlocked, setHistoryBlocked] = useState(false);
 
-  const [view, setView] = useState<'stock' | 'history'>('stock');
-  const [movingKey, setMovingKey] = useState<string | null>(null);
-  const [quantity, setQuantity] = useState('');
-  const [transferring, setTransferring] = useState(false);
+  // Source Stock Items
+  const [availableStock, setAvailableStock] = useState<StockItem[]>([]);
+  const [productsMap, setProductsMap] = useState<Record<string, Product>>({});
   const [stockLoading, setStockLoading] = useState(false);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [pageError, setPageError] = useState<string | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
-  const loadStores = useCallback(async () => {
-    try {
-      const { data } = await storeApi.list();
-      setStores(data || []);
-      if (store) setFromStoreId(store.id);
-    } catch (err: any) {
-      setPageError(err?.response?.data?.error || 'Could not load the list of stores.');
-    }
-  }, [store]);
+  // Multi-item transfer lines
+  const [transferLines, setTransferLines] = useState<TransferLine[]>([]);
+  const [selectedStockKey, setSelectedStockKey] = useState('');
+  const [addQty, setAddQty] = useState(1);
 
-  // Takes the store as an argument and reads no state, so its identity never
-  // changes and the effect below cannot re-fire on it.
-  const loadStock = useCallback(async (storeId: string) => {
-    setStockLoading(true);
-    try {
-      const { data } = await stockApi.list(storeId);
-      // Only what is on a shelf: a zero row is a batch sold out, and offering
-      // it to move is offering nothing.
-      setStockItems(((data || []) as StockItem[]).filter((item) => item.quantity > 0));
-    } catch (err: any) {
-      setPageError(err?.response?.data?.error || 'Could not load stock for that store.');
-      setStockItems([]);
-    } finally {
-      setStockLoading(false);
-    }
-  }, []);
-
-  const loadProducts = useCallback(async () => {
-    if (!store) return;
-    try {
-      const { data } = await productApi.list({ store_id: store.id });
-      setProducts(data as unknown as Product[]);
-    } catch (err) {
-      console.error('Failed to load products:', err);
-    }
-  }, [store]);
-
-  // Units of measure are global, so this closes over nothing and keeps its
-  // identity across renders.
-  const loadUoms = useCallback(async () => {
-    try {
-      const { data } = await uomApi.list();
-      setUoms(data as Uom[]);
-    } catch (err) {
-      console.error('Failed to load units of measure:', err);
-    }
-  }, []);
-
-  /**
-   * Past transfers, read out of the audit trail.
-   *
-   * There is no transfers table: a transfer writes the two stock rows and one
-   * audit entry, and that entry — which carries the whole request body — is the
-   * only record that it happened. A screen that moves stock and then shows no
-   * sign of having moved it is worse than one built on the trail.
-   */
-  const loadHistory = useCallback(async () => {
-    if (!store) return;
-    setHistoryLoading(true);
-    try {
-      const { data } = await auditApi.list({ store_id: store.id, table: 'stock', limit: '200' });
-      setHistory(
-        (data as AuditEntry[])
-          // Both spellings: the route in service today records "transfer", the
-          // older handler recorded "stock_transfer", and rows of both survive.
-          .filter((e) => e.action === 'transfer' || e.action === 'stock_transfer')
-          .map(parseTransfer)
-      );
-      setHistoryBlocked(false);
-    } catch (err) {
-      // Reading the trail is an elevated permission on some roles. That is not
-      // a page failure — moving stock still works.
-      setHistoryBlocked(true);
-    } finally {
-      setHistoryLoading(false);
-    }
-  }, [store]);
+  // Completed Transfer Note
+  const [lastTransferNote, setLastTransferNote] = useState<any | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     if (!user) {
@@ -227,596 +62,401 @@ export default function StockTransfer() {
       return;
     }
     loadStores();
-    loadProducts();
-    loadUoms();
-    loadHistory();
-  }, [user, navigate, loadStores, loadProducts, loadUoms, loadHistory]);
+  }, [user]);
+
+  const loadStores = async () => {
+    try {
+      const { data } = await storeApi.list();
+      const list = (data as Store[]) || [];
+      setStores(list);
+      if (store) {
+        setFromStoreId(store.id);
+        const destination = list.find((s) => s.id !== store.id);
+        if (destination) setToStoreId(destination.id);
+      }
+    } catch (err) {
+      console.error('Failed to load stores:', err);
+    }
+  };
 
   useEffect(() => {
     if (fromStoreId) {
-      loadStock(fromStoreId);
+      loadSourceStock(fromStoreId);
     } else {
-      setStockItems([]);
+      setAvailableStock([]);
     }
-    setMovingKey(null);
-  }, [fromStoreId, loadStock]);
+  }, [fromStoreId]);
 
-  const unitById = useMemo(() => {
-    const codeFor: Record<string, string> = {};
-    uoms.forEach((u) => {
-      codeFor[u.id] = u.code;
-    });
-    const map: Record<string, string> = {};
-    products.forEach((p) => {
-      map[p.id] = p.uom_id ? (codeFor[p.uom_id] ?? '') : '';
-    });
-    return map;
-  }, [products, uoms]);
-
-  const productNameById = useMemo(() => {
-    const map: Record<string, string> = {};
-    products.forEach((p) => {
-      map[p.id] = p.name;
-    });
-    return map;
-  }, [products]);
-
-  const storeNameById = useMemo(() => {
-    const map: Record<string, string> = {};
-    stores.forEach((s) => {
-      map[s.id] = s.name;
-    });
-    return map;
-  }, [stores]);
-
-  const storeLabel = (s: Store) => (s.location_type === 'warehouse' ? `${s.name} (warehouse)` : s.name);
-
-  const moving = useMemo(() => stockItems.find((i) => keyOf(i) === movingKey) ?? null, [stockItems, movingKey]);
-
-  const fromStoreName = storeNameById[fromStoreId] ?? '';
-  const toStoreName = storeNameById[toStoreId] ?? '';
-  const destinations = useMemo(() => stores.filter((s) => s.id !== fromStoreId), [stores, fromStoreId]);
-
-  /**
-   * Whether stock can actually leave the store being looked at.
-   *
-   * The server takes the source of a transfer from the store the session is
-   * authorised for, not from anything in the request body — so stock can only
-   * ever leave the store this till is signed in to. Any other store can be
-   * browsed here, and moving from it is refused, so the screen says which is
-   * which rather than offering a button that quietly moves the wrong shop's
-   * stock. (See the report accompanying this change: teaching `stockApi.transfer`
-   * to pass the source as a `store_id` query parameter is what would lift this.)
-   */
-  const canMoveFromSource = !!store && fromStoreId === store.id;
-
-  const totals = useMemo(() => {
-    const value = stockItems.reduce((sum, i) => sum + (i.quantity || 0) * (i.cost_price || 0), 0);
-    const locked = stockItems.filter((i) => (i.reserved_qty || 0) > 0).length;
-    return { batches: stockItems.length, value, locked };
-  }, [stockItems]);
-
-  const openMove = (item: StockItem) => {
-    if (!canMoveFromSource || availableOf(item) <= 0) return;
-    setMovingKey(keyOf(item));
-    setQuantity('');
-    setFormError(null);
-    setNotice(null);
-  };
-
-  const closeMove = () => {
-    setMovingKey(null);
-    setQuantity('');
-    setFormError(null);
-  };
-
-  const transfer = async () => {
-    if (!moving) return;
-    if (!toStoreId) {
-      setFormError('Choose where the stock is going.');
-      return;
-    }
-    if (fromStoreId === toStoreId) {
-      setFormError('A transfer needs two different stores.');
-      return;
-    }
-    const qty = parseFloat(quantity);
-    if (!Number.isFinite(qty) || qty <= 0) {
-      setFormError('Enter how much to move.');
-      return;
-    }
-    const spare = availableOf(moving);
-    if (qty > spare) {
-      // Names the figure the server will actually check against, rather than
-      // the batch total — which is what made a refusal come as a surprise.
-      setFormError(
-        `Only ${formatQty(spare, unitById[moving.product_id])} of this batch can be moved${
-          moving.reserved_qty > 0
-            ? ` — ${formatQty(moving.reserved_qty, unitById[moving.product_id])} is reserved against an open order.`
-            : '.'
-        }`
-      );
-      return;
-    }
-
-    setTransferring(true);
-    setFormError(null);
+  const loadSourceStock = async (storeId: string) => {
+    setStockLoading(true);
     try {
-      await stockApi.transfer({
-        product_id: moving.product_id,
-        // Sent because the API signature asks for it, but the server takes the
-        // source from the authorised store scope and ignores a store id in the
-        // body. It is only ever the signed-in store here, so the two agree.
-        from_store_id: fromStoreId,
-        to_store_id: toStoreId,
-        quantity: qty,
-        batch_no: moving.batch_no || undefined,
+      const [stockRes, prodRes] = await Promise.all([
+        stockApi.list(storeId),
+        productApi.list({ store_id: storeId }),
+      ]);
+      const prods: Product[] = prodRes.data || [];
+      const map: Record<string, Product> = {};
+      prods.forEach((p) => {
+        map[p.id] = p;
       });
-      const name = moving.product_name || productNameById[moving.product_id] || 'stock';
-      setNotice(
-        `Moved ${formatQty(qty, unitById[moving.product_id])} of ${name} from ${fromStoreName} to ${toStoreName}.`
+      setProductsMap(map);
+
+      const items: StockItem[] = (stockRes.data || []).filter(
+        (item: StockItem) => item.quantity > 0
       );
-      closeMove();
-      await loadStock(fromStoreId);
-      await loadHistory();
-    } catch (err: any) {
-      // Flattened to a string upstream — "insufficient unreserved stock for
-      // transfer" is the one worth reading, and it belongs beside the field.
-      setFormError(err?.response?.data?.error || 'Could not move this stock.');
+      setAvailableStock(items);
+    } catch (err) {
+      console.error('Failed to load source stock:', err);
+      setAvailableStock([]);
     } finally {
-      setTransferring(false);
+      setStockLoading(false);
     }
   };
 
-  const stockColumns: Column<StockItem>[] = [
-    {
-      key: 'product_name',
-      header: 'Product',
-      render: (i) => (
-        <span style={{ fontWeight: 600 }}>{i.product_name || productNameById[i.product_id] || 'Unknown product'}</span>
-      ),
-      value: (i) => i.product_name || productNameById[i.product_id] || i.product_id,
-    },
-    {
-      key: 'batch_no',
-      header: 'Batch',
-      render: (i) =>
-        i.batch_no ? (
-          <span style={{ fontFamily: font.mono, fontSize: font.size.sm }}>{i.batch_no}</span>
-        ) : (
-          <span style={styles.muted}>No batch number</span>
-        ),
-      value: (i) => i.batch_no,
-    },
-    {
-      key: 'quantity',
-      header: 'On hand',
-      numeric: true,
-      render: (i) => formatQty(i.quantity, unitById[i.product_id]),
-      // The number: the cell carries a unit code, and sorting those as text
-      // puts 9 kg above 10 kg.
-      value: (i) => i.quantity,
-    },
-    {
-      key: 'available',
-      header: 'Can be moved',
-      numeric: true,
-      // The column that decides whether a transfer is accepted at all.
-      render: (i) => {
-        const spare = availableOf(i);
-        return (
-          <div>
-            <div style={{ fontWeight: 600, color: spare <= 0 ? color.danger : color.text }}>
-              {formatQty(spare, unitById[i.product_id])}
-            </div>
-            {i.reserved_qty > 0 && (
-              <div style={styles.sub}>{formatQty(i.reserved_qty, unitById[i.product_id])} reserved</div>
-            )}
-          </div>
+  const handleAddLine = () => {
+    if (!selectedStockKey || addQty <= 0) return;
+    const [productId, batchNo] = selectedStockKey.split('|');
+    const stockItem = availableStock.find(
+      (s) => s.product_id === productId && s.batch_no === batchNo
+    );
+    if (!stockItem) return;
+
+    const availableUnreserved = stockItem.quantity - (stockItem.reserved_qty || 0);
+    if (addQty > availableUnreserved) {
+      alert(`Cannot transfer more than available unreserved quantity (${availableUnreserved}).`);
+      return;
+    }
+
+    const prod = productsMap[productId];
+    const prodName = prod ? `${prod.name} ${prod.brand ? `(${prod.brand})` : ''}` : 'Product';
+
+    setTransferLines((prev) => {
+      const existing = prev.find((l) => l.product_id === productId && l.batch_no === batchNo);
+      if (existing) {
+        return prev.map((l) =>
+          l.product_id === productId && l.batch_no === batchNo
+            ? { ...l, transfer_qty: l.transfer_qty + addQty }
+            : l
         );
-      },
-      value: (i) => availableOf(i),
-    },
-    {
-      key: 'expiry_date',
-      header: 'Expiry',
-      render: (i) => {
-        if (!i.expiry_date) return <span style={styles.muted}>—</span>;
-        const past = new Date(i.expiry_date).getTime() < Date.now();
-        return past ? <span style={badge('danger')}>{formatDate(i.expiry_date)}</span> : formatDate(i.expiry_date);
-      },
-      // ISO first for a chronological sort, readable form after it so a search
-      // for "25-09-2026" finds the row too.
-      value: (i) => (i.expiry_date ? `${i.expiry_date} ${formatDate(i.expiry_date)}` : ''),
-    },
-    {
-      key: 'cost_price',
-      header: 'Cost',
-      numeric: true,
-      render: (i) => formatMoney(i.cost_price),
-      value: (i) => i.cost_price,
-    },
-    {
-      key: 'actions',
-      header: '',
-      sortable: false,
-      width: '6rem',
-      render: (i) => (
-        <button
-          style={{ ...ui.buttonPrimary, padding: '0.25rem 0.625rem', fontSize: font.size.sm }}
-          disabled={!canMoveFromSource || availableOf(i) <= 0}
-          title={
-            !canMoveFromSource
-              ? 'Stock can only be moved out of the store this till is signed in to.'
-              : availableOf(i) <= 0
-                ? 'Every unit of this batch is reserved against an open order.'
-                : undefined
-          }
-          onClick={(e) => {
-            e.stopPropagation();
-            openMove(i);
+      }
+      return [
+        ...prev,
+        {
+          product_id: productId,
+          product_name: prodName,
+          batch_no: batchNo,
+          available_qty: availableUnreserved,
+          transfer_qty: addQty,
+          cost_price: stockItem.cost_price,
+        },
+      ];
+    });
+
+    setSelectedStockKey('');
+    setAddQty(1);
+  };
+
+  const removeTransferLine = (productId: string, batchNo: string) => {
+    setTransferLines((prev) =>
+      prev.filter((l) => !(l.product_id === productId && l.batch_no === batchNo))
+    );
+  };
+
+  const handleExecuteTransfer = async () => {
+    if (transferLines.length === 0 || !fromStoreId || !toStoreId || isSubmitting) return;
+
+    if (fromStoreId === toStoreId) {
+      alert('Source location and Destination location must be different.');
+      return;
+    }
+
+    setIsSubmitting(true);
+    const transferId = 'TRF-' + Date.now().toString().slice(-6);
+
+    try {
+      // Execute each transfer line transactionally
+      for (const line of transferLines) {
+        await stockApi.transfer({
+          product_id: line.product_id,
+          from_store_id: fromStoreId,
+          to_store_id: toStoreId,
+          quantity: line.transfer_qty,
+          batch_no: line.batch_no,
+        });
+      }
+
+      const fromStoreObj = stores.find((s) => s.id === fromStoreId);
+      const toStoreObj = stores.find((s) => s.id === toStoreId);
+
+      setLastTransferNote({
+        transfer_id: transferId,
+        date: new Date().toLocaleString(),
+        from: fromStoreObj ? `${fromStoreObj.name} (${fromStoreObj.location_type})` : fromStoreId,
+        to: toStoreObj ? `${toStoreObj.name} (${toStoreObj.location_type})` : toStoreId,
+        user: user?.username,
+        lines: [...transferLines],
+      });
+
+      setTransferLines([]);
+      loadSourceStock(fromStoreId);
+      alert(`Transfer ${transferId} completed successfully! Stock updated at both locations.`);
+    } catch (err: any) {
+      console.error('Transfer failed:', err);
+      alert(err.response?.data?.error || 'Failed to complete stock transfer.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <AppLayout>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>
+            Multi-Warehouse Stock Transfers
+          </h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Inter-warehouse stock movements, transit dispatch notes, and balance reconciliation
+          </p>
+        </div>
+
+        {lastTransferNote && (
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={() => window.print()}
+          >
+            <IconPrinter size={16} />
+            <span>Print Transfer Challan</span>
+          </button>
+        )}
+      </div>
+
+      {/* Transfer Dispatch Note (Printable / Visible after successful transfer) */}
+      {lastTransferNote && (
+        <div
+          className="erp-card"
+          style={{
+            marginBottom: '1.25rem',
+            border: '2px solid #22c55e',
+            backgroundColor: '#f0fdf4',
           }}
         >
-          Move
-        </button>
-      ),
-    },
-  ];
-
-  const historyColumns: Column<Transfer>[] = [
-    {
-      key: 'at',
-      header: 'When',
-      render: (t) => formatDate(t.at),
-      // ISO first so the column sorts chronologically, readable form after it
-      // so a search for "10-09-2026" matches as well.
-      value: (t) => (t.at ? `${t.at} ${formatDate(t.at)}` : ''),
-    },
-    {
-      key: 'product_id',
-      header: 'Product',
-      render: (t) => (
-        <span style={{ fontWeight: 600 }}>{productNameById[t.product_id] || 'Product no longer listed'}</span>
-      ),
-      value: (t) => productNameById[t.product_id] || t.product_id,
-    },
-    {
-      key: 'batch_no',
-      header: 'Batch',
-      render: (t) =>
-        t.batch_no ? (
-          <span style={{ fontFamily: font.mono, fontSize: font.size.sm }}>{t.batch_no}</span>
-        ) : (
-          <span style={styles.muted}>No batch number</span>
-        ),
-      value: (t) => t.batch_no,
-    },
-    {
-      key: 'quantity',
-      header: 'Moved',
-      numeric: true,
-      render: (t) =>
-        t.quantity === null ? (
-          <span style={styles.muted}>—</span>
-        ) : (
-          formatQty(t.quantity, unitById[t.product_id])
-        ),
-      value: (t) => t.quantity,
-    },
-    {
-      key: 'from_store_id',
-      header: 'From',
-      render: (t) => storeNameById[t.from_store_id] || <span style={styles.muted}>Unknown store</span>,
-      value: (t) => storeNameById[t.from_store_id] || t.from_store_id,
-    },
-    {
-      key: 'to_store_id',
-      header: 'To',
-      render: (t) => storeNameById[t.to_store_id] || <span style={styles.muted}>Unknown store</span>,
-      value: (t) => storeNameById[t.to_store_id] || t.to_store_id,
-    },
-    {
-      key: 'by',
-      header: 'By',
-      render: (t) => t.by || <span style={styles.muted}>—</span>,
-      value: (t) => t.by,
-    },
-  ];
-
-  if (!user) return null;
-
-  return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Stock transfer</h1>
-      </div>
-
-      <div style={styles.summary}>
-        <Stat label="Batches at source" value={String(totals.batches)} note={fromStoreName || 'no store chosen'} />
-        <Stat label="Value on hand" value={formatMoney(totals.value)} note="at what the stock cost" />
-        <Stat
-          label="Batches partly reserved"
-          value={String(totals.locked)}
-          tone={totals.locked ? 'warning' : undefined}
-          note={totals.locked ? 'reserved stock cannot be moved' : 'nothing is held back'}
-        />
-      </div>
-
-      {pageError && (
-        <div style={{ marginBottom: space.lg }}>
-          <FormError error={pageError} />
-        </div>
-      )}
-      {notice && (
-        <div style={styles.notice} role="status">
-          {notice}
+          <div className="erp-card-header" style={{ backgroundColor: '#dcfce7' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <IconCheck size={18} color="#15803d" />
+              <strong style={{ color: '#15803d' }}>
+                Transfer Challan #{lastTransferNote.transfer_id} Dispatched & Received
+              </strong>
+            </div>
+            <span style={{ fontSize: '0.75rem', color: '#166534' }}>{lastTransferNote.date}</span>
+          </div>
+          <div className="erp-card-body" style={{ padding: '0.875rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.5rem', marginBottom: '0.75rem', fontSize: '0.85rem' }}>
+              <div>From: <strong>{lastTransferNote.from}</strong></div>
+              <div>To: <strong>{lastTransferNote.to}</strong></div>
+              <div>Authorized By: <strong>{lastTransferNote.user}</strong></div>
+            </div>
+            <table className="erp-table">
+              <thead>
+                <tr>
+                  <th>Product</th>
+                  <th>Batch No</th>
+                  <th className="text-right">Transferred Qty</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lastTransferNote.lines.map((l: TransferLine, idx: number) => (
+                  <tr key={idx}>
+                    <td>{l.product_name}</td>
+                    <td className="text-mono">{l.batch_no}</td>
+                    <td className="text-right text-mono font-bold">{l.transfer_qty}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      <div style={{ ...ui.card, padding: space.lg, marginBottom: space.lg }}>
-        <FormGrid>
-          <Field
-            label="Move stock from"
-            required
-            hint={
-              store && fromStoreId && !canMoveFromSource
-                ? `You are browsing ${fromStoreName}. Stock can only leave ${store.name}, the store this till is signed in to.`
-                : 'The store this till is signed in to. Sign in elsewhere to move that store’s stock.'
-            }
-            htmlFor="t-from"
-          >
-            <Select
-              id="t-from"
-              value={fromStoreId}
-              onChange={(e) => setFromStoreId(e.target.value)}
-              placeholder="Choose a store to look at"
-              options={stores.map((s) => ({ value: s.id, label: storeLabel(s) }))}
-            />
-          </Field>
-          <Field
-            label="Move stock to"
-            required
-            // The single-store case is the whole reason this hint exists: with
-            // nowhere to send anything, an empty dropdown looks like a fault.
-            hint={
-              destinations.length === 0
-                ? 'There is nowhere to send stock — this is the only store on the system. Add a second store or a warehouse first.'
-                : undefined
-            }
-            htmlFor="t-to"
-          >
-            <Select
-              id="t-to"
-              value={toStoreId}
-              onChange={(e) => setToStoreId(e.target.value)}
-              placeholder={destinations.length ? 'Choose the destination store' : 'No other store'}
-              disabled={destinations.length === 0}
-              options={destinations.map((s) => ({ value: s.id, label: storeLabel(s) }))}
-            />
-          </Field>
-        </FormGrid>
-      </div>
-
-      <div style={styles.tabs}>
-        <button
-          style={view === 'stock' ? styles.tabActive : styles.tab}
-          onClick={() => setView('stock')}
-          aria-pressed={view === 'stock'}
-        >
-          Stock to move ({stockItems.length})
-        </button>
-        <button
-          style={view === 'history' ? styles.tabActive : styles.tab}
-          onClick={() => setView('history')}
-          aria-pressed={view === 'history'}
-        >
-          Past transfers ({history.length})
-        </button>
-      </div>
-
-      {view === 'stock' ? (
-        <>
-          {fromStoreId && !canMoveFromSource && (
-            <div style={styles.warn}>
-              This is {fromStoreName}&rsquo;s stock, shown so you can check it. Moving it is refused by the server,
-              which takes the source of a transfer from the store the session is signed in to — {store?.name}. Switch
-              store to move anything from here.
-            </div>
-          )}
-          <DataTable
-            rows={stockItems}
-            columns={stockColumns}
-            rowKey={keyOf}
-            loading={stockLoading}
-            onRowClick={openMove}
-            searchPlaceholder="Search product or batch…"
-            // Two different facts, and only this side knows which one holds: no
-            // source chosen at all, or a source whose every batch is sold down
-            // to zero and filtered out above.
-            empty={
-              !fromStoreId
-                ? 'Choose a source store to see what it holds.'
-                : `${fromStoreName || 'That store'} has nothing on hand to move.`
-            }
-            rowTone={(i) => (availableOf(i) <= 0 ? 'danger' : i.reserved_qty > 0 ? 'warning' : undefined)}
-          />
-        </>
-      ) : (
-        <>
-          {historyBlocked && (
-            <div style={styles.warn}>
-              Past transfers are read from the audit trail, which this account may not open. Moving stock still works.
-            </div>
-          )}
-          <DataTable
-            rows={history}
-            columns={historyColumns}
-            rowKey={(t) => t.id}
-            loading={historyLoading}
-            searchPlaceholder="Search product, batch, store or user…"
-            // The trail is scoped to the signed-in store, so this is every
-            // transfer out of it — not every transfer in the business.
-            empty={
-              historyBlocked
-                ? 'The audit trail is not readable from this account.'
-                : `No stock has been moved out of ${store?.name ?? 'this store'} yet.`
-            }
-          />
-        </>
-      )}
-
-      <Modal
-        open={!!moving}
-        title={moving ? `Move ${moving.product_name || productNameById[moving.product_id] || 'stock'}` : ''}
-        subtitle={
-          moving
-            ? `${moving.batch_no || 'no batch number'} · ${fromStoreName || 'source'} → ${
-                toStoreName || 'choose a destination'
-              }`
-            : undefined
-        }
-        width="36rem"
-        onClose={closeMove}
-        footer={
-          <>
-            <button style={ui.button} onClick={closeMove} disabled={transferring}>
-              Cancel
-            </button>
-            <button style={ui.buttonPrimary} onClick={transfer} disabled={transferring}>
-              {transferring ? 'Moving…' : 'Move stock'}
-            </button>
-          </>
-        }
+      {/* Transfer Builder */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))',
+          gap: '1.25rem',
+        }}
       >
-        <FormError error={formError} />
+        {/* Source & Destination Configuration */}
+        <div className="erp-card">
+          <div className="erp-card-header">
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>
+              1. Transfer Locations & Stock Selection
+            </h3>
+          </div>
+          <div className="erp-card-body">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+              <div className="form-group">
+                <label className="form-label">Source (From) Location *</label>
+                <select
+                  className="form-select"
+                  value={fromStoreId}
+                  onChange={(e) => setFromStoreId(e.target.value)}
+                >
+                  <option value="">Select Source</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.location_type === 'warehouse' ? 'Warehouse' : 'Store'})
+                    </option>
+                  ))}
+                </select>
+              </div>
 
-        {moving && (
-          <>
-            <FormGrid>
-              <Field
-                label={unitById[moving.product_id] ? `Quantity (${unitById[moving.product_id]})` : 'Quantity'}
-                required
-                hint={
-                  moving.reserved_qty > 0
-                    ? `${formatQty(availableOf(moving), unitById[moving.product_id])} of ${formatQty(
-                        moving.quantity,
-                        unitById[moving.product_id]
-                      )} can move — the rest is reserved.`
-                    : `${formatQty(availableOf(moving), unitById[moving.product_id])} on hand.`
-                }
-                htmlFor="t-qty"
-              >
-                <NumberInput
-                  id="t-qty"
-                  autoFocus
-                  min={0}
-                  max={availableOf(moving)}
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                />
-              </Field>
-              <Field
-                label="Destination"
-                required
-                hint="The same choice as above — change it in either place."
-                htmlFor="t-to-modal"
-              >
-                <Select
-                  id="t-to-modal"
+              <div className="form-group">
+                <label className="form-label">Destination (To) Location *</label>
+                <select
+                  className="form-select"
                   value={toStoreId}
                   onChange={(e) => setToStoreId(e.target.value)}
-                  placeholder={destinations.length ? 'Choose the destination store' : 'No other store'}
-                  disabled={destinations.length === 0}
-                  options={destinations.map((s) => ({ value: s.id, label: storeLabel(s) }))}
-                />
-              </Field>
-            </FormGrid>
-
-            <div style={styles.detailGrid}>
-              <div>
-                <div style={styles.statLabel}>Batch</div>
-                <div style={styles.detailValue}>{moving.batch_no || '—'}</div>
-              </div>
-              <div>
-                <div style={styles.statLabel}>Expiry</div>
-                <div style={styles.detailValue}>{formatDate(moving.expiry_date)}</div>
-              </div>
-              <div>
-                <div style={styles.statLabel}>Cost</div>
-                <div style={styles.detailValue}>{formatMoney(moving.cost_price)}</div>
+                >
+                  <option value="">Select Destination</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id} disabled={s.id === fromStoreId}>
+                      {s.name} ({s.location_type === 'warehouse' ? 'Warehouse' : 'Store'})
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
 
-            {parseFloat(quantity) > 0 && toStoreId && (
-              <div style={styles.note}>
-                Moving <strong>{formatQty(parseFloat(quantity), unitById[moving.product_id])}</strong> of{' '}
-                <strong>{moving.product_name || productNameById[moving.product_id]}</strong>
-                {moving.batch_no ? ` (batch ${moving.batch_no})` : ''} from <strong>{fromStoreName}</strong> to{' '}
-                <strong>{toStoreName}</strong>. The batch keeps its number, its cost and its expiry date at the far end.
-              </div>
-            )}
-          </>
-        )}
-      </Modal>
-    </div>
+            {/* Product & Batch Picker */}
+            <div style={{ borderTop: '1px solid var(--border-light)', paddingTop: '0.75rem' }}>
+              <label className="form-label">Available Product & Batch at Source</label>
+              {stockLoading ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Loading source inventory...</p>
+              ) : availableStock.length === 0 ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                  No available stock found at selected source location.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-end', marginTop: '0.25rem' }}>
+                  <div style={{ flex: 3 }}>
+                    <select
+                      className="form-select"
+                      value={selectedStockKey}
+                      onChange={(e) => setSelectedStockKey(e.target.value)}
+                    >
+                      <option value="">Select Item & Batch to Move</option>
+                      {availableStock.map((s) => {
+                        const prod = productsMap[s.product_id];
+                        const label = prod
+                          ? `${prod.name} ${prod.brand ? `[${prod.brand}]` : ''}`
+                          : s.product_id;
+                        return (
+                          <option key={`${s.product_id}|${s.batch_no}`} value={`${s.product_id}|${s.batch_no}`}>
+                            {label} &middot; Batch: {s.batch_no} &middot; Avail: {s.quantity - s.reserved_qty}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                  <div style={{ width: 90 }}>
+                    <input
+                      type="number"
+                      min="1"
+                      className="form-input text-mono"
+                      placeholder="Qty"
+                      value={addQty}
+                      onChange={(e) => setAddQty(parseFloat(e.target.value) || 1)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-outline"
+                    onClick={handleAddLine}
+                    disabled={!selectedStockKey}
+                  >
+                    <IconPlus size={16} />
+                    <span>Add</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Transfer Manifest & Execution */}
+        <div className="erp-card">
+          <div className="erp-card-header">
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>
+              2. Transfer Manifest ({transferLines.length} Items)
+            </h3>
+          </div>
+          <div className="erp-card-body" style={{ padding: 0 }}>
+            <table className="erp-table">
+              <thead>
+                <tr>
+                  <th>Product & Brand</th>
+                  <th>Batch</th>
+                  <th className="text-right">Qty to Move</th>
+                  <th className="text-center"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {transferLines.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                      No items added to transfer manifest yet. Select items from the left.
+                    </td>
+                  </tr>
+                ) : (
+                  transferLines.map((line) => (
+                    <tr key={`${line.product_id}|${line.batch_no}`}>
+                      <td style={{ fontWeight: 600 }}>{line.product_name}</td>
+                      <td className="text-mono" style={{ fontSize: '0.8rem' }}>{line.batch_no}</td>
+                      <td className="text-right text-mono font-bold" style={{ color: 'var(--primary-600)' }}>
+                        {line.transfer_qty}
+                      </td>
+                      <td className="text-center">
+                        <button
+                          type="button"
+                          className="btn btn-outline btn-sm"
+                          style={{ padding: '0.2rem 0.4rem', border: 'none', color: '#dc2626' }}
+                          onClick={() => removeTransferLine(line.product_id, line.batch_no)}
+                        >
+                          ✕
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+
+            <div style={{ padding: '1rem', borderTop: '1px solid var(--border-light)' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ width: '100%', justifyContent: 'center' }}
+                disabled={transferLines.length === 0 || !fromStoreId || !toStoreId || isSubmitting}
+                onClick={handleExecuteTransfer}
+              >
+                <IconTransfer size={18} />
+                <span>{isSubmitting ? 'Transferring Stock...' : 'Confirm & Dispatch Transfer'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </AppLayout>
   );
 }
-
-function Stat({ label, value, note, tone }: { label: string; value: string; note?: string; tone?: 'warning' }) {
-  return (
-    <div style={{ ...ui.card, padding: space.lg, flex: '1 1 10rem' }}>
-      <div style={styles.statLabel}>{label}</div>
-      <div style={{ ...styles.statValue, color: tone === 'warning' ? color.warning : color.text }}>{value}</div>
-      {note && <div style={styles.sub}>{note}</div>}
-    </div>
-  );
-}
-
-const styles: Record<string, React.CSSProperties> = {
-  header: { display: 'flex', alignItems: 'center', gap: space.lg, marginBottom: space.lg },
-  h1: { margin: 0, fontSize: font.size.xxl },
-  summary: { display: 'flex', gap: space.lg, marginBottom: space.lg, flexWrap: 'wrap' },
-  statLabel: {
-    fontSize: font.size.xs,
-    textTransform: 'uppercase',
-    letterSpacing: '0.04em',
-    color: color.textMuted,
-    fontWeight: 700,
-  },
-  statValue: { marginTop: space.xs, fontSize: font.size.xl, fontWeight: 700, fontVariantNumeric: 'tabular-nums' },
-  sub: { marginTop: space.xs, fontSize: font.size.xs, color: color.textMuted },
-  muted: { color: color.textFaint },
-  tabs: { display: 'flex', gap: space.xs, marginBottom: space.md },
-  tab: { ...ui.button, borderRadius: '999px', padding: '0.375rem 0.875rem' },
-  tabActive: { ...ui.buttonPrimary, borderRadius: '999px', padding: '0.375rem 0.875rem' },
-  notice: {
-    padding: space.md,
-    marginBottom: space.lg,
-    background: color.successSoft,
-    border: `1px solid ${color.success}33`,
-    color: color.success,
-    borderRadius: '6px',
-    fontSize: font.size.md,
-  },
-  note: {
-    padding: space.md,
-    background: color.primarySoft,
-    border: `1px solid ${color.primary}22`,
-    borderRadius: '6px',
-    fontSize: font.size.md,
-  },
-  warn: {
-    padding: space.md,
-    marginBottom: space.lg,
-    background: color.warningSoft,
-    border: `1px solid ${color.warning}33`,
-    color: color.warning,
-    borderRadius: '6px',
-    fontSize: font.size.md,
-  },
-  detailGrid: { display: 'flex', gap: space.xl, flexWrap: 'wrap' },
-  detailValue: { marginTop: space.xs, fontSize: font.size.lg, fontWeight: 700, fontVariantNumeric: 'tabular-nums' },
-};

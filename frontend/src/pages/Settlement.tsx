@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { paymentApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { formatDate, formatMoney, todayISO } from '../utils/format';
 
 /**
@@ -58,92 +59,77 @@ export default function Settlement() {
     loadReport();
   }, [user, store, navigate, loadReport]);
 
-  if (!report) return <div style={{ padding: '2rem' }}>Loading...</div>;
+  if (!report) {
+    return (
+      <AppLayout>
+        <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-muted)' }}>Loading settlement report...</div>
+      </AppLayout>
+    );
+  }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>← Back</button>
-        <h1>Daily Settlement Report</h1>
-      </div>
-
-      <div style={styles.dateSelect}>
-        <label>Date: </label>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={styles.input} />
-        {loading && <span style={styles.hint}>Refreshing…</span>}
-      </div>
-
-      <div style={styles.summaryCard}>
-        <h2 style={styles.cardTitle}>{formatDate(report.date)}</h2>
-
-        <div style={styles.statGrid}>
-          <div style={styles.statBox}>
-            <span style={styles.statLabel}>Total Sales</span>
-            <span style={styles.statValue}>{formatMoney(Number(report.total_sales ?? 0))}</span>
-          </div>
-          <div style={styles.statBox}>
-            <span style={styles.statLabel}>Total Invoices</span>
-            <span style={styles.statValue}>{report.total_invoices}</span>
+    <AppLayout>
+      <div style={{ maxWidth: '900px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 700 }}>Daily Cash Settlement</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <label style={{ fontSize: '0.9rem', fontWeight: 500 }}>Date:</label>
+            <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="form-input" style={{ width: 'auto' }} />
+            {loading && <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Refreshing…</span>}
           </div>
         </div>
 
-        <h3 style={styles.sectionTitle}>Payment Mode Breakup</h3>
+        <div className="card" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
+          <h2 style={{ margin: '0 0 1rem', fontSize: '1.15rem', color: 'var(--text-main)', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '0.5rem' }}>
+            Settlement Summary for {formatDate(report.date)}
+          </h2>
 
-        <div style={styles.breakupTable}>
-          <div style={styles.tableHeader}>
-            <span>Mode</span>
-            <span>Count</span>
-            <span>Amount</span>
-          </div>
-          {((report.modes || []) as SettlementMode[]).length === 0 ? (
-            <div style={styles.tableRow}>
-              <span style={styles.hint}>No payments recorded for this date.</span>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginBottom: '1.5rem' }}>
+            <div style={{ background: 'var(--bg-app)', padding: '1rem', borderRadius: '8px', textAlign: 'center', border: '1px solid var(--border-subtle)' }}>
+              <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.25rem' }}>Total Sales</span>
+              <span style={{ display: 'block', fontSize: '1.6rem', fontWeight: 'bold', color: 'var(--primary)' }}>{formatMoney(Number(report.total_sales ?? 0))}</span>
             </div>
-          ) : (
-            ((report.modes || []) as SettlementMode[]).map((m) => (
-              <div key={m.payment_mode} style={styles.tableRow}>
-                <span>{modeLabel(m.payment_mode)}</span>
-                <span>{m.count ?? 0}</span>
-                <span>{formatMoney(Number(m.amount ?? 0))}</span>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div style={styles.finalSection}>
-          <div style={styles.finalRow}>
-            <span>Returns</span>
-            <span style={styles.negative}>-{formatMoney(Number(report.refunds_total ?? 0))}</span>
+            <div style={{ background: 'var(--bg-app)', padding: '1rem', borderRadius: '8px', textAlign: 'center', border: '1px solid var(--border-subtle)' }}>
+              <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '0.25rem' }}>Total Invoices</span>
+              <span style={{ display: 'block', fontSize: '1.6rem', fontWeight: 'bold', color: 'var(--text-main)' }}>{report.total_invoices}</span>
+            </div>
           </div>
-          <div style={styles.finalRow}>
-            <span>Net Collections</span>
-            <span style={styles.highlight}>{formatMoney(Number(report.net_collections ?? 0))}</span>
+
+          <h3 style={{ margin: '1rem 0 0.75rem', fontSize: '1rem', fontWeight: 600 }}>Payment Mode Breakup</h3>
+
+          <div style={{ border: '1px solid var(--border-subtle)', borderRadius: '6px', overflow: 'hidden' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', background: 'var(--bg-app)', padding: '0.75rem 1rem', fontWeight: 600, fontSize: '0.85rem' }}>
+              <span>Mode</span>
+              <span>Count</span>
+              <span style={{ textAlign: 'right' }}>Amount</span>
+            </div>
+            {((report.modes || []) as SettlementMode[]).length === 0 ? (
+              <div style={{ padding: '1rem', textAlign: 'center', color: 'var(--text-muted)' }}>
+                No payments recorded for this date.
+              </div>
+            ) : (
+              ((report.modes || []) as SettlementMode[]).map((m) => (
+                <div key={m.payment_mode} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', padding: '0.75rem 1rem', borderTop: '1px solid var(--border-subtle)', fontSize: '0.9rem' }}>
+                  <span style={{ fontWeight: 500 }}>{modeLabel(m.payment_mode)}</span>
+                  <span>{m.count ?? 0}</span>
+                  <span style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{formatMoney(Number(m.amount ?? 0))}</span>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div style={{ marginTop: '1.5rem', paddingTop: '1rem', borderTop: '2px solid var(--border-subtle)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.4rem 0', fontSize: '1rem' }}>
+              <span>Customer Returns & Refunds</span>
+              <span style={{ color: 'var(--danger)', fontWeight: 600 }}>-{formatMoney(Number(report.refunds_total ?? 0))}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0', fontSize: '1.2rem', fontWeight: 700, borderTop: '1px dashed var(--border-subtle)', marginTop: '0.5rem' }}>
+              <span>Net Drawer Collections</span>
+              <span style={{ color: 'var(--success)' }}>{formatMoney(Number(report.net_collections ?? 0))}</span>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', maxWidth: '800px', margin: '0 auto' },
-  header: { display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem' },
-  backBtn: { padding: '0.5rem 1rem', background: '#f5f5f5', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' },
-  dateSelect: { marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' },
-  input: { padding: '0.5rem', fontSize: '1rem', border: '1px solid #ddd', borderRadius: '4px' },
-  summaryCard: { background: 'white', padding: '1.5rem', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' },
-  cardTitle: { margin: '0 0 1rem', fontSize: '1.25rem' },
-  statGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1.5rem' },
-  statBox: { background: '#f5f5f5', padding: '1rem', borderRadius: '8px', textAlign: 'center' },
-  statLabel: { display: 'block', color: '#666', marginBottom: '0.5rem' },
-  statValue: { display: 'block', fontSize: '1.5rem', fontWeight: 'bold', color: '#1976d2' },
-  sectionTitle: { margin: '1rem 0', fontSize: '1rem' },
-  breakupTable: { border: '1px solid #eee', borderRadius: '4px', overflow: 'hidden' },
-  tableHeader: { display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', background: '#f5f5f5', padding: '0.75rem', fontWeight: 'bold' },
-  tableRow: { display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', padding: '0.75rem', borderTop: '1px solid #eee' },
-  finalSection: { marginTop: '1.5rem', paddingTop: '1rem', borderTop: '2px solid #333' },
-  finalRow: { display: 'flex', justifyContent: 'space-between', padding: '0.5rem 0', fontSize: '1.1rem' },
-  negative: { color: '#d32f2f' },
-  highlight: { fontWeight: 'bold', color: '#2e7d32', fontSize: '1.25rem' },
-  hint: { fontSize: '0.8rem', color: '#666', marginBottom: '0.5rem' },
-};

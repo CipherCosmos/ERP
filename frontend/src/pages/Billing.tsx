@@ -1,539 +1,439 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi } from '../services/api';
+import { productApi, invoiceApi, paymentApi, customerApi, barcodeApi, stockApi } from '../services/api';
 import {
-  allocateInvoiceNumber,
-  queueForSync,
-  subscribe,
-  syncNow,
-  TillState,
-  tillState,
-} from '../services/offline/service';
-import { pendingCount } from '../services/offline/outbox';
-import { recordSale } from '../services/offline/sales';
-import { Product, Customer, SaleUnit } from '../types';
-import { formatMoney } from '../utils/format';
+  enqueuePendingInvoice,
+  flushPendingInvoiceQueue,
+  getPendingInvoiceCount,
+} from '../services/offlineInvoiceQueue';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { BarcodeScannerModal } from '../components/BarcodeScannerModal';
 import { useBarcodeScanner } from '../hooks/useBarcodeScanner';
-import { IconCamera } from '../components/Icons';
+import {
+  IconPOS,
+  IconBarcode,
+  IconSearch,
+  IconTrash2,
+  IconPrinter,
+  IconAlert,
+  IconCheck,
+  IconPlus,
+} from '../components/Icons';
+import { Product, Customer } from '../types';
 
-function mapBarcodeLookupToProduct(data: Record<string, unknown>): Product {
-  return {
-    id: String(data.id),
-    name: String(data.name),
-    name_hi: data.name_hi != null ? String(data.name_hi) : undefined,
-    name_kn: data.name_kn != null ? String(data.name_kn) : undefined,
-    category_id: String(data.category_id ?? ''),
-    hsn_code: String(data.hsn_code ?? ''),
-    barcode: String(data.barcode ?? ''),
-    uom_id: String(data.uom_id ?? ''),
-    base_unit_qty: Number(data.base_unit_qty) || 1,
-    gst_rate: Number(data.gst_rate) || 0,
-    is_free: Boolean(data.is_free),
-    is_active: data.is_active !== false,
-    allow_decimal: Boolean(data.allow_decimal),
-    min_stock: Number(data.min_stock) || 0,
-    sell_price: Number(data.sell_price) || 0,
-    mrp: Number(data.mrp) || 0,
-    wholesale_sell_price: data.wholesale_sell_price != null ? Number(data.wholesale_sell_price) : undefined,
-  };
+interface ExtendedProduct extends Product {
+  stock?: number;
 }
 
-function lineUnitPrice(product: Product, useWholesale: boolean): number {
-  const w = product.wholesale_sell_price ?? 0;
-  if (useWholesale && w > 0) return w;
-  return product.sell_price;
-}
-
-/**
- * The ways this product may leave the counter, priced for this customer.
- *
- * The server sends `units` as {unit, price, has_price} triples ordered default
- * first then smallest to largest — a counter reaches for loose far more often
- * than for a sack. A unit with no price is deliberately kept and marked rather
- * than hidden: a unit that silently vanishes looks like a missing product,
- * while one shown as unpriced says exactly what to go and fix.
- */
-function sellableUnits(product: any, useWholesale: boolean): SaleUnit[] {
-  const raw = Array.isArray(product?.units) ? product.units : [];
-  const units: SaleUnit[] = raw
-    .filter((x: any) => x?.unit?.is_active !== false && x?.unit?.is_sellable !== false)
-    .map((x: any) => {
-      const ws = x.price?.wholesale_sell_price ?? 0;
-      const sell = useWholesale && ws > 0 ? ws : (x.price?.sell_price ?? 0);
-      return {
-        id: x.unit.id,
-        label: x.unit.label,
-        qty_in_base: x.unit.qty_in_base ?? 1,
-        sell_price: sell,
-        has_price: !!x.has_price,
-        barcode: x.unit.barcode ?? '',
-      };
-    });
-  if (units.length > 0) return units;
-  // A product from an older response shape, or one whose units never loaded:
-  // fall back to the product's own price as a single unnamed unit so the till
-  // keeps working rather than refusing to sell anything.
-  return [{
-    id: (product?.default_product_unit_id as string) ?? '',
-    label: 'each',
-    qty_in_base: 1,
-    sell_price: lineUnitPrice(product as Product, useWholesale),
-    has_price: true,
-  }];
-}
-
-/** The key identifying a cart line: product AND unit. */
-const lineKeyOf = (item: { product: { id: string }; unit?: { id: string } }) =>
-  `${item.product.id}::${item.unit?.id ?? ''}`;
-
-function playBeep() {
-  try {
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(1760, ctx.currentTime);
-    gain.gain.setValueAtTime(0.12, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.1);
-  } catch {
-    /* Audio disabled or policy blocked */
-  }
+interface CartEntry {
+  product: ExtendedProduct;
+  quantity: number;
+  rate: number;
+  discount: number;
+  unitLabel?: string;
+  unitMultiplier?: number;
 }
 
 export default function Billing() {
   const navigate = useNavigate();
-  const { user, store, cart, addToCart, updateCartQuantity, updateCartDiscount, removeFromCart, clearCart } = useAppStore();
-  const [search, setSearch] = useState('');
-  const [products, setProducts] = useState<Product[]>([]);
-  const [filteredProducts, setFilteredProducts] = useState<Product[]>([]);
-  const [paymentMode, setPaymentMode] = useState('cash');
-  const [splitPayments, setSplitPayments] = useState<{ mode: string; amount: string }[]>([{ mode: 'cash', amount: '' }]);
-  const [useSplitPayment, setUseSplitPayment] = useState(false);
+  const { user, store } = useAppStore();
+
+  const [products, setProducts] = useState<ExtendedProduct[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [useWholesalePrices, setUseWholesalePrices] = useState(false);
-  const barcodeRef = useRef<HTMLInputElement>(null);
-  const [checkingOut, setCheckingOut] = useState(false);
-  /**
-   * One key per attempt at this cart, held until the sale succeeds. A retry
-   * after a timeout reuses it, so the server returns the original bill instead
-   * of raising a second one — which is what stops a double-tapped Checkout
-   * charging the customer twice.
-   */
-  const checkoutKey = useRef<string>('');
-  /** Set when a product sells in more than one unit and the counter must choose. */
-  const [unitPicker, setUnitPicker] = useState<{ product: Product; units: SaleUnit[] } | null>(null);
 
-  /**
-   * Cash handed over. The change is the one sum a cashier does in their head
-   * on every cash sale, and getting it wrong costs the shop real money — so
-   * the till does it.
-   */
-  const [tendered, setTendered] = useState('');
-  /** A discount off the whole bill, in rupees. Apportioned across lines by the
-   *  server before tax, as CGST s.15(3)(a) requires. */
-  const [billDiscount, setBillDiscount] = useState('');
-  /** Bills parked mid-sale — the customer went back for something they forgot. */
-  const [heldBills, setHeldBills] = useState<{ id: string; at: number; cart: any[]; customerId: string; billDiscount: string }[]>(
-    () => {
-      try {
-        return JSON.parse(localStorage.getItem('gbos-held-bills') || '[]');
-      } catch {
-        return [];
-      }
-    }
-  );
-  const [showHeld, setShowHeld] = useState(false);
-  const [scannerOpen, setScannerOpen] = useState(false);
-  const scanHandlerRef = useRef<(code: string) => void>();
-  useBarcodeScanner({ onScan: (code) => scanHandlerRef.current?.(code) });
-  /** The line whose discount is being edited, if any. */
-  const [discountFor, setDiscountFor] = useState<string | null>(null);
-
-  const loadProducts = useCallback(async () => {
-    if (!store) return;
+  // Active Cart
+  const [cart, setCart] = useState<CartEntry[]>(() => {
     try {
-      const { data } = await productApi.list({ store_id: store.id });
-      setProducts(data);
-    } catch (err) {
-      console.error('Failed to load products:', err);
+      const saved = localStorage.getItem('gbos_active_cart');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
     }
-  }, [store]);
+  });
+
+  // Suspended / Held Carts
+  const [heldCarts, setHeldCarts] = useState<{ id: string; name: string; date: string; items: CartEntry[]; customerId?: string }[]>(() => {
+    try {
+      const saved = localStorage.getItem('gbos_held_carts');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Search & Barcode input
+  const [searchInput, setSearchInput] = useState('');
+  const [searchResults, setSearchResults] = useState<ExtendedProduct[]>([]);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
+
+  // Payments
+  const [paymentMode, setPaymentMode] = useState<'cash' | 'upi' | 'card' | 'bank' | 'credit' | 'split'>('cash');
+  const [splitCash, setSplitCash] = useState<number>(0);
+  const [splitUpi, setSplitUpi] = useState<number>(0);
+  const [splitCredit, setSplitCredit] = useState<number>(0);
+
+  // Status & processing
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [lastInvoice, setLastInvoice] = useState<any | null>(null);
+
+  // Save active cart to localStorage
+  useEffect(() => {
+    localStorage.setItem('gbos_active_cart', JSON.stringify(cart));
+  }, [cart]);
+
+  // Save held carts to localStorage
+  useEffect(() => {
+    localStorage.setItem('gbos_held_carts', JSON.stringify(heldCarts));
+  }, [heldCarts]);
 
   useEffect(() => {
     if (!user) {
       navigate('/login');
       return;
     }
-    loadProducts();
-  }, [user, navigate, loadProducts]);
+    if (store) {
+      loadProducts();
+      loadCustomers();
+    }
+  }, [user, store?.id]);
 
+  // Offline queue auto-flush on reconnection
   useEffect(() => {
-    if (!store) return;
-    customerApi
-      .list(store.id)
-      .then((res) => setCustomers((res.data as Customer[]) || []))
-      .catch(() => setCustomers([]));
-  }, [store]);
+    const syncQueued = async () => {
+      if (!store || !user || !navigator.onLine) return;
+      await flushPendingInvoiceQueue(
+        (body) => invoiceApi.create(body as any).then((r) => r.data),
+        async (invoiceId, payments) => {
+          await paymentApi.addSplitPayments({ invoice_id: invoiceId, payments });
+        }
+      );
+      useAppStore.getState().setSyncPending(getPendingInvoiceCount());
+    };
+    syncQueued();
+    window.addEventListener('online', syncQueued);
+    return () => window.removeEventListener('online', syncQueued);
+  }, [store?.id, user?.id]);
 
+  // Hardware USB/Bluetooth Barcode Scanner hook
+  useBarcodeScanner({
+    onScan: (scannedCode) => {
+      handleBarcodeScanned(scannedCode);
+    },
+    enabled: true,
+  });
+
+  // Listen to global layout barcode event
   useEffect(() => {
-    const c = customers.find((x) => x.id === selectedCustomerId);
-    if (c?.is_wholesale) {
+    const handleGlobalScan = (e: any) => {
+      if (e.detail?.barcode) {
+        handleBarcodeScanned(e.detail.barcode);
+      }
+    };
+    window.addEventListener('gbos-barcode-scan', handleGlobalScan);
+    return () => window.removeEventListener('gbos-barcode-scan', handleGlobalScan);
+  }, [products]);
+
+  // Keyboard shortcut listener (F2, F4, F8, F9, Esc)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'F2') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      } else if (e.key === 'F8') {
+        e.preventDefault();
+        holdCurrentCart();
+      } else if (e.key === 'F9') {
+        e.preventDefault();
+        handleCheckout();
+      } else if (e.key === 'Escape') {
+        setSearchResults([]);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
+
+  const loadProducts = async () => {
+    try {
+      const { data } = await productApi.list({ store_id: store!.id });
+      setProducts(data || []);
+    } catch (err) {
+      console.warn('Load products failed:', err);
+    }
+  };
+
+  const loadCustomers = async () => {
+    try {
+      const { data } = await customerApi.list(store!.id);
+      setCustomers(data || []);
+    } catch (err) {
+      console.warn('Load customers failed:', err);
+    }
+  };
+
+  // Selected customer details
+  const selectedCustomer = useMemo(() => {
+    return customers.find((c) => c.id === selectedCustomerId) || null;
+  }, [customers, selectedCustomerId]);
+
+  // Handle wholesale pricing switch based on customer profile
+  useEffect(() => {
+    if (selectedCustomer?.is_wholesale) {
       setUseWholesalePrices(true);
     } else {
       setUseWholesalePrices(false);
     }
-  }, [selectedCustomerId, customers]);
+  }, [selectedCustomer]);
 
-  // The counter watches the till rather than owning it: the sync loop belongs to
-  // the app, so it keeps running when this screen is not mounted. The badge here
-  // is the same state the menu shows.
-  const [till, setTill] = useState<TillState>(tillState());
-  useEffect(() => subscribe(setTill), []);
+  // Search autocomplete
   useEffect(() => {
-    useAppStore.getState().setSyncPending(till.queued);
-  }, [till.queued]);
-
-  const refreshQueued = useCallback(async () => {
-    const queued = await pendingCount();
-    useAppStore.getState().setSyncPending(queued);
-    // A sale saved on the device should go as soon as there is a line, rather
-    // than waiting for the next tick of the timer.
-    void syncNow();
-  }, []);
-
-  useEffect(() => {
-    if (search.length >= 2) {
-      const filtered = products.filter(
+    const trimmed = searchInput.trim().toLowerCase();
+    if (trimmed.length >= 2) {
+      const matches = products.filter(
         (p) =>
-          p.name.toLowerCase().includes(search.toLowerCase()) ||
-          p.barcode.includes(search)
+          p.name.toLowerCase().includes(trimmed) ||
+          (p.brand && p.brand.toLowerCase().includes(trimmed)) ||
+          p.barcode.includes(trimmed)
       );
-      setFilteredProducts(filtered.slice(0, 20));
+      setSearchResults(matches.slice(0, 15));
     } else {
-      setFilteredProducts([]);
+      setSearchResults([]);
     }
-  }, [search, products]);
+  }, [searchInput, products]);
 
-  /**
-   * Put a product in the cart. When it sells only one way that is immediate;
-   * when it sells several the counter is asked which, because guessing at the
-   * unit means guessing at the price.
-   */
-  const addProduct = (product: Product, unitId?: string, qty = 1) => {
-    playBeep();
-    const units = sellableUnits(product, useWholesalePrices);
-    const chosen = unitId ? units.find((u) => u.id === unitId) : undefined;
-    if (chosen) {
-      addToCart({ product, unit: chosen, quantity: qty, discount: 0 });
+  // Scan-to-add product
+  const handleBarcodeScanned = async (barcodeVal: string) => {
+    const code = barcodeVal.trim();
+    if (!code || !store) return;
+
+    // 1. Search local product catalog
+    const found = products.find((p) => p.barcode === code);
+    if (found) {
+      addProductToCart(found);
+      setSearchInput('');
+      setSearchResults([]);
       return;
     }
-    if (units.length === 1) {
-      addToCart({ product, unit: units[0], quantity: qty, discount: 0 });
-      return;
-    }
-    setUnitPicker({ product, units });
-  };
 
-  /**
-   * Keyboard shortcuts.
-   *
-   * A counter runs on a keyboard and a scanner; reaching for a mouse between
-   * every customer is what makes a queue. The whole screen previously had one
-   * key handler in 7,600 lines. F-keys are used because a barcode scanner types
-   * digits and Enter, so anything bound to a plain character would fire from a
-   * scan.
-   */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // Never steal a key from a field the cashier is typing in, except the
-      // F-keys, which no field wants.
-      const inField = /^(INPUT|SELECT|TEXTAREA)$/.test((e.target as HTMLElement)?.tagName || '');
-      switch (e.key) {
-        case 'F2':
-          e.preventDefault();
-          barcodeRef.current?.focus();
-          barcodeRef.current?.select();
-          break;
-        case 'F4':
-          e.preventDefault();
-          document.getElementById('bill-discount')?.focus();
-          break;
-        case 'F6':
-          e.preventDefault();
-          document.getElementById('tendered')?.focus();
-          break;
-        case 'F7':
-          e.preventDefault();
-          holdBillRef.current?.();
-          break;
-        case 'F8':
-          e.preventDefault();
-          setShowHeld((v) => !v);
-          break;
-        case 'F9':
-          e.preventDefault();
-          checkoutRef.current?.();
-          break;
-        case 'Escape':
-          if (!inField) {
-            e.preventDefault();
-            setShowHeld(false);
-            setUnitPicker(null);
-          }
-          break;
-        default:
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
-
-  // The handlers are reached through refs so the listener above can be
-  // registered once rather than re-bound on every cart change.
-  const holdBillRef = useRef<() => void>();
-  const checkoutRef = useRef<() => void>();
-
-  const persistHeld = (bills: typeof heldBills) => {
-    setHeldBills(bills);
+    // 2. Lookup barcode API (handles multi-unit packaging barcodes too)
     try {
-      localStorage.setItem('gbos-held-bills', JSON.stringify(bills));
-    } catch {
-      /* a full or private-mode storage must not stop a sale */
-    }
-  };
-
-  /**
-   * Park the cart so the counter can serve the next customer.
-   *
-   * A shop needs this constantly — someone goes back for an item, or pays by
-   * card that will not read. Without it the cashier either holds up the queue
-   * or throws the basket away and re-scans it.
-   */
-  const holdBill = () => {
-    if (cart.length === 0) return;
-    persistHeld([
-      ...heldBills,
-      { id: String(Date.now()), at: Date.now(), cart: [...cart], customerId: selectedCustomerId, billDiscount },
-    ]);
-    clearCart();
-    setSelectedCustomerId('');
-    setBillDiscount('');
-    setTendered('');
-    barcodeRef.current?.focus();
-  };
-
-  const recallBill = (id: string) => {
-    const bill = heldBills.find((b) => b.id === id);
-    if (!bill) return;
-    // Anything in the cart now is parked in turn rather than discarded.
-    const rest = heldBills.filter((b) => b.id !== id);
-    if (cart.length > 0) {
-      rest.push({ id: String(Date.now()), at: Date.now(), cart: [...cart], customerId: selectedCustomerId, billDiscount });
-    }
-    clearCart();
-    bill.cart.forEach((line: any) => addToCart(line));
-    setSelectedCustomerId(bill.customerId || '');
-    // Restore the bill-level discount too. Resuming at a different total than
-    // the one already quoted to the customer is worse than not holding at all.
-    setBillDiscount(bill.billDiscount || '');
-    persistHeld(rest);
-    setShowHeld(false);
-    barcodeRef.current?.focus();
-  };
-
-  holdBillRef.current = holdBill;
-
-  const handleBarcodeScan = async (barcode: string) => {
-    const trimmed = barcode.trim();
-    if (!trimmed || !store) return;
-
-    // A unit's own barcode is not on the product row, so a local hit can only
-    // ever be the product's own code — the server is asked for the rest.
-    const local = products.find((p) => p.barcode === trimmed);
-    if (local) {
-      addProduct(local);
-      setSearch('');
-      return;
-    }
-
-    try {
-      const { data } = await barcodeApi.lookup(trimmed, store.id);
-      if (data && typeof data === 'object' && 'id' in data) {
-        const d = data as Record<string, unknown>;
-        const product = mapBarcodeLookupToProduct(d);
-        // The lookup says which unit the code belonged to. Scanning the sack's
-        // barcode must ring up a sack at the sack's price, not one loose kilo.
-        const scanned = d.scanned_unit as Record<string, unknown> | undefined;
-        const scannedPrice = d.scanned_price as Record<string, unknown> | undefined;
-        if (scanned?.id) {
-          playBeep();
-          const ws = Number(scannedPrice?.wholesale_sell_price) || 0;
-          addToCart({
-            product,
-            unit: {
-              id: String(scanned.id),
-              label: String(scanned.label ?? 'each'),
-              qty_in_base: Number(scanned.qty_in_base) || 1,
-              sell_price: useWholesalePrices && ws > 0 ? ws : Number(scannedPrice?.sell_price) || 0,
-              has_price: d.scanned_has_price !== false,
-            },
-            quantity: 1,
-            discount: 0,
-          });
-        } else {
-          addProduct(product);
-        }
-        setSearch('');
+      const { data } = await barcodeApi.lookup(code, store.id);
+      if (data && data.id) {
+        const prod: ExtendedProduct = {
+          id: data.id,
+          name: data.name,
+          category_id: data.category_id,
+          hsn_code: data.hsn_code,
+          barcode: data.barcode,
+          uom_id: data.uom_id,
+          base_unit_qty: data.base_unit_qty || 1,
+          gst_rate: data.gst_rate || 0,
+          is_free: false,
+          is_active: true,
+          allow_decimal: Boolean(data.allow_decimal),
+          min_stock: data.min_stock || 0,
+          sell_price: data.sell_price || 0,
+          mrp: data.mrp || 0,
+          wholesale_sell_price: data.wholesale_sell_price,
+          brand: data.brand,
+        };
+        const packingQty = Number(data.packing_qty) || 1;
+        addProductToCart(prod, packingQty, data.packing_label);
+        setSearchInput('');
+        setSearchResults([]);
         return;
       }
     } catch {
-      /* fall through */
+      // not in lookup
     }
 
-    try {
-      const { data } = await productApi.list({ store_id: store.id, barcode: trimmed });
-      if (data.length > 0) {
-        addProduct(data[0]);
-      }
-    } catch (err) {
-      console.error('Product not found:', err);
-    }
-    setSearch('');
+    alert(`Product with barcode "${code}" not found. You can add it from the Products module.`);
+    setSearchInput('');
   };
 
-  scanHandlerRef.current = handleBarcodeScan;
+  const addProductToCart = (product: ExtendedProduct, qty = 1, unitLabel?: string) => {
+    const rate = useWholesalePrices && (product.wholesale_sell_price ?? 0) > 0
+      ? product.wholesale_sell_price!
+      : product.sell_price;
 
-  const calculateTotals = () => {
+    setCart((prev) => {
+      const existingIdx = prev.findIndex((entry) => entry.product.id === product.id);
+      if (existingIdx >= 0) {
+        const copy = [...prev];
+        copy[existingIdx].quantity += qty;
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          product,
+          quantity: qty,
+          rate,
+          discount: 0,
+          unitLabel: unitLabel || 'Piece',
+        },
+      ];
+    });
+  };
+
+  const updateQuantity = (productId: string, newQty: number) => {
+    if (newQty <= 0) {
+      removeFromCart(productId);
+      return;
+    }
+    setCart((prev) =>
+      prev.map((item) => (item.product.id === productId ? { ...item, quantity: newQty } : item))
+    );
+  };
+
+  const updateDiscount = (productId: string, discount: number) => {
+    setCart((prev) =>
+      prev.map((item) => (item.product.id === productId ? { ...item, discount: Math.max(0, discount) } : item))
+    );
+  };
+
+  const removeFromCart = (productId: string) => {
+    setCart((prev) => prev.filter((item) => item.product.id !== productId));
+  };
+
+  const clearActiveCart = () => {
+    if (cart.length > 0 && !window.confirm('Clear all items in the active bill?')) {
+      return;
+    }
+    setCart([]);
+    setSelectedCustomerId('');
+  };
+
+  // Suspend / Hold Bill
+  const holdCurrentCart = () => {
+    if (cart.length === 0) return;
+    const name = selectedCustomer ? `${selectedCustomer.name}` : `Bill #${heldCarts.length + 1}`;
+    const newHeld = {
+      id: Date.now().toString(),
+      name,
+      date: new Date().toLocaleTimeString(),
+      items: [...cart],
+      customerId: selectedCustomerId,
+    };
+    setHeldCarts((prev) => [...prev, newHeld]);
+    setCart([]);
+    setSelectedCustomerId('');
+  };
+
+  const resumeHeldCart = (heldId: string) => {
+    const target = heldCarts.find((h) => h.id === heldId);
+    if (!target) return;
+    setCart(target.items);
+    if (target.customerId) setSelectedCustomerId(target.customerId);
+    setHeldCarts((prev) => prev.filter((h) => h.id !== heldId));
+  };
+
+  // Calculations
+  const calculations = useMemo(() => {
     let subtotal = 0;
     let cgst = 0;
     let sgst = 0;
     let igst = 0;
 
-    // Detect inter-state: compare store GSTIN vs customer GSTIN
-    const isInterState = (() => {
-      if (!store?.gstin || !selectedCustomerId) return false;
-      const customer = customers.find(c => c.id === selectedCustomerId);
-      if (!customer?.gstin) return false;
-      return store.gstin.substring(0, 2) !== customer.gstin.substring(0, 2);
-    })();
-
-    // The bill discount is shared across lines in proportion to what each is
-    // worth, BEFORE tax — CGST s.15(3)(a) allows a discount to reduce the
-    // taxable value only if it is recorded on the invoice, so it cannot simply
-    // be subtracted from the total afterwards. The server apportions it the
-    // same way and its figures are the ones charged; this is the counter's
-    // preview of them.
-    const billOff = Math.max(0, Number(billDiscount) || 0);
-    const grossAll = cart.reduce((sum, it) => {
-      const r = it.unit?.sell_price ?? lineUnitPrice(it.product, useWholesalePrices);
-      return sum + r * it.quantity - (it.discount || 0);
-    }, 0);
+    const isInterState = Boolean(
+      store?.gstin &&
+        selectedCustomer?.gstin &&
+        store.gstin.slice(0, 2) !== selectedCustomer.gstin.slice(0, 2)
+    );
 
     cart.forEach((item) => {
-      // The rate belongs to the unit on the line, not to the product. A sack
-      // and a loose kilo of the same rice are two different prices.
-      const rate = item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices);
-      const net = rate * item.quantity - (item.discount || 0);
-      const share = grossAll > 0 ? (billOff * net) / grossAll : 0;
-      const itemTotal = Math.max(0, net - share);
-      const gstAmount = (itemTotal * item.product.gst_rate) / 100;
+      const taxable = item.rate * item.quantity - item.discount;
+      const taxRate = item.product.gst_rate || 0;
+      const gstAmount = (Math.max(0, taxable) * taxRate) / 100;
 
+      subtotal += taxable;
       if (isInterState) {
         igst += gstAmount;
       } else {
         cgst += gstAmount / 2;
         sgst += gstAmount / 2;
       }
-      subtotal += itemTotal;
     });
 
-    const roundOff = Math.round(subtotal + cgst + sgst + igst) - (subtotal + cgst + sgst + igst);
-    const total = subtotal + cgst + sgst + igst + roundOff;
+    const rawTotal = subtotal + cgst + sgst + igst;
+    const roundOff = Math.round(rawTotal) - rawTotal;
+    const grandTotal = Math.max(0, Math.round(rawTotal));
 
-    return { subtotal, cgst, sgst, igst, roundOff, total };
-  };
+    return { subtotal, cgst, sgst, igst, roundOff, grandTotal };
+  }, [cart, store?.gstin, selectedCustomer?.gstin]);
 
-  const getPaymentAmount = () => {
-    const { total } = calculateTotals();
-    if (useSplitPayment) {
-      return splitPayments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-    }
-    return total;
-  };
-
+  // Checkout execution
   const handleCheckout = async () => {
-    if (checkingOut) return;
-    if (cart.length === 0 || !store || !user) return;
+    if (cart.length === 0 || !store || !user || isProcessing) return;
 
-    if (!useSplitPayment && paymentMode === 'credit' && !selectedCustomerId) {
-      alert('Select a customer for credit sales.');
+    const { subtotal, cgst, sgst, igst, roundOff, grandTotal } = calculations;
+
+    // Credit limit validation for Khata sales
+    if ((paymentMode === 'credit' || (paymentMode === 'split' && splitCredit > 0)) && !selectedCustomerId) {
+      alert('Please select a customer before billing on credit (Khata).');
       return;
     }
 
-    if (!checkoutKey.current) {
-      checkoutKey.current = crypto.randomUUID();
-    }
-    const terminal = useAppStore.getState().terminal;
-    if (!terminal) {
-      alert('This device is not registered to a counter. Sign out and in again, or add a terminal under Settings.');
-      return;
+    if (selectedCustomer && (paymentMode === 'credit' || splitCredit > 0)) {
+      const creditDue = paymentMode === 'credit' ? grandTotal : splitCredit;
+      if (selectedCustomer.credit_limit > 0 && creditDue > selectedCustomer.credit_limit) {
+        const proceed = window.confirm(
+          `Warning: Customer credit limit is ₹${selectedCustomer.credit_limit.toFixed(2)}, but credit sale is ₹${creditDue.toFixed(2)}. Proceed with authorized override?`
+        );
+        if (!proceed) return;
+      }
     }
 
-    const { total } = calculateTotals();
-
-    if (useSplitPayment) {
-      const paidAmount = splitPayments.reduce((sum, p) => sum + (parseFloat(p.amount) || 0), 0);
-      // Compared in whole paise rather than with a tolerance. `0.1 + 0.2` is
-      // not `0.3` in binary floating point, which is the only reason a
-      // tolerance was ever needed here; rounding to the smallest unit the
-      // currency actually has makes the comparison exact. It also matches the
-      // server, which requires the split to equal the bill to the paisa — so a
-      // shortfall is now caught at the counter instead of at the till.
-      if (Math.round(paidAmount * 100) !== Math.round(total * 100)) {
-        alert(`Split payments (₹${paidAmount.toFixed(2)}) must equal total (₹${total.toFixed(2)})`);
+    // Split payment total verification
+    if (paymentMode === 'split') {
+      const totalEntered = (Number(splitCash) || 0) + (Number(splitUpi) || 0) + (Number(splitCredit) || 0);
+      if (Math.abs(totalEntered - grandTotal) > 0.05) {
+        alert(
+          `Split tenders (₹${totalEntered.toFixed(2)}) must exactly equal Bill Total (₹${grandTotal.toFixed(2)}).`
+        );
         return;
       }
     }
 
-    // The server prices the sale from its own price list and each product's own
-    // tax rate, and returns the authoritative figures. The totals computed above
-    // are for the on-screen preview only.
-    const invoiceBody = {
-      terminal_id: terminal.id,
+    setIsProcessing(true);
+
+    const invoicePayload = {
+      store_id: store.id,
       customer_id: selectedCustomerId || undefined,
-      payment_mode: useSplitPayment ? 'split' : paymentMode,
-      round_total: true,
-      discount: Math.max(0, Number(billDiscount) || 0),
+      invoice_date: new Date().toISOString(),
+      sub_total: subtotal,
+      cgst,
+      sgst,
+      igst,
+      discount: 0,
+      round_off: roundOff,
+      total: grandTotal,
+      status: 'completed',
+      payment_mode: paymentMode,
       items: cart.map((item) => ({
         product_id: item.product.id,
-        // unit_qty is what the customer asked for — 2 sacks, not 50 kg. The
-        // server multiplies by the unit's size to move stock.
-        product_unit_id: item.unit?.id || undefined,
-        unit_qty: item.quantity,
-        discount: item.discount || 0,
+        quantity: item.quantity,
+        rate: item.rate,
+        discount: item.discount,
+        total: item.rate * item.quantity - item.discount,
       })),
     };
 
     const splitLines =
-      useSplitPayment && splitPayments.some((p) => parseFloat(p.amount) > 0)
-        ? splitPayments
-            .filter((p) => parseFloat(p.amount) > 0)
-            .map((p) => ({ payment_mode: p.mode, amount: parseFloat(p.amount) }))
+      paymentMode === 'split'
+        ? [
+            { payment_mode: 'cash', amount: Number(splitCash) || 0 },
+            { payment_mode: 'upi', amount: Number(splitUpi) || 0 },
+            { payment_mode: 'credit', amount: Number(splitCredit) || 0 },
+          ].filter((p) => p.amount > 0)
         : undefined;
 
-    setCheckingOut(true);
     try {
-      const { data } = await invoiceApi.create(invoiceBody as any, checkoutKey.current);
-      const invoice = data.invoice;
+      const { data: invoice } = await invoiceApi.create(invoicePayload as any);
 
       if (splitLines && splitLines.length > 0) {
         await paymentApi.addSplitPayments({
@@ -542,1119 +442,507 @@ export default function Billing() {
         });
       }
 
-      checkoutKey.current = '';
-
-      // The server's lines, not the cart: the paper the customer holds has to
-      // match the books. Each line carries its own description, HSN code and
-      // tax rate, snapshotted when the sale was written, so the receipt needs
-      // no lookup against a catalogue that may since have changed.
-      const soldLines = (data as any).items ?? [];
-      printReceipt(invoice, soldLines);
-
-      // Remember it. A customer comes back tomorrow with the goods and the
-      // connection has nothing to do with it, so the till has to be able to find
-      // the bill a return is coming back on whether or not it can reach the
-      // server. Failing to remember must not fail the sale, which has happened.
-      void recordSale({
-        key: invoice.invoice_no,
-        invoiceId: invoice.id,
-        billedAt: invoice.invoice_date ?? new Date().toISOString(),
-        total: Number(invoice.total ?? 0),
-        customerId: selectedCustomerId || null,
-        lines: soldLines.map((l: any) => ({
-          product_id: String(l.product_id ?? ''),
-          product_name: String(l.product_name ?? ''),
-          product_unit_id: l.product_unit_id ? String(l.product_unit_id) : undefined,
-          unit_label: String(l.unit_label ?? ''),
-          unit_qty: Number(l.unit_qty ?? 0),
-          quantity: Number(l.quantity ?? 0),
-          rate: Number(l.rate ?? 0),
-          total: Number(l.total ?? 0),
-        })),
-      }).catch(() => undefined);
-
-      clearCart();
-      setPaymentMode('cash');
-      setUseSplitPayment(false);
-      setSplitPayments([{ mode: 'cash', amount: '' }]);
+      setLastInvoice(invoice);
+      setCart([]);
       setSelectedCustomerId('');
-      void refreshQueued();
-      // Reset the counter for the next customer. Leaving the bill discount set
-      // hands the next person the previous one's concession silently, and a
-      // stale "cash received" makes the change due read as nonsense.
-      setBillDiscount('');
-      setTendered('');
-      setDiscountFor(null);
-      alert('Billing completed!');
+      setPaymentMode('cash');
+      setSplitCash(0);
+      setSplitUpi(0);
+      setSplitCredit(0);
+      alert(`Sale completed successfully! Invoice #${invoice.invoice_no}`);
     } catch (err: any) {
-      console.error('Checkout failed:', err);
-      const offline = typeof navigator !== 'undefined' && !navigator.onLine;
-      const code = err?.code as string | undefined;
-      const networkFail =
-        !err?.response && (code === 'ERR_NETWORK' || code === 'ECONNABORTED' || err?.message === 'Network Error');
-      if (offline || networkFail) {
-        await billOffline(invoiceBody, splitLines);
-        return;
-      }
-      const message = err?.response?.data?.message || err?.response?.data?.error;
-      alert(message || 'Billing failed. Please try again.');
-    } finally {
-      setCheckingOut(false);
-    }
-  };
-
-  /**
-   * Records a sale the server could not be told about.
-   *
-   * The order here is the whole thing. The sale is written to the outbox and
-   * that write is AWAITED before the cashier is told anything: if it fails, the
-   * only honest answer is that nothing was recorded, and the cart stays so they
-   * can try again. The previous version wrote to a queue nothing read and told
-   * the cashier the sale was saved.
-   *
-   * The number comes from the till's own counter, so the customer leaves with a
-   * complete tax invoice rather than a slip that becomes one later.
-   */
-  const billOffline = async (
-    body: Record<string, unknown>,
-    splitLines?: { payment_mode: string; amount: number }[]
-  ) => {
-    const terminal = useAppStore.getState().terminal;
-    if (!terminal) {
-      alert('No connection, and this device is not registered to a counter — so it cannot number a bill. Nothing was recorded.');
-      return;
-    }
-
-    let allocated: { invoiceNo: string };
-    try {
-      allocated = await allocateInvoiceNumber(terminal.id, terminal.code);
-    } catch (err: any) {
-      alert(`No connection, and this device could not allocate a bill number (${err?.message ?? 'storage unavailable'}). Nothing was recorded.`);
-      return;
-    }
-
-    const billedAt = new Date().toISOString();
-    const totals = calculateTotals();
-    const customer = customers.find((c) => c.id === selectedCustomerId);
-
-    // What the paper says. It is computed here rather than by the server,
-    // because the server has not been told yet — and on sync the server prices
-    // it again from its own list. If the two disagree the sale still stands and
-    // a reconciliation exception says so; the customer paid what the receipt
-    // says.
-    const invoice = {
-      ...body,
-      invoice_no: allocated.invoiceNo,
-      billed_offline: true,
-      billed_at: billedAt,
-    };
-    // The ids travel with the line rather than being looked up again later. The
-    // cart is cleared moments after this, and matching a line back to it by
-    // product name would pick the wrong one the first time a shop stocks two
-    // things with the same name.
-    const lines = cart.map((item) => {
-      const rate = item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices);
-      return {
-        product_id: item.product.id,
-        product_unit_id: item.unit?.id,
-        product_name: item.product.name,
-        hsn_code: (item.product as any).hsn_code ?? '',
-        gst_rate: item.product.gst_rate,
-        unit_label: item.unit?.label ?? '',
-        unit_qty: item.quantity,
-        quantity: item.quantity * (item.unit?.qty_in_base ?? 1),
-        rate,
-        total: Math.max(0, rate * item.quantity - (item.discount || 0)),
-      };
-    });
-
-    try {
-      await queueForSync({
-        key: checkoutKey.current,
-        invoice,
+      console.warn('Checkout network failure, saving offline:', err);
+      // Fallback: Queue invoice locally for offline sync
+      enqueuePendingInvoice({
+        invoiceBody: invoicePayload as Record<string, unknown>,
         splitPayments: splitLines,
-        invoiceNo: allocated.invoiceNo,
-        billedAt,
-        receipt: {
-          invoice: {
-            invoice_no: allocated.invoiceNo,
-            invoice_date: billedAt,
-            sub_total: totals.subtotal,
-            cgst: totals.cgst,
-            sgst: totals.sgst,
-            igst: totals.igst,
-            discount: Math.max(0, Number(billDiscount) || 0),
-            round_off: totals.roundOff,
-            total: totals.total,
-            payment_mode: useSplitPayment ? 'split' : paymentMode,
-            customer_id: selectedCustomerId || null,
-          },
-          lines,
-        },
       });
-    } catch (err: any) {
-      // The one case where the cashier must not hand over the goods.
-      alert(`No connection, and this sale could NOT be saved on the device (${err?.message ?? 'storage unavailable'}). Nothing was recorded — do not hand over the goods.`);
-      return;
-    }
-
-    // Only now is the sale real from the cashier's point of view.
-    checkoutKey.current = '';
-    void recordSale({
-      key: allocated.invoiceNo,
-      billedAt,
-      total: totals.total,
-      customerId: selectedCustomerId || null,
-      lines: lines.map((l) => ({
-        product_id: l.product_id,
-        product_name: l.product_name,
-        product_unit_id: l.product_unit_id,
-        unit_label: l.unit_label,
-        unit_qty: l.unit_qty,
-        quantity: l.quantity,
-        rate: l.rate,
-        total: l.total,
-      })),
-    }).catch(() => undefined);
-    printReceipt(
-      {
-        invoice_no: allocated.invoiceNo,
-        invoice_date: billedAt,
-        sub_total: totals.subtotal,
-        cgst: totals.cgst,
-        sgst: totals.sgst,
-        igst: totals.igst,
-        discount: Math.max(0, Number(billDiscount) || 0),
-        round_off: totals.roundOff,
-        total: totals.total,
-        payment_mode: useSplitPayment ? 'split' : paymentMode,
-        customer_gstin: customer?.gstin,
-      },
-      lines
-    );
-
-    clearCart();
-    setPaymentMode('cash');
-    setUseSplitPayment(false);
-    setSplitPayments([{ mode: 'cash', amount: '' }]);
-    setSelectedCustomerId('');
-    setBillDiscount('');
-    setTendered('');
-    setDiscountFor(null);
-    await refreshQueued();
-    alert(`No connection. Bill ${allocated.invoiceNo} is saved on this device and will be sent when the network returns.`);
-  };
-
-  checkoutRef.current = handleCheckout;
-
-  const addSplitPayment = () => {
-    setSplitPayments([...splitPayments, { mode: 'cash', amount: '' }]);
-  };
-
-  const updateSplitPayment = (index: number, field: 'mode' | 'amount', value: string) => {
-    const updated = [...splitPayments];
-    updated[index][field] = value;
-    setSplitPayments(updated);
-  };
-
-  const removeSplitPayment = (index: number) => {
-    if (splitPayments.length > 1) {
-      setSplitPayments(splitPayments.filter((_, i) => i !== index));
+      useAppStore.getState().setSyncPending(getPendingInvoiceCount());
+      setCart([]);
+      setSelectedCustomerId('');
+      alert('Network unavailable: Bill recorded locally in offline queue. Will sync automatically upon reconnection.');
+    } finally {
+      setIsProcessing(false);
     }
   };
 
-  /**
-   * Print the bill the customer takes away.
-   *
-   * It prints the SERVER's invoice and lines, not the cart. The two should
-   * agree, but the paper in the customer's hand has to match the books exactly,
-   * and only one of the two is authoritative. The previous version rebuilt the
-   * figures client-side from `calculateTotals()` and priced each line with
-   * `lineUnitPrice(item.product)` — the product's price rather than the price of
-   * the unit actually sold — so a 25 kg sack printed at the loose per-kilo rate.
-   *
-   * It is also a tax invoice, which has statutory content. Under CGST Rule 46 a
-   * registered supplier's invoice must carry the words "Tax Invoice", the
-   * supplier's name and GSTIN, a consecutive serial number, the date, the
-   * recipient's GSTIN where registered, the HSN code, the taxable value and the
-   * tax under each head. The previous version printed "RECEIPT" with no GSTIN
-   * and no HSN at all, which is not a document a shop can legally issue.
-   */
-  const printReceipt = (invoice: any, lines: any[]) => {
-    const customer = selectedCustomerId ? customers.find((c) => c.id === selectedCustomerId) : null;
-    const gstin = (store as any)?.gstin ?? '';
-    const esc = (v: unknown) =>
-      String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string));
-    const rs = (n: number) => `₹${Number(n ?? 0).toFixed(2)}`;
-    const qty = (n: number) => String(Number(n ?? 0)).replace(/\.?0+$/, '');
-
-    const taxLine = (label: string, amount: number) =>
-      amount > 0 ? `<tr><td>${label}</td><td class="r">${rs(amount)}</td></tr>` : '';
-
-    const receiptHtml = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>${esc(invoice.invoice_no)}</title>
-<style>
-  @page { margin: 4mm; }
-  body { font-family: ui-monospace, "SF Mono", Menlo, monospace; width: 76mm; margin: 0; font-size: 11px; color: #000; }
-  .c { text-align: center; }
-  .r { text-align: right; }
-  .b { font-weight: 700; }
-  .rule { border-top: 1px dashed #000; margin: 4px 0; }
-  table { width: 100%; border-collapse: collapse; }
-  td, th { padding: 1px 0; vertical-align: top; }
-  .small { font-size: 10px; }
-  .title { font-size: 13px; letter-spacing: 1px; }
-</style></head><body>
-  <div class="c b title">TAX INVOICE</div>
-  <div class="c b">${esc(store?.name)}</div>
-  ${(store as any)?.address ? `<div class="c small">${esc((store as any).address)}</div>` : ''}
-  ${(store as any)?.phone ? `<div class="c small">Ph: ${esc((store as any).phone)}</div>` : ''}
-  ${gstin ? `<div class="c small">GSTIN: ${esc(gstin)}</div>` : ''}
-  <div class="rule"></div>
-  <table class="small">
-    <tr><td>Invoice</td><td class="r b">${esc(invoice.invoice_no)}</td></tr>
-    <tr><td>Date</td><td class="r">${new Date(invoice.invoice_date ?? Date.now()).toLocaleString('en-IN')}</td></tr>
-    <tr><td>Customer</td><td class="r">${esc(customer?.name ?? 'Walk-in')}</td></tr>
-    ${customer?.gstin ? `<tr><td>Cust GSTIN</td><td class="r">${esc(customer.gstin)}</td></tr>` : ''}
-  </table>
-  <div class="rule"></div>
-  <table>
-    <tr class="b"><th style="text-align:left">Item</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr>
-    ${lines
-      .map((l: any) => {
-        // The unit is what the customer asked for — "2 x 25 kg sack" — and the
-        // rate is the price of one of those, so rate x qty is the amount shown.
-        const unit = l.unit_label ? ` ${esc(l.unit_label)}` : '';
-        const hsn = l.hsn_code ? `<div class="small">HSN ${esc(l.hsn_code)}</div>` : '';
-        return `<tr><td>${esc(l.product_name ?? '')}${hsn}</td>` +
-          `<td class="r">${qty(l.unit_qty ?? l.quantity)}${unit}</td>` +
-          `<td class="r">${rs(l.rate)}</td>` +
-          `<td class="r">${rs(l.total)}</td></tr>`;
-      })
-      .join('')}
-  </table>
-  <div class="rule"></div>
-  <table>
-    <tr><td>Taxable value</td><td class="r">${rs(invoice.sub_total)}</td></tr>
-    ${invoice.discount > 0 ? `<tr><td>Discount</td><td class="r">- ${rs(invoice.discount)}</td></tr>` : ''}
-    ${taxLine('CGST', invoice.cgst)}
-    ${taxLine('SGST', invoice.sgst)}
-    ${taxLine('IGST', invoice.igst)}
-    ${invoice.round_off ? `<tr><td>Round off</td><td class="r">${rs(invoice.round_off)}</td></tr>` : ''}
-    <tr class="b"><td>TOTAL</td><td class="r">${rs(invoice.total)}</td></tr>
-    <tr><td>Paid by</td><td class="r">${esc(invoice.payment_mode)}</td></tr>
-    ${tendered ? `<tr><td>Cash</td><td class="r">${rs(Number(tendered))}</td></tr>
-    <tr class="b"><td>Change</td><td class="r">${rs(Number(tendered) - Number(invoice.total))}</td></tr>` : ''}
-  </table>
-  <div class="rule"></div>
-  <div class="c small">Thank you — goods once sold are taken back only as per store policy.</div>
-</body></html>`;
-
-    const printWindow = window.open('', '_blank', 'height=600,width=380');
-    if (printWindow) {
-      printWindow.document.write(receiptHtml);
-      printWindow.document.close();
-      setTimeout(() => printWindow.print(), 250);
-    }
+  const handlePrint = () => {
+    window.print();
   };
-
-  const { subtotal, cgst, sgst, igst, roundOff, total } = calculateTotals();
 
   return (
-    <div style={styles.container}>
-      {/* The counter has to know, at a glance and without asking, whether what
-          it bills is reaching the server. A cashier who does not know they are
-          offline cannot tell a customer why the bill looks different, and a
-          shop that does not know sales are queued closes the day on the wrong
-          figures. */}
-      {(!till.online || till.queued > 0 || till.rejected > 0 || (till.stale && till.ready)) && (
+    <AppLayout fullWidth>
+      <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - var(--header-height))' }}>
+        {/* Top Control Bar: Barcode scan input + Customer Selector + Bill Hold */}
         <div
           style={{
-            ...styles.tillBanner,
-            ...(till.rejected > 0
-              ? styles.tillBannerBad
-              : till.online
-              ? styles.tillBannerBusy
-              : styles.tillBannerOffline),
+            backgroundColor: '#ffffff',
+            borderBottom: '1px solid var(--border-light)',
+            padding: '0.65rem 1.25rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.875rem',
+            flexWrap: 'wrap',
           }}
         >
-          {!till.online && <strong>No connection. </strong>}
-          {!till.online && till.ready && 'Bills are being saved on this device and sent when the line returns. '}
-          {!till.online && !till.ready && 'This device has no catalogue saved, so it cannot bill offline. '}
-          {till.queued > 0 && `${till.queued} bill${till.queued === 1 ? '' : 's'} waiting to be sent. `}
-          {till.rejected > 0 && (
-            <strong>
-              {till.rejected} bill{till.rejected === 1 ? '' : 's'} the server refused — someone has to look at
-              {till.rejected === 1 ? ' it' : ' them'}.{' '}
-            </strong>
-          )}
-          {till.online && till.stale && till.ready &&
-            `Prices on this device were last refreshed ${Math.round(till.snapshotAgeHours)} hours ago.`}
-        </div>
-      )}
-      <div style={styles.leftPanel}>
-        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', alignItems: 'center' }}>
-          <div style={{ flex: 1 }}>
-            <input
-              ref={barcodeRef}
-              type="text"
-              placeholder="Scan barcode (F2) or search product..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && search) {
-                  handleBarcodeScan(search);
-                }
-              }}
-              style={styles.searchInput}
-              autoFocus
-            />
-          </div>
-          <button
-            type="button"
-            className="btn btn-outline"
-            style={{
-              padding: '0.75rem 1rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.45rem',
-              fontSize: '0.9rem',
-              borderRadius: '4px',
-              border: '1px solid #cbd5e1',
-              backgroundColor: '#fff',
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-            }}
-            onClick={() => setScannerOpen(true)}
-            title="Scan Barcode with Camera"
-          >
-            <IconCamera /> Scan Camera
-          </button>
-        </div>
+          {/* Barcode & Product Search Input */}
+          <div style={{ flex: '1 1 320px', position: 'relative' }}>
+            <div style={{ display: 'flex', gap: '0.35rem' }}>
+              <input
+                ref={searchInputRef}
+                type="text"
+                className="form-input text-mono"
+                placeholder="Scan Barcode (F2) or type Product Name / Brand..."
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchInput.trim()) {
+                    handleBarcodeScanned(searchInput.trim());
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                onClick={() => setScannerOpen(true)}
+                title="Camera / Manual Barcode Scan"
+              >
+                <IconBarcode size={18} />
+              </button>
+            </div>
 
-        {filteredProducts.length > 0 && (
-          <div style={styles.suggestions}>
-            {filteredProducts.map((p) => (
+            {/* Live Autocomplete Dropdown */}
+            {searchResults.length > 0 && (
               <div
-                key={p.id}
-                style={styles.suggestionItem}
-                onClick={() => {
-                  // Through addProduct, not addToCart: a line with no unit has
-                  // no price and no way to move stock. The search list was
-                  // missed when the tiles were converted.
-                  addProduct(p);
-                  setSearch('');
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  backgroundColor: '#ffffff',
+                  border: '1px solid var(--border-medium)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-lg)',
+                  zIndex: 200,
+                  maxHeight: 280,
+                  overflowY: 'auto',
+                  marginTop: 4,
                 }}
               >
-                <span>{p.name}</span>
-                <span>{formatMoney(lineUnitPrice(p, useWholesalePrices))}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div style={styles.productGrid}>
-          {products.slice(0, 50).map((p) => (
-            <div
-              key={p.id}
-              style={styles.productCard}
-              onClick={() => addProduct(p)}
-            >
-              {p.image_url && (
-                <img
-                  src={p.image_url}
-                  alt={p.name}
-                  style={styles.productImage}
-                  onError={(e) => (e.currentTarget.style.display = 'none')}
-                />
-              )}
-              <div style={styles.productName}>{p.name}</div>
-              <div style={styles.productPrice}>{formatMoney(lineUnitPrice(p, useWholesalePrices))}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div style={styles.rightPanel}>
-        <h2 style={styles.cartTitle}>Cart ({cart.length})</h2>
-
-        <div style={styles.cartItems}>
-          {cart.map((item) => (
-            <div key={lineKeyOf(item)} style={styles.cartItem}>
-              <div style={styles.cartItemInfo}>
-                <div style={styles.cartItemName}>{item.product.name}</div>
-                <div style={styles.cartItemPrice}>
-                  {formatMoney((item.unit?.sell_price ?? lineUnitPrice(item.product, useWholesalePrices)))} × {item.quantity}
-                  {item.unit?.label && <span style={styles.cartItemUnit}> {item.unit.label}</span>}
-                  {/* What actually leaves the shelf, when it differs from what
-                      the customer asked for: 2 sacks is 50 kg of stock. */}
-                  {item.unit && item.unit.qty_in_base !== 1 && (
-                    <span style={styles.cartItemBase}>
-                      {' '}= {(item.quantity * item.unit.qty_in_base).toFixed(3).replace(/\.?0+$/, '')} base
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div style={styles.cartItemActions}>
-                {/* A discount off this line. The counter gives these constantly
-                    — a damaged label, a regular customer — and the field was
-                    hardcoded to zero, so the only way to honour one was to
-                    change the price for everybody. */}
-                {discountFor === lineKeyOf(item) ? (
-                  <input
-                    type="number"
-                    autoFocus
-                    min={0}
-                    value={item.discount || ''}
-                    placeholder="₹ off"
-                    onChange={(e) => {
-                      const v = Math.max(0, parseFloat(e.target.value) || 0);
-                      updateCartDiscount(lineKeyOf(item), v);
+                {searchResults.map((p) => (
+                  <div
+                    key={p.id}
+                    onClick={() => {
+                      addProductToCart(p);
+                      setSearchInput('');
+                      setSearchResults([]);
                     }}
-                    onBlur={() => setDiscountFor(null)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === 'Escape') setDiscountFor(null);
-                    }}
-                    style={{ ...styles.qtyInput, width: '64px' }}
-                  />
-                ) : (
-                  <button
-                    onClick={() => setDiscountFor(lineKeyOf(item))}
-                    title="Discount this line"
                     style={{
-                      ...styles.qtyBtn,
-                      width: 'auto',
-                      padding: '0 6px',
-                      color: item.discount ? '#b45309' : '#64748b',
-                      fontWeight: item.discount ? 700 : 400,
+                      padding: '0.5rem 0.875rem',
+                      borderBottom: '1px solid var(--border-light)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      cursor: 'pointer',
                     }}
+                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f8fafc')}
+                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = '#fff')}
                   >
-                    {item.discount ? `-₹${item.discount}` : '%'}
-                  </button>
-                )}
-                <button
-                  onClick={() => {
-                    const newQty = item.product.allow_decimal
-                      ? item.quantity - 0.5
-                      : item.quantity - 1;
-                    updateCartQuantity(lineKeyOf(item), Math.max(0.5, newQty));
-                  }}
-                  style={styles.qtyBtn}
-                >
-                  -
-                </button>
-                <input
-                  type={item.product.allow_decimal ? 'number' : 'text'}
-                  value={item.quantity}
-                  onChange={(e) => {
-                    const val = parseFloat(e.target.value) || 0;
-                    if (val > 0) updateCartQuantity(lineKeyOf(item), val);
-                  }}
-                  step={item.product.allow_decimal ? '0.5' : '1'}
-                  style={{...styles.qtyInput, width: '60px'}}
-                />
-                <button
-                  onClick={() => {
-                    const newQty = item.product.allow_decimal
-                      ? item.quantity + 0.5
-                      : item.quantity + 1;
-                    updateCartQuantity(lineKeyOf(item), newQty);
-                  }}
-                  style={styles.qtyBtn}
-                >
-                  +
-                </button>
-                <button
-                  onClick={() => removeFromCart(lineKeyOf(item))}
-                  style={styles.removeBtn}
-                >
-                  ✕
-                </button>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: '0.85rem' }}>{p.name}</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        Brand: <strong>{p.brand || 'Unbranded'}</strong> &middot; Barcode: {p.barcode}
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--primary-600)' }}>
+                        ₹{p.sell_price.toFixed(2)}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                        Stock: {p.stock ?? 0}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            </div>
-          ))}
-        </div>
-
-        <div style={styles.totals}>
-          <div style={styles.totalRow}>
-            <span>Subtotal</span>
-            <span>{formatMoney(subtotal)}</span>
-          </div>
-          {cgst > 0 && <div style={styles.totalRow}>
-            <span>CGST</span>
-            <span>{formatMoney(cgst)}</span>
-          </div>}
-          {sgst > 0 && <div style={styles.totalRow}>
-            <span>SGST</span>
-            <span>{formatMoney(sgst)}</span>
-          </div>}
-          {igst > 0 && <div style={styles.totalRow}>
-            <span>IGST</span>
-            <span>{formatMoney(igst)}</span>
-          </div>}
-          <div style={styles.totalRow}>
-            <span>Round Off</span>
-            <span>{formatMoney(roundOff)}</span>
-          </div>
-          <div style={styles.grandTotal}>
-            <span>Total</span>
-            <span>{formatMoney(total)}</span>
+            )}
           </div>
 
-          <div style={styles.counterRow}>
-            <label style={styles.counterLabel} htmlFor="bill-discount">Bill discount</label>
-            <input
-              id="bill-discount"
-              type="number"
-              min={0}
-              value={billDiscount}
-              placeholder="0.00"
-              onChange={(e) => setBillDiscount(e.target.value)}
-              style={styles.counterInput}
-            />
-          </div>
-
-          {/* Cash and change. Shown only when cash is actually being taken —
-              on a card or UPI sale there is nothing to count out. */}
-          {!useSplitPayment && paymentMode === 'cash' && total > 0 && (
-            <>
-              <div style={styles.counterRow}>
-                <label style={styles.counterLabel} htmlFor="tendered">Cash received</label>
-                <input
-                  id="tendered"
-                  type="number"
-                  min={0}
-                  value={tendered}
-                  placeholder={total.toFixed(2)}
-                  onChange={(e) => setTendered(e.target.value)}
-                  style={styles.counterInput}
-                />
-              </div>
-              {Number(tendered) > 0 && (
-                <div
-                  style={{
-                    ...styles.change,
-                    // Short is the case worth shouting about: handing over goods
-                    // for less than the bill is money gone.
-                    background: Number(tendered) + 0.005 < total ? '#fef2f2' : '#f0fdf4',
-                    color: Number(tendered) + 0.005 < total ? '#b91c1c' : '#15803d',
-                  }}
-                >
-                  <span>{Number(tendered) + 0.005 < total ? 'Short by' : 'Change due'}</span>
-                  <span>{formatMoney(Math.abs(Number(tendered) - total))}</span>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        <div style={styles.paymentSection}>
-          <div style={{ marginBottom: '0.5rem' }}>
-            <label style={{ display: 'block', fontSize: '0.8rem', color: '#555', marginBottom: 4 }}>Customer (required for credit)</label>
+          {/* Customer Selector */}
+          <div style={{ width: 260 }}>
             <select
+              className="form-select"
               value={selectedCustomerId}
               onChange={(e) => setSelectedCustomerId(e.target.value)}
-              style={{ ...styles.select, width: '100%' }}
             >
-              <option value="">Walk-in</option>
+              <option value="">Walk-in Retail Customer</option>
               {customers.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name}
-                  {c.phone ? ` · ${c.phone}` : ''}
-                  {c.is_wholesale ? ' (wholesale)' : ''}
+                  {c.name} {c.phone ? `(${c.phone})` : ''} {c.is_wholesale ? '[Wholesale]' : ''}
                 </option>
               ))}
             </select>
           </div>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px', cursor: 'pointer', fontSize: '0.9rem' }}>
+
+          {/* Customer Khata Status Pill */}
+          {selectedCustomer && (
+            <div
+              style={{
+                fontSize: '0.75rem',
+                backgroundColor: 'var(--bg-subtle)',
+                padding: '0.35rem 0.65rem',
+                borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--border-light)',
+              }}
+            >
+              Credit Limit: <strong>₹{selectedCustomer.credit_limit}</strong>
+            </div>
+          )}
+
+          {/* Wholesale Pricing Toggle */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.8rem', cursor: 'pointer' }}>
             <input
               type="checkbox"
               checked={useWholesalePrices}
               onChange={(e) => setUseWholesalePrices(e.target.checked)}
             />
-            Use wholesale price when set
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', cursor: 'pointer' }}>
-            <input
-              type="checkbox"
-              checked={useSplitPayment}
-              onChange={(e) => setUseSplitPayment(e.target.checked)}
-            />
-            Split Payment
+            <span>Wholesale Price</span>
           </label>
 
-          {useSplitPayment ? (
-            <div style={styles.splitPaymentContainer}>
-              {splitPayments.map((payment, index) => (
-                <div key={index} style={styles.splitPaymentRow}>
-                  <select
-                    value={payment.mode}
-                    onChange={(e) => updateSplitPayment(index, 'mode', e.target.value)}
-                    style={{ ...styles.select, flex: 1 }}
+          {/* Suspended Carts (Hold F8) */}
+          <div style={{ display: 'flex', gap: '0.35rem', marginLeft: 'auto' }}>
+            {heldCarts.length > 0 && (
+              <div style={{ display: 'flex', gap: '0.25rem' }}>
+                {heldCarts.map((h) => (
+                  <button
+                    key={h.id}
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    style={{ backgroundColor: '#fffbeb', color: '#b45309' }}
+                    onClick={() => resumeHeldCart(h.id)}
+                    title={`Resume held cart: ${h.name}`}
                   >
-                    <option value="cash">Cash</option>
-                    <option value="upi">UPI</option>
-                    <option value="card">Card</option>
-                    <option value="bank">Bank</option>
-                  </select>
-                  <input
-                    type="number"
-                    placeholder="Amount"
-                    value={payment.amount}
-                    onChange={(e) => updateSplitPayment(index, 'amount', e.target.value)}
-                    style={{ ...styles.input, flex: 1 }}
-                  />
-                  {splitPayments.length > 1 && (
-                    <button onClick={() => removeSplitPayment(index)} style={styles.removeBtn}>
-                      ✕
-                    </button>
-                  )}
-                </div>
-              ))}
-              <button onClick={addSplitPayment} style={styles.addSplitBtn}>
-                + Add Payment Method
-              </button>
-              <div style={styles.totalRow}>
-                <span>Total</span>
-                <span>{formatMoney(getPaymentAmount())}</span>
+                    Resume {h.name}
+                  </button>
+                ))}
               </div>
-            </div>
-          ) : (
-            <select
-              value={paymentMode}
-              onChange={(e) => setPaymentMode(e.target.value)}
-              style={styles.select}
-            >
-              <option value="cash">Cash</option>
-              <option value="upi">UPI</option>
-              <option value="card">Card</option>
-              <option value="bank">Bank</option>
-              <option value="credit">Credit</option>
-            </select>
-          )}
+            )}
 
-          <div style={styles.counterActions}>
             <button
-              onClick={holdBill}
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={holdCurrentCart}
               disabled={cart.length === 0}
-              style={{ ...styles.holdBtn, opacity: cart.length === 0 ? 0.45 : 1 }}
-              title="Park this bill (F7)"
+              title="Hold active cart to serve next customer (F8)"
             >
-              Hold
+              Hold (F8)
             </button>
+
             <button
-              onClick={() => setShowHeld((v) => !v)}
-              style={styles.holdBtn}
-              title="Parked bills (F8)"
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={clearActiveCart}
+              disabled={cart.length === 0}
             >
-              Parked{heldBills.length ? ` (${heldBills.length})` : ''}
+              Clear
             </button>
           </div>
-
-          <button onClick={handleCheckout} style={styles.checkoutBtn}>
-            Checkout
-          </button>
-
-          <div style={styles.keyHints}>
-            F2 scan · F4 discount · F6 cash · F7 hold · F8 parked · F9 checkout
-          </div>
-
-          {showHeld && (
-            <div style={styles.heldPanel}>
-              {heldBills.length === 0 ? (
-                <div style={styles.heldEmpty}>No parked bills.</div>
-              ) : (
-                heldBills.map((b) => {
-                  const worth = b.cart.reduce(
-                    (sum: number, l: any) => sum + (l.unit?.sell_price ?? 0) * l.quantity - (l.discount || 0),
-                    0
-                  );
-                  return (
-                    <div key={b.id} style={styles.heldRow}>
-                      <div>
-                        <div style={{ fontWeight: 600 }}>
-                          {b.cart.length} item{b.cart.length === 1 ? '' : 's'} · {formatMoney(worth)}
-                        </div>
-                        <div style={styles.heldWhen}>
-                          parked {new Date(b.at).toLocaleTimeString('en-IN')}
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: '0.25rem' }}>
-                        <button onClick={() => recallBill(b.id)} style={styles.recallBtn}>
-                          Resume
-                        </button>
-                        <button
-                          onClick={() => persistHeld(heldBills.filter((x) => x.id !== b.id))}
-                          style={styles.discardBtn}
-                          title="Discard this parked bill"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          )}
         </div>
 
-        <button
-          onClick={() => navigate('/')}
-          style={styles.backBtn}
-        >
-          ← Back to Menu
-        </button>
-      </div>
-
-      {/*
-        Choosing the unit.
-
-        This is the counter's version of the whole units change: the same rice
-        goes out as 250 g weighed into a bag or as a 25 kg sack, at different
-        prices, and the till has to ask which. The per-base figure is shown
-        because a cashier comparing a bag against loose needs the comparison
-        made for them, not the arithmetic.
-      */}
-      {unitPicker && (
-        <div style={styles.pickerBackdrop} onClick={() => setUnitPicker(null)} role="presentation">
-          <div
-            style={styles.pickerPanel}
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label={`Choose a unit for ${unitPicker.product.name}`}
-          >
-            <div style={styles.pickerHead}>
-              <strong>{unitPicker.product.name}</strong>
-              <span style={styles.pickerHint}>How is it going out?</span>
+        {/* Main Work Area: Split into Bill Table (Left) and Payment Panel (Right) */}
+        <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* Bill Items Table (70% width) */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '1rem' }}>
+            <div className="erp-table-container">
+              <table className="erp-table">
+                <thead>
+                  <tr>
+                    <th style={{ width: 40 }}>#</th>
+                    <th>Product & Brand</th>
+                    <th>Unit / Pack</th>
+                    <th className="text-right" style={{ width: 110 }}>Rate (₹)</th>
+                    <th className="text-center" style={{ width: 130 }}>Quantity</th>
+                    <th className="text-right" style={{ width: 100 }}>Disc (₹)</th>
+                    <th className="text-center" style={{ width: 70 }}>GST</th>
+                    <th className="text-right" style={{ width: 110 }}>Total (₹)</th>
+                    <th className="text-center" style={{ width: 50 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cart.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} style={{ textAlign: 'center', padding: '4rem 1rem', color: 'var(--text-muted)' }}>
+                        <div style={{ fontSize: '1.1rem', fontWeight: 600, marginBottom: '0.35rem' }}>
+                          Cart is empty
+                        </div>
+                        <p style={{ margin: 0, fontSize: '0.85rem' }}>
+                          Scan a barcode or use the search bar above (Press <kbd>F2</kbd>) to add items to the bill.
+                        </p>
+                      </td>
+                    </tr>
+                  ) : (
+                    cart.map((item, idx) => {
+                      const lineTotal = item.rate * item.quantity - item.discount;
+                      return (
+                        <tr key={item.product.id}>
+                          <td className="text-mono" style={{ color: 'var(--text-muted)' }}>{idx + 1}</td>
+                          <td>
+                            <div style={{ fontWeight: 600 }}>{item.product.name}</div>
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                              Brand: <strong>{item.product.brand || 'Unbranded'}</strong> &middot; {item.product.barcode}
+                            </div>
+                          </td>
+                          <td>
+                            <span className="badge badge-neutral" style={{ fontSize: '0.7rem' }}>
+                              {item.unitLabel || 'Piece'}
+                            </span>
+                          </td>
+                          <td className="text-right text-mono">
+                            ₹{item.rate.toFixed(2)}
+                          </td>
+                          <td className="text-center">
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+                              <button
+                                type="button"
+                                className="btn btn-outline btn-sm"
+                                style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem' }}
+                                onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
+                              >
+                                -
+                              </button>
+                              <input
+                                type="number"
+                                className="form-input text-mono"
+                                style={{ width: 60, padding: '0.2rem', textAlign: 'center' }}
+                                value={item.quantity}
+                                onChange={(e) => updateQuantity(item.product.id, parseFloat(e.target.value) || 0)}
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-outline btn-sm"
+                                style={{ padding: '0.15rem 0.4rem', fontSize: '0.75rem' }}
+                                onClick={() => updateQuantity(item.product.id, item.quantity + 1)}
+                              >
+                                +
+                              </button>
+                            </div>
+                          </td>
+                          <td className="text-right">
+                            <input
+                              type="number"
+                              className="form-input text-mono"
+                              style={{ width: 75, padding: '0.2rem', textAlign: 'right' }}
+                              value={item.discount || ''}
+                              placeholder="0"
+                              onChange={(e) => updateDiscount(item.product.id, parseFloat(e.target.value) || 0)}
+                            />
+                          </td>
+                          <td className="text-center text-mono" style={{ fontSize: '0.8rem' }}>
+                            {item.product.gst_rate}%
+                          </td>
+                          <td className="text-right text-mono font-bold">
+                            ₹{lineTotal.toFixed(2)}
+                          </td>
+                          <td className="text-center">
+                            <button
+                              type="button"
+                              onClick={() => removeFromCart(item.product.id)}
+                              style={{ background: 'none', border: 'none', color: '#dc2626', cursor: 'pointer' }}
+                              title="Remove item"
+                            >
+                              <IconTrash2 size={16} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
-            {unitPicker.units.map((u) => (
-              <button
-                key={u.id}
-                style={{ ...styles.pickerRow, opacity: u.has_price === false ? 0.55 : 1 }}
-                disabled={u.has_price === false}
-                onClick={() => {
-                  addToCart({ product: unitPicker.product, unit: u, quantity: 1, discount: 0 });
-                  setUnitPicker(null);
-                  barcodeRef.current?.focus();
+          </div>
+
+          {/* Checkout & Tender Summary Panel (30% width, min 360px) */}
+          <div
+            style={{
+              width: 380,
+              backgroundColor: '#ffffff',
+              borderLeft: '1px solid var(--border-light)',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+              padding: '1.25rem',
+            }}
+          >
+            {/* Bill Calculations Breakdown */}
+            <div>
+              <h3 style={{ margin: '0 0 1rem', fontSize: '1.1rem', fontWeight: 700, borderBottom: '1px solid var(--border-light)', paddingBottom: '0.5rem' }}>
+                Bill Summary
+              </h3>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.875rem' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Items Subtotal:</span>
+                <span className="text-mono">₹{calculations.subtotal.toFixed(2)}</span>
+              </div>
+
+              {calculations.cgst > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>CGST (Intra-state):</span>
+                  <span className="text-mono">₹{calculations.cgst.toFixed(2)}</span>
+                </div>
+              )}
+
+              {calculations.sgst > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>SGST (Intra-state):</span>
+                  <span className="text-mono">₹{calculations.sgst.toFixed(2)}</span>
+                </div>
+              )}
+
+              {calculations.igst > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>IGST (Inter-state):</span>
+                  <span className="text-mono">₹{calculations.igst.toFixed(2)}</span>
+                </div>
+              )}
+
+              {calculations.roundOff !== 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem', fontSize: '0.85rem' }}>
+                  <span style={{ color: 'var(--text-secondary)' }}>Round Off:</span>
+                  <span className="text-mono">₹{calculations.roundOff.toFixed(2)}</span>
+                </div>
+              )}
+
+              {/* Grand Total */}
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'baseline',
+                  margin: '1rem 0',
+                  padding: '0.75rem',
+                  backgroundColor: '#f8fafc',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border-light)',
                 }}
               >
-                <span style={{ fontWeight: 600 }}>{u.label}</span>
-                <span style={styles.pickerRate}>
-                  {u.has_price === false ? 'no price set' : `₹${u.sell_price.toFixed(2)}`}
-                  {u.has_price !== false && u.qty_in_base !== 1 && (
-                    <span style={styles.pickerPerBase}>
-                      {' '}· {formatMoney((u.sell_price / u.qty_in_base))} per base
-                    </span>
-                  )}
+                <span style={{ fontWeight: 700, fontSize: '1rem' }}>Total Payable:</span>
+                <span className="text-mono" style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--primary-600)' }}>
+                  ₹{calculations.grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
                 </span>
+              </div>
+
+              {/* Payment Mode Selection */}
+              <div style={{ marginBottom: '1rem' }}>
+                <label className="form-label">Payment Method</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.35rem', marginBottom: '0.75rem' }}>
+                  {[
+                    { mode: 'cash', label: 'Cash' },
+                    { mode: 'upi', label: 'UPI / QR' },
+                    { mode: 'card', label: 'Card' },
+                    { mode: 'bank', label: 'Bank' },
+                    { mode: 'credit', label: 'Credit (Khata)' },
+                    { mode: 'split', label: 'Split Pay' },
+                  ].map((m) => (
+                    <button
+                      key={m.mode}
+                      type="button"
+                      onClick={() => setPaymentMode(m.mode as any)}
+                      className={paymentMode === m.mode ? 'btn btn-primary btn-sm' : 'btn btn-outline btn-sm'}
+                      style={{ padding: '0.5rem 0.25rem', fontSize: '0.75rem', fontWeight: 600 }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Split Payment inputs if selected */}
+                {paymentMode === 'split' && (
+                  <div
+                    style={{
+                      background: '#f8fafc',
+                      padding: '0.65rem',
+                      borderRadius: 'var(--radius-md)',
+                      border: '1px solid var(--border-light)',
+                    }}
+                  >
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '0.4rem' }}>
+                      <div>
+                        <label className="form-label">Cash (₹)</label>
+                        <input
+                          type="number"
+                          className="form-input text-mono"
+                          value={splitCash || ''}
+                          placeholder="0"
+                          onChange={(e) => setSplitCash(parseFloat(e.target.value) || 0)}
+                        />
+                      </div>
+                      <div>
+                        <label className="form-label">UPI (₹)</label>
+                        <input
+                          type="number"
+                          className="form-input text-mono"
+                          value={splitUpi || ''}
+                          placeholder="0"
+                          onChange={(e) => setSplitUpi(parseFloat(e.target.value) || 0)}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="form-label">Customer Credit / Khata (₹)</label>
+                      <input
+                        type="number"
+                        className="form-input text-mono"
+                        value={splitCredit || ''}
+                        placeholder="0"
+                        onChange={(e) => setSplitCredit(parseFloat(e.target.value) || 0)}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{
+                  width: '100%',
+                  padding: '0.875rem',
+                  fontSize: '1.05rem',
+                  fontWeight: 700,
+                  justifyContent: 'center',
+                }}
+                disabled={cart.length === 0 || isProcessing}
+                onClick={handleCheckout}
+              >
+                <IconCheck size={20} />
+                <span>{isProcessing ? 'Processing Bill...' : 'Complete Sale & Bill (F9)'}</span>
               </button>
-            ))}
-            <button style={styles.pickerCancel} onClick={() => setUnitPicker(null)}>
-              Cancel
-            </button>
+
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                style={{ width: '100%', marginTop: '0.5rem', justifyContent: 'center' }}
+                onClick={handlePrint}
+              >
+                <IconPrinter size={16} />
+                <span>Print Last Receipt</span>
+              </button>
+            </div>
           </div>
         </div>
-      )}
+      </div>
 
+      {/* Barcode Scanner Modal */}
       <BarcodeScannerModal
         isOpen={scannerOpen}
         onClose={() => setScannerOpen(false)}
-        onScan={(code) => {
-          setScannerOpen(false);
-          handleBarcodeScan(code);
-        }}
+        onScan={handleBarcodeScanned}
+        title="Scan Barcode to Add Item"
       />
-    </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    // The banner sits above the two panels, so the counter is a column with a
-    // row inside it rather than a bare row.
-    display: 'flex',
-    flexWrap: 'wrap',
-    height: '100vh',
-    background: '#f5f5f5',
-  },
-  // Full width, above everything: a cashier must not have to look for this.
-  tillBanner: {
-    flexBasis: '100%',
-    padding: '0.5rem 1rem',
-    fontSize: '0.875rem',
-    lineHeight: 1.4,
-  },
-  tillBannerOffline: { background: '#fff7ed', color: '#9a3412', borderBottom: '2px solid #f97316' },
-  tillBannerBusy: { background: '#eff6ff', color: '#1e40af', borderBottom: '2px solid #3b82f6' },
-  tillBannerBad: { background: '#fef2f2', color: '#991b1b', borderBottom: '2px solid #dc2626' },
-  leftPanel: {
-    flex: 1,
-    padding: '1rem',
-    overflow: 'auto',
-  },
-  rightPanel: {
-    width: '360px',
-    padding: '1rem',
-    background: 'white',
-    display: 'flex',
-    flexDirection: 'column',
-    borderLeft: '1px solid #ddd',
-  },
-  searchBar: {
-    marginBottom: '1rem',
-  },
-  searchInput: {
-    width: '100%',
-    padding: '0.75rem',
-    fontSize: '1.1rem',
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-  },
-  suggestions: {
-    background: 'white',
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-    marginBottom: '1rem',
-    maxHeight: '200px',
-    overflow: 'auto',
-  },
-  suggestionItem: {
-    padding: '0.75rem',
-    display: 'flex',
-    justifyContent: 'space-between',
-    cursor: 'pointer',
-    borderBottom: '1px solid #eee',
-  },
-  productGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))',
-    gap: '0.5rem',
-  },
-  productCard: {
-    padding: '0.75rem',
-    background: 'white',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    textAlign: 'center',
-    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
-  },
-  productImage: {
-    width: '100%',
-    height: '80px',
-    objectFit: 'cover',
-    borderRadius: '4px',
-    marginBottom: '0.5rem',
-  },
-  productName: {
-    fontSize: '0.875rem',
-    marginBottom: '0.25rem',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-  },
-  productPrice: {
-    fontWeight: 'bold',
-    color: '#1976d2',
-  },
-  cartTitle: {
-    margin: '0 0 1rem',
-  },
-  cartItems: {
-    flex: 1,
-    overflow: 'auto',
-  },
-  cartItem: {
-    padding: '0.75rem',
-    borderBottom: '1px solid #eee',
-  },
-  cartItemInfo: {
-    marginBottom: '0.5rem',
-  },
-  cartItemName: {
-    fontWeight: '500',
-  },
-  pickerBackdrop: {
-    position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.45)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '1rem',
-  },
-  pickerPanel: {
-    background: '#fff', borderRadius: '10px', padding: '1rem',
-    minWidth: '20rem', maxWidth: '28rem', width: '100%',
-    boxShadow: '0 8px 24px rgba(15,23,42,0.2)', display: 'flex', flexDirection: 'column', gap: '0.5rem',
-  },
-  pickerHead: { display: 'flex', flexDirection: 'column', gap: '0.125rem', marginBottom: '0.25rem' },
-  pickerHint: { fontSize: '0.8125rem', color: '#64748b' },
-  pickerRow: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '1rem',
-    padding: '0.75rem 0.875rem', border: '1px solid #cbd5e1', borderRadius: '6px',
-    background: '#fff', cursor: 'pointer', textAlign: 'left', fontSize: '1rem',
-  },
-  pickerRate: { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
-  pickerPerBase: { color: '#64748b', fontSize: '0.8125rem' },
-  pickerCancel: {
-    padding: '0.5rem', border: 'none', background: 'transparent',
-    color: '#64748b', cursor: 'pointer', fontSize: '0.875rem',
-  },
-  counterActions: { display: 'flex', gap: '0.5rem', marginTop: '0.75rem' },
-  holdBtn: {
-    flex: 1, padding: '0.5rem', fontSize: '0.875rem', cursor: 'pointer',
-    border: '1px solid #cbd5e1', borderRadius: '6px', background: '#fff', color: '#0f172a',
-  },
-  keyHints: {
-    marginTop: '0.5rem', fontSize: '0.6875rem', color: '#94a3b8',
-    textAlign: 'center', lineHeight: 1.5,
-  },
-  heldPanel: {
-    marginTop: '0.5rem', border: '1px solid #e2e8f0', borderRadius: '6px',
-    background: '#f8fafc', maxHeight: '12rem', overflowY: 'auto',
-  },
-  heldEmpty: { padding: '0.75rem', fontSize: '0.8125rem', color: '#64748b', textAlign: 'center' },
-  heldRow: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    gap: '0.5rem', padding: '0.5rem 0.625rem', borderBottom: '1px solid #e2e8f0', fontSize: '0.8125rem',
-  },
-  heldWhen: { fontSize: '0.6875rem', color: '#94a3b8' },
-  recallBtn: {
-    padding: '0.25rem 0.5rem', fontSize: '0.8125rem', cursor: 'pointer',
-    border: '1px solid #1d4ed8', background: '#1d4ed8', color: '#fff', borderRadius: '4px',
-  },
-  discardBtn: {
-    padding: '0.25rem 0.5rem', fontSize: '0.8125rem', cursor: 'pointer',
-    border: '1px solid #cbd5e1', background: '#fff', color: '#64748b', borderRadius: '4px',
-  },
-  counterRow: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    gap: '0.5rem', marginTop: '0.5rem',
-  },
-  counterLabel: { fontSize: '0.8125rem', color: '#475569' },
-  counterInput: {
-    width: '7rem', padding: '0.375rem 0.5rem', fontSize: '0.9375rem',
-    textAlign: 'right', fontVariantNumeric: 'tabular-nums',
-    border: '1px solid #cbd5e1', borderRadius: '4px',
-  },
-  change: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-    marginTop: '0.5rem', padding: '0.5rem 0.625rem', borderRadius: '6px',
-    fontWeight: 700, fontSize: '1rem', fontVariantNumeric: 'tabular-nums',
-  },
-  cartItemUnit: { color: '#1d4ed8', fontWeight: 600 },
-  cartItemBase: { color: '#94a3b8' },
-  cartItemPrice: {
-    color: '#666',
-    fontSize: '0.875rem',
-  },
-  cartItemActions: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '0.5rem',
-  },
-  qtyBtn: {
-    width: '28px',
-    height: '28px',
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-    background: 'white',
-    cursor: 'pointer',
-  },
-  qtyInput: {
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-    padding: '4px',
-    fontSize: '0.875rem',
-    textAlign: 'center',
-  },
-  qty: {
-    minWidth: '24px',
-    textAlign: 'center',
-  },
-  removeBtn: {
-    marginLeft: 'auto',
-    background: 'none',
-    border: 'none',
-    color: '#d32f2f',
-    cursor: 'pointer',
-  },
-  totals: {
-    borderTop: '1px solid #ddd',
-    paddingTop: '1rem',
-    marginTop: 'auto',
-  },
-  totalRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    marginBottom: '0.5rem',
-  },
-  grandTotal: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    fontSize: '1.25rem',
-    fontWeight: 'bold',
-    borderTop: '1px solid #ddd',
-    paddingTop: '0.5rem',
-  },
-  paymentSection: {
-    // A column, not a row. These are stacked controls — the customer, two
-    // checkboxes, the payment mode and Checkout — inside a 360px panel, and as
-    // a row they were crushed into four unreadable columns with every label
-    // wrapping over three lines. Worse, the row overflowed the panel and pushed
-    // the Checkout button past the right edge of the window, so the till's one
-    // essential button sat off-screen. The children already carry marginBottom,
-    // which only ever made sense in a column: the direction was simply never
-    // stated and defaulted to row.
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '0.5rem',
-    marginTop: '1rem',
-  },
-  select: {
-    flex: 1,
-    padding: '0.75rem',
-    fontSize: '1rem',
-  },
-  checkoutBtn: {
-    flex: 1,
-    padding: '0.75rem',
-    fontSize: '1rem',
-    background: '#4caf50',
-    color: 'white',
-    border: 'none',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    fontWeight: 'bold',
-  },
-  backBtn: {
-    marginTop: '1rem',
-    padding: '0.75rem',
-    background: 'none',
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-    cursor: 'pointer',
-  },
-  splitPaymentContainer: {
-    width: '100%',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '0.5rem',
-  },
-  splitPaymentRow: {
-    display: 'flex',
-    gap: '0.5rem',
-    alignItems: 'center',
-  },
-  input: {
-    padding: '0.75rem',
-    fontSize: '1rem',
-    border: '1px solid #ddd',
-    borderRadius: '4px',
-  },
-  addSplitBtn: {
-    padding: '0.5rem',
-    background: '#f5f5f5',
-    border: '1px dashed #ccc',
-    borderRadius: '4px',
-    cursor: 'pointer',
-    fontSize: '0.875rem',
-  },
-};

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { auditApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 
 interface AuditEntry {
   id: string;
@@ -107,13 +108,11 @@ export default function AuditLog() {
   };
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>
-          &larr; Back to Menu
-        </button>
-        <h1>Audit Log</h1>
-      </div>
+    <AppLayout>
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 700 }}>System Audit Trail</h1>
+        </div>
 
       <div style={styles.filterBar}>
         <label style={styles.filterLabel}>
@@ -218,7 +217,8 @@ export default function AuditLog() {
           </table>
         )}
       </div>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { categoryApi } from '../services/api';
 import { Category } from '../types';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, Select, TextInput } from '../components/Form';
@@ -295,16 +296,14 @@ export default function Categories() {
   const inUse = editing ? (editing.product_count ?? 0) + (editing.child_count ?? 0) : 0;
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Categories</h1>
-        <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/products')}>
-          Products →
-        </button>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Categories & Hierarchy</h1>
+          <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/products')}>
+            Products →
+          </button>
+        </div>
 
       {notice && (
         <div style={styles.notice} role="status">
@@ -482,7 +481,8 @@ export default function Categories() {
           </div>
         )}
       </Modal>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

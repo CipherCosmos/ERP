@@ -1,4 +1,4 @@
-.PHONY: backend frontend smoke verify-security migrate-down-all backup restore-drill \
+.PHONY: backend backend-watch frontend frontend-https smoke verify-security migrate-down-all backup restore-drill \
         db-up db-down db-reset db-psql test test-unit migrate-up migrate-down migrate-status \
         ops-check caddy-check restore install-timers logs ps health
 
@@ -15,8 +15,31 @@ MIGRATIONS_DIR := backend/migrations/postgres
 backend:
 	cd backend && go run ./cmd/server
 
+# Same server, rebuilt and restarted on every save. Config in backend/.air.toml.
+#
+# air is installed as a standalone binary rather than a go.mod tool dependency
+# on purpose: `go get -tool` pulls air's own dependency tree (Hugo among them)
+# into this module's graph and upgrades production dependencies with it.
+backend-watch: AIR := $(shell go env GOPATH)/bin/air
+backend-watch:
+	@test -x "$(AIR)" || { \
+		echo "air is not installed. Install it with:"; \
+		echo "  go install github.com/air-verse/air@v1.67.4"; \
+		exit 1; \
+	}
+	cd backend && "$(AIR)"
+
 frontend:
 	cd frontend && npm start
+
+# Serves the dev frontend over HTTPS with a self-signed certificate, which is
+# what the camera barcode scanner needs when the page is opened from a phone or
+# tablet on the LAN: browsers expose getUserMedia only in a secure context, and
+# a plain http:// LAN address is not one. The device must be told to trust the
+# certificate on first visit. Plain `make frontend` is fine on this machine,
+# where localhost already counts as secure.
+frontend-https:
+	cd frontend && HTTPS=true HOST=0.0.0.0 npm start
 
 # --- database ---------------------------------------------------------------
 

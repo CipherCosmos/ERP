@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { lossApi, productApi, uomApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
@@ -336,13 +337,11 @@ export default function Losses() {
   ];
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Inventory losses</h1>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Inventory Damage, Waste & Shrinkage</h1>
+        </div>
 
       <div style={styles.summary}>
         <Stat label="Written off" value={String(rows.length)} note={periodLabel} />
@@ -531,7 +530,8 @@ export default function Losses() {
           </>
         )}
       </Modal>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

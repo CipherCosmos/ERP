@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { authApi, storeApi, terminalApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, Select, TextInput } from '../components/Form';
@@ -330,13 +331,11 @@ export default function Settings() {
   ];
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Settings</h1>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Store & System Settings</h1>
+        </div>
 
       <div style={styles.tabs}>
         {TABS.map((x) => (
@@ -577,7 +576,8 @@ export default function Settings() {
           />
         </Field>
       </Modal>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

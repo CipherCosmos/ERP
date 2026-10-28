@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { productApi } from '../services/api';
 import { ImportProblem, ImportReport, ImportRowResult } from '../types';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Checkbox, FormError } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
@@ -159,13 +160,14 @@ export default function ProductImport() {
   }
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/products')} style={ui.button}>
-          ← Products
-        </button>
-        <h1 style={styles.h1}>Import a catalogue</h1>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Bulk Catalogue CSV Import & Export</h1>
+          <button onClick={() => navigate('/products')} style={{ ...ui.button, marginLeft: 'auto' }}>
+            Products →
+          </button>
+        </div>
 
       <div style={{ ...ui.card, padding: space.lg, marginBottom: space.lg }}>
         <p style={styles.lead}>
@@ -312,7 +314,8 @@ export default function ProductImport() {
           </section>
         </>
       )}
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

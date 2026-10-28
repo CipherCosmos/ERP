@@ -4,6 +4,8 @@
   "private": true,
   "dependencies": {
     "@tanstack/react-query": "^5.12.0",
+    "@zxing/browser": "^0.2.1",
+    "@zxing/library": "^0.23.0",
     "axios": "^1.6.2",
     "i18next": "^23.16.8",
     "jspdf": "^2.5.1",

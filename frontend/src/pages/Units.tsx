@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { unitFamilyApi, uomApi } from '../services/api';
 import { UnitFamily, UnitOfMeasure } from '../types';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
@@ -326,16 +327,14 @@ export default function Units() {
   const baseCodeFor = (familyId: string) => familyOf(familyId)?.base_uom_code || 'the base unit';
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Units of measure</h1>
-        <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/products')}>
-          Products →
-        </button>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Units of Measure & Conversions</h1>
+          <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/products')}>
+            Products →
+          </button>
+        </div>
 
       <p style={styles.lead}>
         A family groups the units that convert between each other. Each unit states how much of its
@@ -610,7 +609,8 @@ export default function Units() {
           </div>
         )}
       </Modal>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

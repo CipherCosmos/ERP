@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { productApi, purchaseApi, purchaseReturnApi, uomApi, vendorApi } from '../services/api';
 import { PurchaseReturn, Vendor } from '../types';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { Column, DataTable } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
@@ -335,13 +336,11 @@ export default function PurchaseReturns() {
   if (!user) return null;
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Purchase returns</h1>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Vendor Purchase Returns (Debit Notes)</h1>
+        </div>
 
       {loadError && (
         <div style={{ marginBottom: space.lg }}>
@@ -598,7 +597,8 @@ export default function PurchaseReturns() {
           quantity of 50, at the rate for one kg.
         </div>
       </Modal>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { invoiceApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { FormError, Select } from '../components/Form';
@@ -192,13 +193,13 @@ export default function Invoices() {
   ];
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>← Back</button>
-        <h1 style={styles.h1}>Bills</h1>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Sales Invoices & Billing History</h1>
+        </div>
 
-      <div style={styles.summary}>
+        <div style={styles.summary}>
         <Stat label="Bills" value={String(totals.count)} />
         <Stat label="Revenue" value={formatMoney(totals.revenue)} />
         <Stat label="GST collected" value={formatMoney(totals.tax)} />
@@ -347,7 +348,8 @@ export default function Invoices() {
           </>
         )}
       </Modal>
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

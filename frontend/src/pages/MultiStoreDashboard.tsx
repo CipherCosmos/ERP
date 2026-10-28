@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { analyticsApi, storeApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { Store } from '../types';
 import { formatMoney } from '../utils/format';
 
@@ -80,23 +81,20 @@ export default function MultiStoreDashboard() {
 
   if (!user || user.role !== 'owner') {
     return (
-      <div style={styles.container}>
-        <p style={styles.error}>Access Denied. Only owners can view multi-store analytics.</p>
-        <button type="button" onClick={() => navigate('/')} style={styles.backBtn}>
-          ← Back to Menu
-        </button>
-      </div>
+      <AppLayout>
+        <div style={{ padding: '3rem 1rem', textAlign: 'center' }}>
+          <p style={{ color: 'var(--danger)', fontSize: '1.1rem' }}>Access Denied. Only owners can view multi-store analytics.</p>
+        </div>
+      </AppLayout>
     );
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Multi-Store Dashboard</h1>
-        <button type="button" onClick={() => navigate('/')} style={styles.backBtn}>
-          ← Back to Menu
-        </button>
-      </div>
+    <AppLayout>
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 700 }}>Multi-Store Enterprise Dashboard</h1>
+        </div>
 
       <div style={styles.controls}>
         <div style={styles.controlGroup}>
@@ -185,7 +183,8 @@ export default function MultiStoreDashboard() {
       ) : (
         <p style={styles.empty}>No data available</p>
       )}
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

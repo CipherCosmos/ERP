@@ -1,5 +1,23 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { IconBarcode, IconCamera, IconClose, IconSearch, IconAlert } from './Icons';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+// Types only: the ~300kB decoder itself is imported on demand in startScanning so it
+// stays out of the main bundle, which counter tablets load on every shift.
+import type { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
+import { IconBarcode, IconCamera, IconClose, IconSearch } from './Icons';
+
+/**
+ * getUserMedia only exists in a secure context. Serving the app over plain HTTP on a LAN
+ * address (http://192.168.x.x) therefore removes navigator.mediaDevices entirely, which
+ * looks to the user like the camera is simply dead. Report that case specifically.
+ */
+function getCameraUnavailableReason(): string | null {
+  if (typeof window !== 'undefined' && !window.isSecureContext) {
+    return 'The camera needs a secure connection. Open this app over HTTPS (or on localhost) to scan with the camera. Manual entry and USB scanners still work.';
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return 'Camera access is not supported by this browser.';
+  }
+  return null;
+}
 
 interface BarcodeScannerModalProps {
   isOpen: boolean;
@@ -15,87 +33,154 @@ export function BarcodeScannerModal({
   title = 'Scan Product Barcode',
 }: BarcodeScannerModalProps) {
   const [manualCode, setManualCode] = useState('');
-  const [cameraActive, setCameraActive] = useState(false);
+  const [isScanning, setIsScanning] = useState(false);
   const [cameraError, setCameraError] = useState('');
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
+  const controlsRef = useRef<IScannerControls | null>(null);
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+
+  const stopScanning = useCallback(() => {
+    if (controlsRef.current) {
+      try {
+        controlsRef.current.stop();
+      } catch {
+        // ignore
+      }
+      controlsRef.current = null;
+    }
+    setIsScanning(false);
+  }, []);
+
+  const startScanning = useCallback(async () => {
+    setCameraError('');
+    setIsScanning(true);
+
+    try {
+      const unavailableReason = getCameraUnavailableReason();
+      if (unavailableReason) {
+        setCameraError(unavailableReason);
+        setIsScanning(false);
+        return;
+      }
+
+      if (!readerRef.current) {
+        const [{ BrowserMultiFormatReader }, { BarcodeFormat, DecodeHintType }] = await Promise.all([
+          import('@zxing/browser'),
+          import('@zxing/library'),
+        ]);
+
+        // Restricting formats to the ones retail products actually carry makes each
+        // decode attempt cheaper and removes false reads from unrelated symbologies.
+        const hints = new Map<number, unknown>([
+          [
+            DecodeHintType.POSSIBLE_FORMATS,
+            [
+              BarcodeFormat.EAN_13,
+              BarcodeFormat.EAN_8,
+              BarcodeFormat.UPC_A,
+              BarcodeFormat.UPC_E,
+              BarcodeFormat.CODE_128,
+              BarcodeFormat.CODE_39,
+              BarcodeFormat.ITF,
+              BarcodeFormat.CODABAR,
+              BarcodeFormat.QR_CODE,
+            ],
+          ],
+          [DecodeHintType.TRY_HARDER, true],
+        ]);
+
+        readerRef.current = new BrowserMultiFormatReader(hints as any, {
+          delayBetweenScanAttempts: 150,
+        });
+      }
+
+      // Small delay to ensure the video DOM node is mounted and ready
+      await new Promise((r) => setTimeout(r, 100));
+
+      if (!videoRef.current) {
+        setIsScanning(false);
+        return;
+      }
+
+      const scanCallback = (result: any) => {
+        if (result) {
+          const scannedCode = result.getText();
+          try {
+            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(1800, ctx.currentTime);
+            gain.gain.setValueAtTime(0.15, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.1);
+          } catch {
+            // audio context not allowed
+          }
+          stopScanning();
+          onScan(scannedCode);
+          onClose();
+        }
+      };
+
+      let controls: IScannerControls;
+      try {
+        controls = await readerRef.current.decodeFromConstraints(
+          { video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } },
+          videoRef.current,
+          scanCallback
+        );
+      } catch (firstErr) {
+        console.warn('Primary camera constraint failed, retrying with fallback:', firstErr);
+        controls = await readerRef.current.decodeFromConstraints(
+          { video: true },
+          videoRef.current,
+          scanCallback
+        );
+      }
+
+      controlsRef.current = controls;
+    } catch (err: any) {
+      console.warn('Barcode camera error:', err);
+      setCameraError(
+        err?.name === 'NotAllowedError'
+          ? 'Camera permission denied. Please allow camera access in your browser settings.'
+          : err?.name === 'NotFoundError' || err?.name === 'OverconstrainedError'
+            ? 'No usable camera was found on this device.'
+            : err?.name === 'NotReadableError'
+              ? 'The camera is already in use by another app. Close it and try again.'
+              : 'Could not start camera. You can enter the barcode manually below.'
+      );
+      setIsScanning(false);
+    }
+  }, [onScan, onClose, stopScanning]);
 
   useEffect(() => {
     if (isOpen) {
       setManualCode('');
       setCameraError('');
+      // Auto-start camera when modal opens
+      void startScanning();
       setTimeout(() => {
         inputRef.current?.focus();
-      }, 150);
+      }, 200);
     } else {
-      stopCamera();
+      stopScanning();
     }
-  }, [isOpen]);
-
-  const startCamera = async () => {
-    setCameraError('');
-    try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setCameraError('Camera access not supported on this device/browser.');
-        return;
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.play();
-      }
-      setCameraActive(true);
-
-      // Check if browser has native BarcodeDetector API
-      if ('BarcodeDetector' in window) {
-        const barcodeDetector = new (window as any).BarcodeDetector({
-          formats: ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'],
-        });
-
-        const scanFrame = async () => {
-          if (!videoRef.current || !streamRef.current) return;
-          try {
-            const barcodes = await barcodeDetector.detect(videoRef.current);
-            if (barcodes.length > 0) {
-              const code = barcodes[0].rawValue;
-              stopCamera();
-              onScan(code);
-              onClose();
-              return;
-            }
-          } catch (e) {
-            // frame detect error or video ended
-          }
-          if (streamRef.current) {
-            requestAnimationFrame(scanFrame);
-          }
-        };
-        requestAnimationFrame(scanFrame);
-      }
-    } catch (err: any) {
-      console.warn('Camera error:', err);
-      setCameraError('Could not open camera. Please use manual entry or hardware scanner.');
-      setCameraActive(false);
-    }
-  };
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    setCameraActive(false);
-  };
+    return () => {
+      stopScanning();
+    };
+  }, [isOpen, startScanning, stopScanning]);
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const trimmed = manualCode.trim();
     if (trimmed) {
-      stopCamera();
+      stopScanning();
       onScan(trimmed);
       onClose();
     }
@@ -104,136 +189,205 @@ export function BarcodeScannerModal({
   if (!isOpen) return null;
 
   return (
-    <div className="erp-modal-backdrop" onClick={onClose}>
-      <div className="erp-modal" style={{ maxWidth: 480 }} onClick={(e) => e.stopPropagation()}>
-        <div className="erp-modal-header">
+    <div
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(15, 23, 42, 0.65)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 9999,
+        padding: '1rem',
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          backgroundColor: '#ffffff',
+          borderRadius: '8px',
+          boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.2), 0 10px 10px -5px rgba(0, 0, 0, 0.1)',
+          width: '100%',
+          maxWidth: '480px',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div
+          style={{
+            padding: '1rem 1.25rem',
+            borderBottom: '1px solid #e2e8f0',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <IconBarcode size={20} color="var(--primary-600)" />
-            <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>{title}</h3>
+            <IconBarcode size={20} color="#2563eb" />
+            <h3 style={{ margin: 0, fontSize: '1.05rem', fontWeight: 600 }}>{title}</h3>
           </div>
           <button
             type="button"
-            className="btn btn-outline btn-sm"
-            style={{ padding: '0.25rem 0.5rem', border: 'none' }}
+            style={{
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              color: '#64748b',
+              padding: '0.25rem',
+            }}
             onClick={onClose}
           >
-            <IconClose size={18} />
+            <IconClose size={20} />
           </button>
         </div>
 
-        <div className="erp-modal-body">
-          {cameraActive ? (
-            <div style={{ marginBottom: '1rem', textAlign: 'center' }}>
-              <div
+        {/* Body */}
+        <div style={{ padding: '1.25rem' }}>
+          {/* Camera View Area */}
+          <div style={{ marginBottom: '1rem', textAlign: 'center' }}>
+            <div
+              style={{
+                position: 'relative',
+                width: '100%',
+                height: 240,
+                backgroundColor: '#0f172a',
+                borderRadius: '6px',
+                overflow: 'hidden',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
                 style={{
-                  position: 'relative',
                   width: '100%',
-                  height: 240,
-                  backgroundColor: '#000',
-                  borderRadius: 'var(--radius-md)',
-                  overflow: 'hidden',
+                  height: '100%',
+                  objectFit: 'cover',
+                  display: isScanning && !cameraError ? 'block' : 'none',
                 }}
-              >
-                <video
-                  ref={videoRef}
-                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                />
+              />
+
+              {isScanning && !cameraError && (
                 <div
                   style={{
                     position: 'absolute',
                     top: '20%',
-                    left: '10%',
-                    right: '10%',
+                    left: '12%',
+                    right: '12%',
                     bottom: '20%',
                     border: '2px dashed #22c55e',
                     borderRadius: 4,
+                    boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.35)',
                     pointerEvents: 'none',
-                  }}
-                />
-              </div>
-              <button
-                type="button"
-                className="btn btn-outline btn-sm"
-                style={{ marginTop: '0.5rem' }}
-                onClick={stopCamera}
-              >
-                Stop Camera
-              </button>
-            </div>
-          ) : (
-            <div style={{ marginBottom: '1.25rem', textAlign: 'center' }}>
-              <button
-                type="button"
-                className="btn btn-outline"
-                style={{ width: '100%', justifyContent: 'center' }}
-                onClick={startCamera}
-              >
-                <IconCamera size={18} />
-                <span>Use Device Camera Scanner</span>
-              </button>
-              {cameraError && (
-                <div
-                  style={{
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '0.5rem',
-                    color: 'var(--warning-text)',
-                    fontSize: '0.75rem',
-                    marginTop: '0.5rem',
-                    textAlign: 'left',
+                    justifyContent: 'center',
                   }}
                 >
-                  <IconAlert size={16} />
-                  <span>{cameraError}</span>
+                  <div
+                    style={{
+                      width: '90%',
+                      height: '2px',
+                      backgroundColor: '#22c55e',
+                      opacity: 0.8,
+                      boxShadow: '0 0 8px #22c55e',
+                    }}
+                  />
+                </div>
+              )}
+
+              {(!isScanning || cameraError) && (
+                <div style={{ padding: '1.5rem', color: '#94a3b8' }}>
+                  <IconCamera size={36} color="#64748b" style={{ margin: '0 auto 0.5rem', display: 'block' }} />
+                  <p style={{ margin: 0, fontSize: '0.85rem' }}>
+                    {cameraError || 'Camera paused.'}
+                  </p>
                 </div>
               )}
             </div>
-          )}
 
+            <div style={{ marginTop: '0.5rem', display: 'flex', justifyContent: 'center', gap: '0.5rem' }}>
+              {isScanning ? (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                  onClick={stopScanning}
+                >
+                  Pause Camera
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  style={{ fontSize: '0.8rem', padding: '0.35rem 0.75rem' }}
+                  onClick={() => void startScanning()}
+                >
+                  <IconCamera size={14} /> Resume Camera
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Divider */}
           <div
             style={{
               position: 'relative',
               textAlign: 'center',
-              margin: '1rem 0',
-              borderTop: '1px solid var(--border-light)',
+              margin: '1.25rem 0 1rem',
+              borderTop: '1px solid #e2e8f0',
             }}
           >
             <span
               style={{
                 position: 'relative',
                 top: -10,
-                background: 'var(--bg-surface)',
+                backgroundColor: '#ffffff',
                 padding: '0 0.5rem',
-                color: 'var(--text-muted)',
+                color: '#64748b',
                 fontSize: '0.75rem',
+                fontWeight: 600,
               }}
             >
-              OR ENTER BARCODE / SKU MANUALLY
+              OR ENTER BARCODE MANUALLY
             </span>
           </div>
 
+          {/* Manual Entry */}
           <form onSubmit={handleManualSubmit}>
-            <div className="form-group" style={{ marginBottom: '1rem' }}>
-              <label className="form-label">Barcode / SKU / Code</label>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  ref={inputRef}
-                  type="text"
-                  className="form-input text-mono"
-                  placeholder="e.g. 8901001100001"
-                  value={manualCode}
-                  onChange={(e) => setManualCode(e.target.value)}
-                />
-                <button type="submit" className="btn btn-primary">
-                  <IconSearch size={16} />
-                  <span>Submit</span>
-                </button>
-              </div>
+            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem' }}>
+              <input
+                ref={inputRef}
+                type="text"
+                className="form-input text-mono"
+                style={{ flex: 1, padding: '0.55rem 0.75rem', fontSize: '0.95rem' }}
+                placeholder="Type barcode or SKU..."
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value)}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary"
+                style={{ padding: '0.55rem 1rem' }}
+                disabled={!manualCode.trim()}
+              >
+                <IconSearch size={16} /> Enter
+              </button>
             </div>
           </form>
 
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', margin: 0 }}>
-            Tip: You can also scan directly using any USB or Bluetooth handheld scanner without clicking this button.
+          <p style={{ color: '#64748b', fontSize: '0.75rem', margin: '0.5rem 0 0', lineHeight: 1.4 }}>
+            Tip: Point the barcode at your webcam or phone camera. USB barcode scanners work automatically without opening this window.
           </p>
         </div>
       </div>

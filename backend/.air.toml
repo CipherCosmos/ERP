@@ -1,0 +1,44 @@
+# Hot reload for the API during development: `make backend-watch` from the repo root.
+#
+# `make backend` (a plain `go run`) stays the documented way to start the server;
+# this is the fast edit-rebuild loop on top of it. The server already handles
+# SIGINT/SIGTERM with a graceful shutdown, so a rebuild releases the listening
+# port before the new binary claims it.
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/server ./cmd/server"
+  bin = "./tmp/server"
+
+  include_ext = ["go", "sql"]
+
+  # .sql is watched because the server runs migrations on start, so a new
+  # migration should take effect from the same save that writes it.
+  include_dir = ["cmd", "internal", "migrations"]
+
+  exclude_dir = ["tmp", "data", "scripts"]
+  exclude_regex = ["_test\\.go$"]
+  exclude_unchanged = true
+
+  # Editors write a file in several steps; debouncing stops a single save from
+  # kicking off two builds.
+  delay = 300
+
+  # Time the graceful shutdown is given before air sends SIGKILL. The server
+  # allows itself 15s to drain in-flight requests; 5s is deliberately shorter so
+  # a save never stalls the loop. An idle dev server shuts down instantly, and
+  # cutting off a half-finished dev request is the right trade here — never set
+  # a limit this short on a deployment, where that request is somebody's sale.
+  kill_delay = "5s"
+  send_interrupt = true
+
+  stop_on_error = true
+
+[log]
+  main_only = false
+
+[misc]
+  # Leave ./tmp in place between runs so an unchanged build is reused.
+  clean_on_exit = false

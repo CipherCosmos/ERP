@@ -1,12 +1,23 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { analyticsApi } from '../services/api';
-import { StatCard, BarChart, PieChart } from '../components/Charts';
-import { addDaysISO, toISODate, todayISO } from '../utils/format';
+import { analyticsApi, stockApi, creditApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
+import {
+  IconPOS,
+  IconProducts,
+  IconInventory,
+  IconWarehouse,
+  IconPurchases,
+  IconCredit,
+  IconAlert,
+  IconRefresh,
+  IconArrowRight,
+} from '../components/Icons';
 
-interface DashboardData {
+interface DashboardMetrics {
   revenue: number;
+  collected_payments: number;
   gst_collected: number;
   discount_given: number;
   invoice_count: number;
@@ -14,10 +25,17 @@ interface DashboardData {
   avg_bill_value: number;
   low_stock_count: number;
   credit_outstanding: number;
-  inventory_valuation?: number;
-  expiring_count?: number;
-  pending_po_count?: number;
-  vendor_payables?: number;
+  inventory_valuation: number;
+  expiring_count: number;
+  pending_po_count: number;
+  vendor_payables: number;
+  date_range?: { start: string; end: string };
+}
+
+interface PaymentModeBreakup {
+  mode: string;
+  count: number;
+  total: number;
 }
 
 interface TopProduct {
@@ -26,222 +44,451 @@ interface TopProduct {
   sales: number;
 }
 
-interface PaymentMode {
-  mode: string;
-  count: number;
-  total: number;
-}
-
 export default function Dashboard() {
   const navigate = useNavigate();
   const { user, store } = useAppStore();
-  const [data, setData] = useState<DashboardData | null>(null);
+
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [loading, setLoading] = useState(false);
   const [range, setRange] = useState('today');
+  const [paymentBreakup, setPaymentBreakup] = useState<PaymentModeBreakup[]>([]);
   const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
-  const [paymentBreakup, setPaymentBreakup] = useState<PaymentMode[]>([]);
+  const [lowStockItems, setLowStockItems] = useState<any[]>([]);
 
   useEffect(() => {
-    if (!user || user.role === 'cashier') {
+    if (!user) {
+      navigate('/login');
+      return;
+    }
+    if (user.role === 'cashier') {
       navigate('/billing');
     }
-  }, [user, navigate]);
+  }, [user]);
 
-  // Calendar dates, computed as a calendar does. The version this replaces
-  // rendered each one with toISOString, which converts to UTC first: in India,
-  // five and a half hours ahead, every range between midnight and half past
-  // five in the morning asked the server for the wrong day.
-  const getRangeDates = useCallback(() => {
-    const end = todayISO();
+  useEffect(() => {
+    if (store) {
+      loadDashboard();
+    }
+  }, [store, range]);
+
+  const getRangeDates = () => {
     const now = new Date();
+    const end = now.toISOString().slice(0, 10);
     let start = end;
     if (range === 'week') {
-      start = addDaysISO(end, -7);
+      const d = new Date(now);
+      d.setDate(d.getDate() - 7);
+      start = d.toISOString().slice(0, 10);
     } else if (range === 'month') {
       const d = new Date(now);
       d.setMonth(d.getMonth() - 1);
-      start = toISODate(d);
+      start = d.toISOString().slice(0, 10);
     } else if (range === 'year') {
       const d = new Date(now);
       d.setFullYear(d.getFullYear() - 1);
-      start = toISODate(d);
+      start = d.toISOString().slice(0, 10);
     }
     return { start, end };
-  }, [range]);
+  };
 
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = async () => {
     if (!store) return;
     setLoading(true);
     try {
-      const { data: dashboardData } = await analyticsApi.dashboard({ store_id: store.id, range });
-      setData(dashboardData);
+      const { data } = await analyticsApi.dashboard({ store_id: store.id, range });
+      setMetrics(data);
 
-      // Load charts data
       const { start, end } = getRangeDates();
-      const [topRes, payRes] = await Promise.allSettled([
-        analyticsApi.topProducts({ store_id: store.id, start_date: start, end_date: end, limit: 5 }),
+      const [payRes, topRes, lowRes] = await Promise.allSettled([
         analyticsApi.paymentBreakup({ store_id: store.id, start_date: start, end_date: end }),
+        analyticsApi.topProducts({ store_id: store.id, start_date: start, end_date: end, limit: 5 }),
+        stockApi.low(store.id),
       ]);
-      if (topRes.status === 'fulfilled') setTopProducts(topRes.value.data || []);
+
       if (payRes.status === 'fulfilled') setPaymentBreakup(payRes.value.data || []);
+      if (topRes.status === 'fulfilled') setTopProducts(topRes.value.data || []);
+      if (lowRes.status === 'fulfilled') setLowStockItems(lowRes.value.data || []);
     } catch (err) {
       console.error('Failed to load dashboard:', err);
     } finally {
       setLoading(false);
     }
-  }, [store, range, getRangeDates]);
-
-  // Re-runs when the range dropdown changes, because loadDashboard is rebuilt
-  // with it — the same behaviour the old [store, range] dependency list had.
-  useEffect(() => {
-    if (store) loadDashboard();
-  }, [store, loadDashboard]);
-
-  if (!user || user.role === 'cashier') return null;
+  };
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>Dashboard</h1>
-        <div style={styles.rangeSelect}>
-          <select value={range} onChange={(e) => setRange(e.target.value)} style={styles.select}>
+    <AppLayout>
+      {/* Top Controls Bar */}
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: '1.25rem',
+          flexWrap: 'wrap',
+          gap: '0.75rem',
+        }}
+      >
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.4rem', fontWeight: 700 }}>Business Overview & Operational KPIs</h1>
+          <p style={{ margin: '0.2rem 0 0', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+            Store: <strong>{store?.name}</strong> &middot; Real-time data from database
+          </p>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+          <select
+            className="form-select"
+            value={range}
+            onChange={(e) => setRange(e.target.value)}
+            style={{ width: 'auto', minWidth: 140 }}
+          >
             <option value="today">Today</option>
-            <option value="week">This Week</option>
+            <option value="week">Past 7 Days</option>
             <option value="month">This Month</option>
-            <option value="year">This Year</option>
+            <option value="year">Past Year</option>
           </select>
+
+          <button
+            type="button"
+            className="btn btn-outline btn-sm"
+            onClick={loadDashboard}
+            disabled={loading}
+            title="Refresh Metrics"
+          >
+            <IconRefresh size={16} />
+            <span>Refresh</span>
+          </button>
+
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => navigate('/billing')}
+          >
+            <IconPOS size={16} />
+            <span>Open POS Terminal</span>
+          </button>
         </div>
       </div>
 
-      {loading ? (
-        <p>Loading...</p>
-      ) : (
-        <>
-          {/* KPI Stat Cards */}
-          <div style={styles.statsGrid}>
-            <StatCard
-              title="Revenue"
-              value={`\u20B9${data?.revenue?.toFixed(2) || '0.00'}`}
-              color="#1976d2"
-            />
-            <StatCard
-              title="GST Collected"
-              value={`\u20B9${data?.gst_collected?.toFixed(2) || '0.00'}`}
-              color="#4caf50"
-            />
-            <StatCard
-              title="Invoices"
-              value={data?.invoice_count || 0}
-              color="#ff9800"
-            />
-            <StatCard
-              title="Avg Bill Value"
-              value={`\u20B9${data?.avg_bill_value?.toFixed(2) || '0.00'}`}
-              color="#9c27b0"
-            />
-          </div>
-
-          {/* Alerts & Operational Stats row */}
-          <div style={styles.alertsGrid}>
-            <StatCard
-              title="Stock Valuation"
-              value={`\u20B9${data?.inventory_valuation != null ? data.inventory_valuation.toFixed(2) : '0.00'}`}
-              color="#0284c7"
-            />
-            <StatCard
-              title="Low Stock Items"
-              value={data?.low_stock_count || 0}
-              subtitle={(data?.low_stock_count || 0) > 0 ? 'Click Inventory to review' : 'All good'}
-              color={(data?.low_stock_count || 0) > 0 ? '#ff5722' : '#4caf50'}
-            />
-            <StatCard
-              title="Expiring (30 Days)"
-              value={data?.expiring_count || 0}
-              subtitle={(data?.expiring_count || 0) > 0 ? 'Expiring soon' : 'None expiring'}
-              color={(data?.expiring_count || 0) > 0 ? '#d97706' : '#4caf50'}
-            />
-            <StatCard
-              title="Credit Outstanding"
-              value={`\u20B9${data?.credit_outstanding?.toFixed(2) || '0.00'}`}
-              subtitle={(data?.credit_outstanding || 0) > 0 ? 'Click Credit to review' : 'All clear'}
-              color={(data?.credit_outstanding || 0) > 0 ? '#e91e63' : '#4caf50'}
-            />
-            <StatCard
-              title="Vendor Payables"
-              value={`\u20B9${data?.vendor_payables != null ? data.vendor_payables.toFixed(2) : '0.00'}`}
-              color="#7c3aed"
-            />
-            <StatCard
-              title="Pending POs"
-              value={data?.pending_po_count || 0}
-              color="#0d9488"
-            />
-          </div>
-
-          {/* Alert action buttons */}
-          <div style={styles.alertActions}>
-            {(data?.low_stock_count || 0) > 0 && (
-              <button style={styles.alertBtn} onClick={() => navigate('/inventory')}>View Low Stock</button>
-            )}
-            {(data?.expiring_count || 0) > 0 && (
-              <button style={styles.alertBtn} onClick={() => navigate('/expiry')}>View Expiring</button>
-            )}
-            {(data?.pending_po_count || 0) > 0 && (
-              <button style={styles.alertBtn} onClick={() => navigate('/purchases')}>View Purchases</button>
-            )}
-            {(data?.credit_outstanding || 0) > 0 && (
-              <button style={styles.alertBtn} onClick={() => navigate('/credit')}>View Credit</button>
-            )}
-          </div>
-
-          {/* Charts row */}
-          <div style={styles.chartsGrid}>
-            <div style={styles.chartCard}>
-              <h3 style={styles.chartTitle}>Top 5 Products by Sales</h3>
-              <BarChart
-                data={topProducts.map(p => ({ label: p.product, value: p.sales }))}
-                height={230}
-                width={460}
-              />
+      {/* 4 Main Core Financial Cards */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+          gap: '1rem',
+          marginBottom: '1.25rem',
+        }}
+      >
+        {/* Revenue */}
+        <div className="erp-card" style={{ borderLeft: '4px solid var(--primary-600)' }}>
+          <div className="erp-card-body" style={{ padding: '1rem 1.25rem' }}>
+            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+              Sales Revenue ({range})
             </div>
-            <div style={styles.chartCard}>
-              <h3 style={styles.chartTitle}>Payment Mode Breakdown</h3>
-              <PieChart
-                data={paymentBreakup.map(p => ({ label: p.mode, value: p.total }))}
-                size={190}
-              />
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: 'var(--text-main)', margin: '0.25rem 0' }}>
+              ₹{(metrics?.revenue || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              Invoices: <strong>{metrics?.invoice_count || 0}</strong> &middot; Avg Bill: ₹{(metrics?.avg_bill_value || 0).toFixed(2)}
             </div>
           </div>
+        </div>
 
-          {/* Quick Actions */}
-          <div style={styles.quickActions}>
-            <h3>Quick Actions</h3>
-            <div style={styles.actionButtons}>
-              <button style={styles.actionBtn} onClick={() => navigate('/billing')}>New Sale</button>
-              <button style={styles.actionBtn} onClick={() => navigate('/inventory')}>Inventory</button>
-              <button style={styles.actionBtn} onClick={() => navigate('/purchases')}>Purchase</button>
-              <button style={styles.actionBtn} onClick={() => navigate('/vendors')}>Vendors</button>
+        {/* Collected Payments */}
+        <div className="erp-card" style={{ borderLeft: '4px solid #16a34a' }}>
+          <div className="erp-card-body" style={{ padding: '1rem 1.25rem' }}>
+            <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+              Payments Collected
+            </div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#16a34a', margin: '0.25rem 0' }}>
+              ₹{(metrics?.collected_payments || metrics?.revenue || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              Cash, Card & UPI collected into register
             </div>
           </div>
-        </>
+        </div>
+
+        {/* Customer Receivables / Khata */}
+        <div
+          className="erp-card"
+          style={{ borderLeft: '4px solid #ea580c', cursor: 'pointer' }}
+          onClick={() => navigate('/credit')}
+        >
+          <div className="erp-card-body" style={{ padding: '1rem 1.25rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                Customer Credit (Khata)
+              </div>
+              <IconArrowRight size={14} color="#ea580c" />
+            </div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#ea580c', margin: '0.25rem 0' }}>
+              ₹{(metrics?.credit_outstanding || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              Total outstanding receivables due
+            </div>
+          </div>
+        </div>
+
+        {/* Supplier / Vendor Payables */}
+        <div
+          className="erp-card"
+          style={{ borderLeft: '4px solid #9333ea', cursor: 'pointer' }}
+          onClick={() => navigate('/vendor-payments')}
+        >
+          <div className="erp-card-body" style={{ padding: '1rem 1.25rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                Vendor Payables Due
+              </div>
+              <IconArrowRight size={14} color="#9333ea" />
+            </div>
+            <div style={{ fontSize: '1.75rem', fontWeight: 700, color: '#9333ea', margin: '0.25rem 0' }}>
+              ₹{(metrics?.vendor_payables || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+              Pending PO liabilities &middot; {metrics?.pending_po_count || 0} POs pending
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Secondary Operational Status Strips */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gap: '1rem',
+          marginBottom: '1.25rem',
+        }}
+      >
+        {/* Inventory Valuation */}
+        <div
+          className="erp-card"
+          style={{ cursor: 'pointer' }}
+          onClick={() => navigate('/inventory')}
+        >
+          <div className="erp-card-body" style={{ padding: '0.85rem 1rem' }}>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600 }}>
+              INVENTORY VALUATION
+            </div>
+            <div style={{ fontSize: '1.35rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '0.2rem' }}>
+              ₹{(metrics?.inventory_valuation || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
+              Total stock on hand at cost price
+            </div>
+          </div>
+        </div>
+
+        {/* Low Stock Alerts */}
+        <div
+          className="erp-card"
+          style={{ cursor: 'pointer', backgroundColor: (metrics?.low_stock_count || 0) > 0 ? '#fffbeb' : '#fff' }}
+          onClick={() => navigate('/inventory')}
+        >
+          <div className="erp-card-body" style={{ padding: '0.85rem 1rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#b45309', fontSize: '0.75rem', fontWeight: 600 }}>
+              <IconAlert size={14} />
+              <span>LOW STOCK ALERT</span>
+            </div>
+            <div style={{ fontSize: '1.35rem', fontWeight: 700, color: '#b45309', marginTop: '0.2rem' }}>
+              {metrics?.low_stock_count || 0} Products
+            </div>
+            <div style={{ fontSize: '0.75rem', color: '#92400e', marginTop: '0.2rem' }}>
+              Items below minimum reorder point
+            </div>
+          </div>
+        </div>
+
+        {/* Expiry Alerts */}
+        <div
+          className="erp-card"
+          style={{ cursor: 'pointer', backgroundColor: (metrics?.expiring_count || 0) > 0 ? '#fef2f2' : '#fff' }}
+          onClick={() => navigate('/expiry')}
+        >
+          <div className="erp-card-body" style={{ padding: '0.85rem 1rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#dc2626', fontSize: '0.75rem', fontWeight: 600 }}>
+              <IconAlert size={14} />
+              <span>EXPIRING BATCHES</span>
+            </div>
+            <div style={{ fontSize: '1.35rem', fontWeight: 700, color: '#dc2626', marginTop: '0.2rem' }}>
+              {metrics?.expiring_count || 0} Batches
+            </div>
+            <div style={{ fontSize: '0.75rem', color: '#991b1b', marginTop: '0.2rem' }}>
+              Expiring within next 30 days
+            </div>
+          </div>
+        </div>
+
+        {/* Pending POs */}
+        <div
+          className="erp-card"
+          style={{ cursor: 'pointer' }}
+          onClick={() => navigate('/purchases')}
+        >
+          <div className="erp-card-body" style={{ padding: '0.85rem 1rem' }}>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', fontWeight: 600 }}>
+              PENDING PURCHASE ORDERS
+            </div>
+            <div style={{ fontSize: '1.35rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '0.2rem' }}>
+              {metrics?.pending_po_count || 0} Orders
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
+              Awaiting supplier goods receipt
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Two Column Layout: Payment Modes Breakdown & Top Selling Products */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+          gap: '1.25rem',
+          marginBottom: '1.25rem',
+        }}
+      >
+        {/* Payment Breakup */}
+        <div className="erp-card">
+          <div className="erp-card-header">
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>Payment Method Breakdown</h3>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Registered sales tender</span>
+          </div>
+          <div className="erp-card-body">
+            {paymentBreakup.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-muted)' }}>
+                No payment data for this period
+              </div>
+            ) : (
+              <table className="erp-table">
+                <thead>
+                  <tr>
+                    <th>Payment Mode</th>
+                    <th className="text-center">Bills</th>
+                    <th className="text-right">Total Amount</th>
+                    <th className="text-right">Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {paymentBreakup.map((p) => {
+                    const totalSales = metrics?.revenue || 1;
+                    const share = ((p.total / totalSales) * 100).toFixed(1);
+                    return (
+                      <tr key={p.mode}>
+                        <td style={{ textTransform: 'capitalize', fontWeight: 600 }}>{p.mode}</td>
+                        <td className="text-center">{p.count}</td>
+                        <td className="text-right text-mono font-bold">
+                          ₹{p.total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                        </td>
+                        <td className="text-right text-mono">{share}%</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        {/* Top Products */}
+        <div className="erp-card">
+          <div className="erp-card-header">
+            <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600 }}>Top Selling Products</h3>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Highest sales volume</span>
+          </div>
+          <div className="erp-card-body">
+            {topProducts.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '1.5rem', color: 'var(--text-muted)' }}>
+                No sales recorded for this period
+              </div>
+            ) : (
+              <table className="erp-table">
+                <thead>
+                  <tr>
+                    <th>Product</th>
+                    <th className="text-center">Units Sold</th>
+                    <th className="text-right">Revenue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {topProducts.map((p, idx) => (
+                    <tr key={p.product + idx}>
+                      <td style={{ fontWeight: 500 }}>{p.product}</td>
+                      <td className="text-center">{p.quantity}</td>
+                      <td className="text-right text-mono font-bold">
+                        ₹{p.sales.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Low Stock Watchlist */}
+      {lowStockItems.length > 0 && (
+        <div className="erp-card">
+          <div className="erp-card-header" style={{ backgroundColor: '#fffbeb' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <IconAlert size={18} color="#b45309" />
+              <h3 style={{ margin: 0, fontSize: '0.95rem', fontWeight: 600, color: '#92400e' }}>
+                Low Stock Watchlist ({lowStockItems.length} items requiring replenishment)
+              </h3>
+            </div>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => navigate('/purchases')}
+            >
+              <IconPurchases size={14} />
+              <span>Create Purchase Order</span>
+            </button>
+          </div>
+          <div className="erp-card-body" style={{ padding: 0 }}>
+            <table className="erp-table">
+              <thead>
+                <tr>
+                  <th>Product Name</th>
+                  <th>Barcode</th>
+                  <th className="text-center">Current Stock</th>
+                  <th className="text-center">Min Threshold</th>
+                  <th className="text-center">Status</th>
+                  <th className="text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lowStockItems.slice(0, 8).map((item) => (
+                  <tr key={item.id}>
+                    <td style={{ fontWeight: 600 }}>{item.name}</td>
+                    <td className="text-mono" style={{ fontSize: '0.8rem' }}>{item.barcode}</td>
+                    <td className="text-center text-mono font-bold" style={{ color: '#dc2626' }}>
+                      {item.stock ?? 0}
+                    </td>
+                    <td className="text-center text-mono">{item.min_stock}</td>
+                    <td className="text-center">
+                      <span className="badge badge-danger">Reorder Required</span>
+                    </td>
+                    <td className="text-right">
+                      <button
+                        type="button"
+                        className="btn btn-outline btn-sm"
+                        onClick={() => navigate('/purchases')}
+                      >
+                        Order
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
-    </div>
+    </AppLayout>
   );
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: '1rem', background: '#f5f5f5', minHeight: '100vh' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' },
-  rangeSelect: {},
-  select: { padding: '0.5rem', fontSize: '1rem', borderRadius: '4px', border: '1px solid #ddd' },
-  statsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '1rem', marginBottom: '1rem' },
-  alertsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem', marginBottom: '0.5rem' },
-  alertActions: { display: 'flex', gap: '0.5rem', marginBottom: '1rem' },
-  alertBtn: { padding: '0.25rem 0.75rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' },
-  chartsGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem', marginBottom: '1rem' },
-  chartCard: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
-  chartTitle: { margin: '0 0 0.75rem 0', fontSize: '1rem', color: '#333' },
-  quickActions: { background: 'white', padding: '1rem', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' },
-  actionButtons: { display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginTop: '0.5rem' },
-  actionBtn: { padding: '0.75rem 1rem', background: '#1976d2', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' },
-};

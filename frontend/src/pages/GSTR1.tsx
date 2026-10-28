@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { invoiceApi, reportApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import { formatDate, formatMoney, thisMonthISO } from '../utils/format';
@@ -131,11 +132,11 @@ export default function GSTR1Reports() {
   if (!user || user.role === 'cashier') return null;
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h1>GST Reports (GSTR-1)</h1>
-        <button onClick={() => navigate('/')} style={styles.backBtn}>← Back</button>
-      </div>
+    <AppLayout>
+      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 700 }}>GST Statutory Returns (GSTR-1 & GSTR-3B)</h1>
+        </div>
 
       <div style={styles.controls}>
         <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={styles.input} />
@@ -221,7 +222,8 @@ export default function GSTR1Reports() {
       ) : (
         <p>No data for selected month</p>
       )}
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

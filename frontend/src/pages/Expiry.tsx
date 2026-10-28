@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { expiryApi, productApi, uomApi } from '../services/api';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { FormError, Select } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
@@ -277,15 +278,13 @@ export default function Expiry() {
   const windowLabel = DAY_OPTIONS.find((d) => d.value === days)?.label.replace('Next ', '') ?? `${days} days`;
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Expiry tracking</h1>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Batch Expiry & Shelf-Life Tracker</h1>
+        </div>
 
-      <div style={styles.summary}>
+        <div style={styles.summary}>
         <Stat
           label={`Expiring in ${windowLabel}`}
           value={String(totals.soon)}
@@ -379,7 +378,8 @@ export default function Expiry() {
           )
         }
       />
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

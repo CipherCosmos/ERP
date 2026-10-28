@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { purchaseApi, stockApi, terminalApi } from '../services/api';
 import { ReorderItem } from '../types';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { Column, DataTable } from '../components/DataTable';
 import { FormError, NumberInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
@@ -254,16 +255,14 @@ export default function Reorder() {
   if (!user || user.role === 'cashier') return null;
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>What to reorder</h1>
-        <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/purchases')}>
-          Purchase orders →
-        </button>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Low Stock Reorder & Auto-PO Generator</h1>
+          <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/purchases')}>
+            Purchase orders →
+          </button>
+        </div>
 
       <FormError error={error} />
       {placed && (
@@ -338,7 +337,8 @@ export default function Reorder() {
           </section>
         );
       })}
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 

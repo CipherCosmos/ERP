@@ -30,3 +30,6 @@ backups/
 .ops-check.env
 ci.env
 partial.env
+
+# Binaries air rebuilds on each save (make backend-watch)
+backend/tmp/

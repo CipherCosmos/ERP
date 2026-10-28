@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
 import { priceChangeApi } from '../services/api';
 import { PriceMovement } from '../types';
+import { AppLayout } from '../components/Layout/AppLayout';
 import { DataTable, Column } from '../components/DataTable';
 import { Select } from '../components/Form';
 import { color, font, space, ui } from '../theme';
@@ -148,16 +149,14 @@ export default function PriceChanges() {
   if (!user || user.role === 'cashier') return null;
 
   return (
-    <div style={ui.page}>
-      <div style={styles.header}>
-        <button onClick={() => navigate('/')} style={ui.button}>
-          ← Back
-        </button>
-        <h1 style={styles.h1}>Price changes</h1>
-        <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/products')}>
-          Products →
-        </button>
-      </div>
+    <AppLayout>
+      <div style={{ ...ui.page, padding: 0 }}>
+        <div style={styles.header}>
+          <h1 style={styles.h1}>Product Price Movements & Margin Audit</h1>
+          <button style={{ ...ui.button, marginLeft: 'auto' }} onClick={() => navigate('/products')}>
+            Products →
+          </button>
+        </div>
 
       <div style={styles.summary}>
         <Stat label="Changes" value={String(totals.changes)} />
@@ -189,7 +188,8 @@ export default function PriceChanges() {
           />
         }
       />
-    </div>
+      </div>
+    </AppLayout>
   );
 }
 
