@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '../stores/appStore';
-import { categoryApi, productApi, uomApi, vendorApi } from '../services/api';
+import { categoryApi, productApi, storeApi, uomApi, vendorApi } from '../services/api';
 import { DataTable, Column } from '../components/DataTable';
 import { Modal } from '../components/Modal';
 import { Checkbox, Field, FormError, FormGrid, NumberInput, Select, TextInput } from '../components/Form';
 import { badge, color, font, space, ui } from '../theme';
 import { formatDate, formatMoney, formatQty } from '../utils/format';
-import { PriceMovement } from '../types';
+import { PriceMovement, Store } from '../types';
+import { RapidBarcodeIntakeModal } from '../components/RapidBarcodeIntakeModal';
+import { IconBarcode } from '../components/Icons';
 
 interface UnitRow {
   id: string;
@@ -83,6 +85,12 @@ export default function Products() {
 
   const [editing, setEditing] = useState<ProductRow | null>(null);
   const [creating, setCreating] = useState(false);
+  const [rapidIntakeOpen, setRapidIntakeOpen] = useState(false);
+  const [stores, setStores] = useState<Store[]>([]);
+
+  useEffect(() => {
+    storeApi.list().then((res) => setStores((res.data as Store[]) || [])).catch(() => {});
+  }, []);
   const [detailTab, setDetailTab] = useState<'details' | 'units' | 'history'>('details');
   const [history, setHistory] = useState<PriceMovement[] | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
@@ -552,6 +560,13 @@ export default function Products() {
         <div style={{ marginLeft: 'auto', display: 'flex', gap: space.sm }}>
           <button style={ui.button} onClick={() => navigate('/categories')}>Categories</button>
           <button style={ui.button} onClick={() => navigate('/products/import')}>Import a catalogue</button>
+          <button
+            style={{ ...ui.button, display: 'inline-flex', alignItems: 'center', gap: space.xs }}
+            onClick={() => setRapidIntakeOpen(true)}
+            title="Scan & Intake Stock Rapidly"
+          >
+            <IconBarcode /> Rapid Intake
+          </button>
         </div>
       </div>
 
@@ -1081,6 +1096,16 @@ export default function Products() {
           </div>
         )}
       </Modal>
+
+      <RapidBarcodeIntakeModal
+        isOpen={rapidIntakeOpen}
+        onClose={() => setRapidIntakeOpen(false)}
+        store={store}
+        categories={categories}
+        uoms={uoms}
+        stores={stores.length > 0 ? stores : (store ? [store] : [])}
+        onProductSaved={loadProducts}
+      />
     </div>
   );
 }

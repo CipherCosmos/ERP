@@ -109,8 +109,13 @@ func NewRouter(svcs app.Services, cfg Config) (*gin.Engine, func(), error) {
 
 	r.Use(global.Limit())
 
+	health := healthHandler(cfg.DB)
+	r.GET("/health", health)
+	r.HEAD("/health", health)
+
 	api := r.Group("/api/v1")
-	api.GET("/health", healthHandler(cfg.DB))
+	api.GET("/health", health)
+	api.HEAD("/health", health)
 
 	if svcs.Auth == nil {
 		return r, shutdown, nil

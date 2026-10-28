@@ -14,6 +14,10 @@ interface DashboardData {
   avg_bill_value: number;
   low_stock_count: number;
   credit_outstanding: number;
+  inventory_valuation?: number;
+  expiring_count?: number;
+  pending_po_count?: number;
+  vendor_payables?: number;
 }
 
 interface TopProduct {
@@ -137,28 +141,55 @@ export default function Dashboard() {
             />
           </div>
 
-          {/* Alerts row */}
+          {/* Alerts & Operational Stats row */}
           <div style={styles.alertsGrid}>
+            <StatCard
+              title="Stock Valuation"
+              value={`\u20B9${data?.inventory_valuation != null ? data.inventory_valuation.toFixed(2) : '0.00'}`}
+              color="#0284c7"
+            />
             <StatCard
               title="Low Stock Items"
               value={data?.low_stock_count || 0}
-              subtitle={data?.low_stock_count > 0 ? 'Click Inventory to review' : 'All good'}
-              color={data?.low_stock_count > 0 ? '#ff5722' : '#4caf50'}
+              subtitle={(data?.low_stock_count || 0) > 0 ? 'Click Inventory to review' : 'All good'}
+              color={(data?.low_stock_count || 0) > 0 ? '#ff5722' : '#4caf50'}
+            />
+            <StatCard
+              title="Expiring (30 Days)"
+              value={data?.expiring_count || 0}
+              subtitle={(data?.expiring_count || 0) > 0 ? 'Expiring soon' : 'None expiring'}
+              color={(data?.expiring_count || 0) > 0 ? '#d97706' : '#4caf50'}
             />
             <StatCard
               title="Credit Outstanding"
               value={`\u20B9${data?.credit_outstanding?.toFixed(2) || '0.00'}`}
-              subtitle={data?.credit_outstanding > 0 ? 'Click Credit to review' : 'All clear'}
-              color={data?.credit_outstanding > 0 ? '#e91e63' : '#4caf50'}
+              subtitle={(data?.credit_outstanding || 0) > 0 ? 'Click Credit to review' : 'All clear'}
+              color={(data?.credit_outstanding || 0) > 0 ? '#e91e63' : '#4caf50'}
+            />
+            <StatCard
+              title="Vendor Payables"
+              value={`\u20B9${data?.vendor_payables != null ? data.vendor_payables.toFixed(2) : '0.00'}`}
+              color="#7c3aed"
+            />
+            <StatCard
+              title="Pending POs"
+              value={data?.pending_po_count || 0}
+              color="#0d9488"
             />
           </div>
 
           {/* Alert action buttons */}
           <div style={styles.alertActions}>
-            {data?.low_stock_count > 0 && (
+            {(data?.low_stock_count || 0) > 0 && (
               <button style={styles.alertBtn} onClick={() => navigate('/inventory')}>View Low Stock</button>
             )}
-            {data?.credit_outstanding > 0 && (
+            {(data?.expiring_count || 0) > 0 && (
+              <button style={styles.alertBtn} onClick={() => navigate('/expiry')}>View Expiring</button>
+            )}
+            {(data?.pending_po_count || 0) > 0 && (
+              <button style={styles.alertBtn} onClick={() => navigate('/purchases')}>View Purchases</button>
+            )}
+            {(data?.credit_outstanding || 0) > 0 && (
               <button style={styles.alertBtn} onClick={() => navigate('/credit')}>View Credit</button>
             )}
           </div>

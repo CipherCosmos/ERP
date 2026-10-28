@@ -86,6 +86,8 @@ export interface UnitOfMeasure {
   is_active: boolean;
 }
 
+export type UOM = UnitOfMeasure;
+
 export interface Category {
   id: string;
   name: string;

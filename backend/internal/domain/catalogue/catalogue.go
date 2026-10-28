@@ -420,6 +420,7 @@ type ProductFilter struct {
 	StoreID    uuid.UUID
 	CategoryID *uuid.UUID
 	Barcode    string
+	Brand      string
 	Search     string
 	Limit      int
 	// IncludeInactive lists deactivated products too, for the management

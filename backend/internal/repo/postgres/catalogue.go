@@ -560,6 +560,10 @@ func (r *Catalogue) ListProducts(ctx context.Context, q platform.Querier, f cata
 		args = append(args, f.Barcode)
 		fmt.Fprintf(&sb, ` AND p.barcode = $%d`, len(args))
 	}
+	if f.Brand != "" {
+		args = append(args, f.Brand)
+		fmt.Fprintf(&sb, ` AND p.brand = $%d`, len(args))
+	}
 	if f.Unclassified {
 		// COALESCE because both columns are nullable and a blank is the same
 		// absence as a NULL here.
@@ -570,7 +574,7 @@ func (r *Catalogue) ListProducts(ctx context.Context, q platform.Querier, f cata
 		// Postgres's is not, so a straight port would have made every product
 		// search silently case-sensitive — no error, just missing results.
 		args = append(args, "%"+escapeLike(f.Search)+"%")
-		fmt.Fprintf(&sb, ` AND (p.name ILIKE $%d ESCAPE '\' OR p.barcode ILIKE $%d ESCAPE '\')`, len(args), len(args))
+		fmt.Fprintf(&sb, ` AND (p.name ILIKE $%d ESCAPE '\' OR p.barcode ILIKE $%d ESCAPE '\' OR p.brand ILIKE $%d ESCAPE '\')`, len(args), len(args), len(args))
 	}
 
 	limit := f.Limit

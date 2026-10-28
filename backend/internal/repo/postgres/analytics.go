@@ -129,6 +129,25 @@ func (r *Analytics) LowStockCount(ctx context.Context, q platform.Querier, store
 	return n, nil
 }
 
+// DashboardExtensions reads inventory valuation, expiring batches, pending POs, and vendor payables.
+func (r *Analytics) DashboardExtensions(ctx context.Context, q platform.Querier, storeID uuid.UUID) (valuation money.Money, expiring int64, pendingPO int64, payables money.Money, err error) {
+	row := q.QueryRowContext(ctx, `
+		SELECT
+			COALESCE((SELECT SUM(total_cost) FROM stock WHERE store_id = $1 AND quantity > 0), 0),
+			COALESCE((SELECT COUNT(*) FROM stock WHERE store_id = $1 AND quantity > 0 AND expiry_date IS NOT NULL AND expiry_date <= CURRENT_DATE + INTERVAL '30 days'), 0),
+			COALESCE((SELECT COUNT(*) FROM purchase_orders WHERE store_id = $1 AND status = 'pending'), 0),
+			GREATEST(0,
+				COALESCE((SELECT SUM(total) FROM purchase_orders WHERE store_id = $1 AND status != 'cancelled'), 0) -
+				COALESCE((SELECT SUM(amount) FROM vendor_payments WHERE store_id = $1), 0)
+			)
+	`, storeID)
+	var val, pay money.Money
+	if err := row.Scan(&val, &expiring, &pendingPO, &pay); err != nil {
+		return money.Zero(), 0, 0, money.Zero(), fmt.Errorf("read dashboard extensions: %w", platform.MapError(err))
+	}
+	return val, expiring, pendingPO, pay, nil
+}
+
 // ---------------------------------------------------------------------------
 // Line-level aggregates
 // ---------------------------------------------------------------------------

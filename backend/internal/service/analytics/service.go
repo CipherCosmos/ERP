@@ -96,6 +96,7 @@ var reportSnapshot = &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly
 type Repository interface {
 	SalesTotals(ctx context.Context, q platform.Querier, storeID uuid.UUID, rng domain.Range) (domain.SalesTotals, error)
 	LowStockCount(ctx context.Context, q platform.Querier, storeID uuid.UUID) (int64, error)
+	DashboardExtensions(ctx context.Context, q platform.Querier, storeID uuid.UUID) (valuation money.Money, expiring int64, pendingPO int64, payables money.Money, err error)
 
 	SalesByCategory(ctx context.Context, q platform.Querier, storeID uuid.UUID, rng domain.Range) ([]domain.CategorySales, error)
 	TopProducts(ctx context.Context, q platform.Querier, storeID uuid.UUID, rng domain.Range, limit int) ([]domain.ProductSales, error)
@@ -227,15 +228,22 @@ func (s *Service) DashboardForRange(ctx context.Context, storeID uuid.UUID, rng 
 	}
 
 	var (
-		totals   domain.SalesTotals
-		lowStock int64
+		totals    domain.SalesTotals
+		lowStock  int64
+		valuation money.Money
+		expiring  int64
+		pendingPO int64
+		payables  money.Money
 	)
 	err := s.db.InTxOpts(ctx, reportSnapshot, func(ctx context.Context, tx platform.Tx) error {
 		var err error
 		if totals, err = s.repo.SalesTotals(ctx, tx, storeID, rng); err != nil {
 			return err
 		}
-		lowStock, err = s.repo.LowStockCount(ctx, tx, storeID)
+		if lowStock, err = s.repo.LowStockCount(ctx, tx, storeID); err != nil {
+			return err
+		}
+		valuation, expiring, pendingPO, payables, err = s.repo.DashboardExtensions(ctx, tx, storeID)
 		return err
 	})
 	if err != nil {
@@ -250,7 +258,7 @@ func (s *Service) DashboardForRange(ctx context.Context, storeID uuid.UUID, rng 
 		return domain.Dashboard{}, fmt.Errorf("read credit outstanding: %w", err)
 	}
 
-	return domain.NewDashboard(rng, totals, lowStock, outstanding), nil
+	return domain.NewDashboard(rng, totals, lowStock, outstanding, valuation, expiring, pendingPO, payables), nil
 }
 
 // ---------------------------------------------------------------------------

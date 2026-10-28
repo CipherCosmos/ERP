@@ -228,29 +228,44 @@ func (t SalesTotals) AverageBill() money.Money {
 
 // Dashboard is the shop's headline figures for a period.
 type Dashboard struct {
-	Range         Range       `json:"date_range"`
-	Revenue       money.Money `json:"revenue"`
-	GSTCollected  money.Money `json:"gst_collected"`
-	DiscountGiven money.Money `json:"discount_given"`
-	InvoiceCount  int64       `json:"invoice_count"`
-	AverageBill   money.Money `json:"avg_bill_value"`
-	LowStockCount int64       `json:"low_stock_count"`
-	// CreditOutstanding is what customers of this store still owe. It is read
-	// live on every request and never served from a cache — see the service.
-	CreditOutstanding money.Money `json:"credit_outstanding"`
+	Range              Range       `json:"date_range"`
+	Revenue            money.Money `json:"revenue"`
+	GSTCollected       money.Money `json:"gst_collected"`
+	DiscountGiven      money.Money `json:"discount_given"`
+	InvoiceCount       int64       `json:"invoice_count"`
+	AverageBill        money.Money `json:"avg_bill_value"`
+	LowStockCount      int64       `json:"low_stock_count"`
+	CreditOutstanding  money.Money `json:"credit_outstanding"`
+	InventoryValuation money.Money `json:"inventory_valuation"`
+	ExpiringCount      int64       `json:"expiring_count"`
+	PendingPOCount     int64       `json:"pending_po_count"`
+	VendorPayables     money.Money `json:"vendor_payables"`
 }
 
 // NewDashboard assembles the dashboard from its parts.
-func NewDashboard(r Range, totals SalesTotals, lowStock int64, creditOutstanding money.Money) Dashboard {
+func NewDashboard(
+	r Range,
+	totals SalesTotals,
+	lowStock int64,
+	creditOutstanding money.Money,
+	valuation money.Money,
+	expiring int64,
+	pendingPO int64,
+	payables money.Money,
+) Dashboard {
 	return Dashboard{
-		Range:             r,
-		Revenue:           totals.Total,
-		GSTCollected:      totals.TaxCollected(),
-		DiscountGiven:     totals.Discount,
-		InvoiceCount:      totals.InvoiceCount,
-		AverageBill:       totals.AverageBill(),
-		LowStockCount:     lowStock,
-		CreditOutstanding: creditOutstanding,
+		Range:              r,
+		Revenue:            totals.Total,
+		GSTCollected:       totals.TaxCollected(),
+		DiscountGiven:      totals.Discount,
+		InvoiceCount:       totals.InvoiceCount,
+		AverageBill:        totals.AverageBill(),
+		LowStockCount:      lowStock,
+		CreditOutstanding:  creditOutstanding,
+		InventoryValuation: valuation,
+		ExpiringCount:      expiring,
+		PendingPOCount:     pendingPO,
+		VendorPayables:     payables,
 	}
 }
 

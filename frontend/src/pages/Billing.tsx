@@ -14,6 +14,9 @@ import { pendingCount } from '../services/offline/outbox';
 import { recordSale } from '../services/offline/sales';
 import { Product, Customer, SaleUnit } from '../types';
 import { formatMoney } from '../utils/format';
+import { BarcodeScannerModal } from '../components/BarcodeScannerModal';
+import { useBarcodeScanner } from '../hooks/useBarcodeScanner';
+import { IconCamera } from '../components/Icons';
 
 function mapBarcodeLookupToProduct(data: Record<string, unknown>): Product {
   return {
@@ -85,6 +88,26 @@ function sellableUnits(product: any, useWholesale: boolean): SaleUnit[] {
 const lineKeyOf = (item: { product: { id: string }; unit?: { id: string } }) =>
   `${item.product.id}::${item.unit?.id ?? ''}`;
 
+function playBeep() {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1760, ctx.currentTime);
+    gain.gain.setValueAtTime(0.12, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.1);
+  } catch {
+    /* Audio disabled or policy blocked */
+  }
+}
+
 export default function Billing() {
   const navigate = useNavigate();
   const { user, store, cart, addToCart, updateCartQuantity, updateCartDiscount, removeFromCart, clearCart } = useAppStore();
@@ -129,6 +152,9 @@ export default function Billing() {
     }
   );
   const [showHeld, setShowHeld] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const scanHandlerRef = useRef<(code: string) => void>();
+  useBarcodeScanner({ onScan: (code) => scanHandlerRef.current?.(code) });
   /** The line whose discount is being edited, if any. */
   const [discountFor, setDiscountFor] = useState<string | null>(null);
 
@@ -203,6 +229,7 @@ export default function Billing() {
    * unit means guessing at the price.
    */
   const addProduct = (product: Product, unitId?: string, qty = 1) => {
+    playBeep();
     const units = sellableUnits(product, useWholesalePrices);
     const chosen = unitId ? units.find((u) => u.id === unitId) : undefined;
     if (chosen) {
@@ -348,6 +375,7 @@ export default function Billing() {
         const scanned = d.scanned_unit as Record<string, unknown> | undefined;
         const scannedPrice = d.scanned_price as Record<string, unknown> | undefined;
         if (scanned?.id) {
+          playBeep();
           const ws = Number(scannedPrice?.wholesale_sell_price) || 0;
           addToCart({
             product,
@@ -381,6 +409,8 @@ export default function Billing() {
     }
     setSearch('');
   };
+
+  scanHandlerRef.current = handleBarcodeScan;
 
   const calculateTotals = () => {
     let subtotal = 0;
@@ -863,21 +893,43 @@ export default function Billing() {
         </div>
       )}
       <div style={styles.leftPanel}>
-        <div style={styles.searchBar}>
-          <input
-            ref={barcodeRef}
-            type="text"
-            placeholder="Scan barcode or search product..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && search) {
-                handleBarcodeScan(search);
-              }
+        <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', alignItems: 'center' }}>
+          <div style={{ flex: 1 }}>
+            <input
+              ref={barcodeRef}
+              type="text"
+              placeholder="Scan barcode (F2) or search product..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && search) {
+                  handleBarcodeScan(search);
+                }
+              }}
+              style={styles.searchInput}
+              autoFocus
+            />
+          </div>
+          <button
+            type="button"
+            className="btn btn-outline"
+            style={{
+              padding: '0.75rem 1rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.45rem',
+              fontSize: '0.9rem',
+              borderRadius: '4px',
+              border: '1px solid #cbd5e1',
+              backgroundColor: '#fff',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
             }}
-            style={styles.searchInput}
-            autoFocus
-          />
+            onClick={() => setScannerOpen(true)}
+            title="Scan Barcode with Camera"
+          >
+            <IconCamera /> Scan Camera
+          </button>
         </div>
 
         {filteredProducts.length > 0 && (
@@ -1305,6 +1357,15 @@ export default function Billing() {
           </div>
         </div>
       )}
+
+      <BarcodeScannerModal
+        isOpen={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onScan={(code) => {
+          setScannerOpen(false);
+          handleBarcodeScan(code);
+        }}
+      />
     </div>
   );
 }

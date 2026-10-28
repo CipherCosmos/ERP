@@ -453,6 +453,7 @@ func (h *Catalogue) ListProducts(c *gin.Context) {
 		StoreID:         storeID,
 		CategoryID:      categoryID,
 		Barcode:         c.Query("barcode"),
+		Brand:           c.Query("brand"),
 		Search:          c.Query("search"),
 		Limit:           intQuery(c, "limit", 0),
 		IncludeInactive: c.Query("include_inactive") == "true",
